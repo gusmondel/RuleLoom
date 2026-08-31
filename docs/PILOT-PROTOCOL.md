@@ -16,9 +16,11 @@ it may not contain enough mature labels even for a credible retrospective test.
 Any later controlled-visibility question requires a separately pre-registered
 experiment and is outside this runbook.
 
-RuleLoom 0.1 learns propositionalized Horn clauses over Boolean unary predicates
-of one change. It is not full relational ILP: it does not learn relations among
-files, types, people, or other entities, recursion, or invented predicates.
+RuleLoom learns propositionalized Horn clauses over Boolean unary predicates of
+one change. It is not full relational ILP: it does not learn relations among
+files, types, people, or other entities, recursion, or invented predicates. The
+learner and lifecycle are language-neutral; a versioned evidence pack decides
+which deterministic predicates a repository exposes.
 
 ## Pre-registration record
 
@@ -32,6 +34,10 @@ record with the pilot artifacts if the repository owner's data policy permits it
 | Unit of observation | Canonical `git_commit` for retrospective learning; configured `git_worktree` snapshots keyed by one stable PR/task/change ID for prospective assessment; never pool unit kinds in one cohort |
 | Prediction time | Exact point at which all feature facts are available |
 | Target | One outcome with a single operational definition |
+| Evidence profile | Schema version plus one exact `pack@version`; use `generic_changes@1` unless the experiment has pre-registered a supported technology-specific pack |
+| Included paths | Repository-relative `evidence.include_paths` globs defining the eligible component(s) |
+| Excluded paths | Repository-relative `evidence.exclude_paths` globs defining generated, vendored, or otherwise ineligible material |
+| Change thresholds | Exact `large_change_churn`, `multi_file_count`, and `metadata_file_limit` values |
 | Positive label | Independent event that counts as positive |
 | Negative label | Maturity condition plus absence of a positive event |
 | Unknown label | Every case not yet mature or not adjudicable |
@@ -46,9 +52,14 @@ record with the pilot artifacts if the repository owner's data policy permits it
 | Cost guardrails | Latency, tokens, reviewer time, extra validations, false alarms |
 | Stop conditions | Conditions listed below, customized before data inspection |
 
-Do not redefine the target, window, or primary metric after seeing which choice
-produces a better rule. If the definition must change, start a new experiment ID
-and preserve the previous result.
+Choose and record the pack version, path scope, and change thresholds before
+inspecting outcomes or collecting the experiment dataset. Do not redefine the
+target, window, primary metric, pack version, scope, or thresholds after seeing
+which choice produces a better rule. If any of those definitions must change,
+start a new experiment ID and dataset, recollect the observations under the new
+profile, and preserve the previous result. Never append observations from two
+evidence profiles to one dataset or pool their candidates, predictions, or
+metrics.
 
 ## Recommended first target
 
@@ -57,8 +68,8 @@ narrow and tied to the normal review process:
 
 - **Positive:** after the prediction point, an independent CI or human review
   signal identifies a concrete missing validation and the change is updated with
-  that validation (for example, an accepted request for a widget/integration
-  test or a reproducible failing scenario).
+  that validation (for example, an accepted request for an automated test,
+  contract check, or reproducible failing scenario).
 - **Negative:** the chosen review/maturation event completes without such a
   signal.
 - **Unknown:** review is ongoing, the outcome is ambiguous, the change was
@@ -74,13 +85,16 @@ defects in one label makes the learned rule difficult to interpret.
 
 ## Phase 0 — privacy and workflow mapping
 
-Before installation:
+Before initializing the target repository:
 
 - confirm that local processing of commit paths, metadata, and labels is allowed;
 - identify how commits map to pull requests, CI outcomes, review requests, and
   later incidents;
 - choose the observation unit and target contract above;
-- list generated predicates and verify that each uses only decision-time data;
+- run `ruleloom packs list`, choose one exact `pack@version`, list its generated
+  predicates, and verify that each uses only decision-time data;
+- pre-register included/excluded path globs and the large-change, multi-file,
+  and metadata-sampling thresholds before inspecting outcome labels;
 - decide which retrospective `.ruleloom` artifacts data policy permits; keep
   shadow and prediction material out of any checkout visible to the agent or
   outcome adjudicator;
@@ -95,25 +109,79 @@ source excerpts unless they are explicitly required and authorized.
 
 ## Phase 1 — install and instrumentation
 
-From the target repository:
+Install a reviewed release, tag, or immutable commit. For example, from a
+reviewed local checkout:
 
 ```bash
 uv tool install /absolute/path/to/ruleloom
-ruleloom init . --project example-project
+ruleloom --version
+ruleloom packs list
+```
+
+Then initialize the observer checkout of the target repository with an exact
+pack version and without agent integration:
+
+```bash
+cd /absolute/path/to/observer-checkout
+ruleloom init . --project example-project \
+  --pack generic_changes --pack-version 1 --agents none
 ruleloom doctor
 ruleloom readiness
 ```
 
 `ruleloom init` requires an existing Git repository with either
 `remote.origin.url` configured or at least one commit; establish one of those
-identity anchors first. Version 0.1 supports macOS and Linux, not Windows,
-because its storage lock uses POSIX `fcntl`.
+identity anchors first. The current release supports macOS and Linux, not
+Windows, because its storage lock uses POSIX `fcntl`. `generic_changes@1` is the
+schema-v2 default and provides language-neutral change-shape, test-path,
+documentation, CI, and dependency-file facts. Passing no `--pack-version`
+selects the latest registered version, but a pre-registered pilot should always
+pin it explicitly.
 
-Inspect `.ruleloom/config.json` before collection. Freeze its `experiment_id`,
-derived `repository_id`, `prediction_unit`, `outcome_definition`, target, and
-pack: RuleLoom hashes these as the evidence protocol recorded on every
-observation. The initial deterministic
-learner is the appropriate smoke-test engine because it has no external solver.
+Inspect `.ruleloom/config.json` before collection. New pilots use
+`schema_version: 2`. Freeze its `experiment_id`, derived `repository_id`,
+`prediction_unit`, `outcome_definition`, target, `pack`, `pack_version`, and the
+entire `evidence` object. RuleLoom includes the resolved extractor and all these
+fields in the evidence-protocol hash recorded on every observation. A typical
+language-neutral evidence profile is:
+
+```json
+{
+  "schema_version": 2,
+  "pack": "generic_changes",
+  "pack_version": 1,
+  "evidence": {
+    "include_paths": ["**"],
+    "exclude_paths": [],
+    "large_change_churn": 200,
+    "multi_file_count": 3,
+    "metadata_file_limit": 512
+  }
+}
+```
+
+Treat this as an excerpt: retain the remaining fields generated by `init`.
+Adjust scope and thresholds once, before collection, when repository structure
+requires it. An include scope such as `services/api/**` prevents facts from an
+unrelated component entering the same observation; excludes can remove
+generated or vendored subtrees. Do not edit the profile after the first
+observation. Validation rejects observations whose protocol hash, pack version,
+or extractor does not match the configured profile; do not work around that by
+rewriting hashes or records.
+
+The include scope defines eligible outcome units. Schema-v2 direct collection
+fails closed for a unit that mixes included and outside-include files; backfill
+skips mixed units and units with no included files. Widen the pre-registered
+include set when an outcome legitimately covers several components, or use a
+component-specific change/outcome unit. Configured excludes within the include
+set do not make a unit mixed and are intended for generated or vendored paths.
+Archive each backfill's JSON audit fields: `examined`, `eligible`, `skipped`,
+`skipped_by_reason`, the bounded `skipped_preview`, its truncation count, and
+`skipped_manifest_hash`. These preserve the sampling denominator and distinguish
+mixed units from wholly out-of-scope units without emitting an unbounded list.
+
+The initial deterministic learner is the appropriate smoke-test engine because
+it has no external solver.
 All managed data/artifact paths must remain below `.ruleloom/` and must not
 overlap. Configure Popper only as a separately pinned experiment with
 `max_rules=1` and `bootstrap_runs=0`, after provisioning its compatible Python
@@ -142,15 +210,52 @@ ruleloom collect git --working-tree --ref HEAD
 
 These collection modes are mutually exclusive.
 
-Manually audit at least a positive example, a negative example, a change with no
-Flutter code, and a multi-file change. For every audited observation check:
+Before labeling, manually audit at least a small in-scope change, an eligible
+change with no pack-specific signal, a multi-file or large change, and both
+sides of every include/exclude boundary. For every audited observation check:
 
 - ID and timestamp identify the intended change;
-- fact evidence points to the correct path/hunk;
+- fact evidence points to the correct path, changed-line marker, or threshold
+  calculation, as applicable to the selected pack;
 - no predicate uses information created after prediction time;
 - missing facts mean “verified absent,” not “extractor failed”;
+- only in-scope files contribute to counts, thresholds, or pack predicates;
+- `scope_outside_files` is zero; mixed and wholly out-of-scope units were not
+  admitted to the dataset;
 - labels remain `unknown` until the registered maturity event;
 - rerunning collection produces the same facts and no duplicate ID.
+
+For a large or multi-file change, audit `files_changed`, churn totals,
+`change_manifest_hash`, `metadata_files_truncated`, and the sampled
+`changed_files`/`file_churn` fields. RuleLoom keeps the totals and manifest hash
+for the full in-scope change while bounding the human-readable path metadata by
+`metadata_file_limit` and a byte cap. This truncates only stored previews, not
+the normalized diff input supplied to the pack or the evidence used to compute
+facts. Human-readable `fact_evidence.evidence` explanations are also bounded;
+when necessary they carry a SHA-256 truncation marker rather than silently
+claiming to be the complete textual provenance. If a selected pack needs
+changed-line content and RuleLoom cannot collect that input completely within
+its safety limits, collection fails closed instead of recording partial facts.
+Never interpret a failed content extraction as absence of a predicate. The
+content collector also bounds total wall time, Git subprocess batches, output
+bytes, and argument bytes. Non-UTF-8 Git paths are rejected rather than decoded
+lossily.
+
+If the experiment specifically needs Flutter/Dart signals, initialize a fresh
+observer checkout and separate dataset with this profile instead:
+
+```bash
+ruleloom init . --project example-flutter-pilot \
+  --pack flutter_testing --pack-version 2 --agents none
+```
+
+`flutter_testing@2` layers deterministic Dart/Flutter predicates on the shared
+language-neutral facts. In that profile, additionally audit a Dart change that
+should match a Flutter-specific predicate, one that should not, and an
+out-of-scope Dart change. `flutter_testing@1` is frozen compatibility behavior
+for reproducing schema-v1 work, not the default for a new pilot. Do not mix the
+generic and Flutter profiles; compare them only as separately pre-registered
+experiments.
 
 Record extraction coverage as:
 
@@ -171,7 +276,7 @@ ruleloom label <observation-id> positive \
   --kind review \
   --source "review/<stable-reference>" \
   --available-at "2026-01-15T15:00:00Z" \
-  --reason "Independent review required an additional widget test"
+  --reason "Independent review required an additional automated validation"
 
 ruleloom label <observation-id> negative \
   --target needs_extra_validation \
@@ -207,7 +312,9 @@ multi-reviewer event history.
 
 Historical reconstruction is useful but vulnerable to survivorship bias and
 incomplete linkage. Report its results separately from prospectively collected
-labels.
+labels. After importing labels, audit at least one positive and one negative
+against their independent sources; this is an outcome audit, separate from the
+pre-label extraction audit in Phase 1.
 
 ## Phase 3 — retrospective temporal evaluation
 
@@ -277,9 +384,10 @@ the following attributable prospective evidence:
   prospective matches, temporal point precision at least 0.75, and a
   prospective Wilson 95% precision lower bound of at least 0.70.
 
-Dataset/config/pack/target identity, candidate reproduction, the recorded shadow
-transition, temporal sample/metrics completeness, and the prospective/per-clause
-requirements are non-overridable. The positive-count, aggregate retrospective
+Dataset/config/pack-version/scope/threshold/target identity, candidate
+reproduction, the recorded shadow transition, temporal sample/metrics
+completeness, and the prospective/per-clause requirements are non-overridable.
+The positive-count, aggregate retrospective
 performance, baseline, and stability thresholds can be overridden only where
 the implementation classifies them as non-blocking, with a recorded note. These
 defaults are operating/readiness heuristics, not a power calculation or
@@ -349,8 +457,9 @@ Repeated assessments remain in the immutable log, but `report` groups by exact
 `unit_id`. It resolves a single consistent outcome across observations whose
 `source.change_id` is that unit, requires the outcome to mature later, and never
 pools different experiments, repositories, observation units, outcome
-definitions, targets, packs, extractors, configurations, or policy sets. Shadow
-elapsed days are likewise calculated from earliest retained unit predictions.
+definitions, targets, pack versions, extractors, include/exclude scopes,
+thresholds, configurations, or policy sets. Shadow elapsed days are likewise
+calculated from earliest retained unit predictions.
 
 `assess` also writes a non-versioned, hash-bound recording attestation in
 Git-private metadata for this checkout/worktree, within five minutes of
@@ -384,8 +493,8 @@ per-rule report:
 | Coverage | Stable units whose earliest prediction matched / all stable units in one policy set | How often guidance would exist |
 | Abstention | Stable units whose earliest prediction had no match / all stable units in one policy set | Selectivity; in the binary outcome metric it is the negative prediction |
 
-The following are required manual pilot measurements in version 0.1, not fields
-produced by `ruleloom report`:
+The following are required manual pilot measurements in the current CLI, not
+fields produced by `ruleloom report`:
 
 | Metric | Definition | Why it matters |
 |---|---|---|
@@ -460,6 +569,8 @@ policies is also recorded: it forms an empty-policy set and correctly abstains.
 
 ```text
 date:
+experiment_id / evidence_protocol_hash:
+pack@version / include-exclude scope / thresholds:
 policy_set_hash:
 eligible changes:
 observations collected / failures:
@@ -497,6 +608,10 @@ Pause and repair instrumentation when:
 - extraction coverage falls below the pre-registered gate;
 - any feature uses post-outcome information;
 - absence is being confused with extractor failure;
+- content required by the selected pack cannot be collected completely;
+- mixed or out-of-scope units cannot be linked to a component-specific outcome;
+- observations were collected under different pack versions, scopes, or
+  thresholds;
 - commit/PR/outcome linkage is unreliable;
 - duplicate observations or non-deterministic facts appear;
 - labels cannot be applied consistently;
@@ -506,7 +621,7 @@ Keep RuleLoom in research-only shadow mode when:
 
 - its holdout MCC does not beat the best of the four registered baselines;
 - a separately pre-registered uncertainty analysis remains too inconclusive for
-  a decision (RuleLoom 0.1 does not compute intervals itself);
+  a decision (the current CLI does not compute intervals itself);
 - stability is below the registered gate;
 - clauses encode obvious confounders or are not actionable;
 - useful coverage is negligible;

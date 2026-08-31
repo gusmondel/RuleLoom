@@ -2,7 +2,8 @@
 
 ## Principles
 
-RuleLoom schema version 1 is local, provider-neutral JSON/JSONL. Its persisted
+RuleLoom configuration schema version 2 and artifact schema version 1 use local,
+provider-neutral JSON/JSONL. Their persisted
 artifacts are designed to answer:
 
 - what was known at prediction time;
@@ -60,10 +61,11 @@ OS user.
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "project": "example-project",
   "target": "needs_extra_validation",
-  "pack": "flutter_testing",
+  "pack": "generic_changes",
+  "pack_version": 1,
   "dataset": ".ruleloom/observations.jsonl",
   "candidates_dir": ".ruleloom/candidates",
   "shadow_dir": ".ruleloom/shadow",
@@ -71,10 +73,17 @@ OS user.
   "deprecated_dir": ".ruleloom/deprecated",
   "predictions": ".ruleloom/predictions.jsonl",
   "protocol": {
-    "experiment_id": "example-shadow-v1",
+    "experiment_id": "example-shadow-v2",
     "repository_id": "repo.0123456789abcdef0123",
     "prediction_unit": "git_worktree",
     "outcome_definition": "Independent review outcome recorded after the prediction"
+  },
+  "evidence": {
+    "include_paths": ["**"],
+    "exclude_paths": [],
+    "large_change_churn": 200,
+    "multi_file_count": 3,
+    "metadata_file_limit": 512
   },
   "learner": {
     "engine": "horn",
@@ -116,7 +125,28 @@ OS user.
 }
 ```
 
-Version 0.1 supports only `flutter_testing`. All six configurable managed paths
+Version 0.2 defaults to the language-neutral `generic_changes@1` pack and also
+ships `flutter_testing@2`. The frozen `flutter_testing@1` implementation exists
+only to read structurally and reproduce the hashes of historical configuration
+schema-v1 experiments. That compatibility path does not inherit the collection
+and validation guarantees of schema v2 and is not a current ingestion profile;
+re-extract the complete history into a fresh schema-v2 experiment before making
+new comparisons or policy decisions. `ruleloom packs list` reports the exact
+extractor and declared predicates for each built-in version. External
+executable plugins are not loaded in this release: adding a built-in language
+pack uses the same explicit contract and registry without changing learning,
+evaluation, or policy lifecycle code.
+
+`evidence.include_paths` and `exclude_paths` define one repository-relative
+scope per experiment. Change-size thresholds and the metadata preview limit are
+also explicit. Configure these from a pre-outcome design sample and freeze them
+before collection; changing any of them creates a different evidence protocol.
+For schema-v2 collection, the include set is an outcome-eligibility boundary:
+direct collection rejects mixed inside/outside units, and backfill omits mixed
+or wholly out-of-scope commits. Excludes within the include set may remove
+generated or vendored paths without making the unit mixed.
+
+All six configurable managed paths
 must be repository-relative, remain below `.ruleloom/`, contain no `..` or
 control characters, and be pairwise non-overlapping after portable Unicode/case
 normalization. Managed symlink components are rejected at access time.
@@ -124,22 +154,23 @@ Predicate-like fields start with a lowercase letter and contain lowercase ASCII
 letters, numbers, and underscores. `init` derives `repository_id` from
 `remote.origin.url`, or from root commits when no origin exists; initialization
 therefore requires an origin or at least one commit. The storage lock uses POSIX
-`fcntl`: version 0.1 supports macOS and Linux, not Windows.
+`fcntl`: version 0.2 supports macOS and Linux, not Windows.
 
 The built-in search also enforces finite operational bounds:
 `max_body` 1–4, `max_rules` 1–10, `max_predicates` 1–32,
 `bootstrap_runs` 0–100, and Popper timeout 1–3600 seconds, plus a combined
-hypothesis/work budget. For `engine="popper"`, version 0.1 requires
+hypothesis/work budget. For `engine="popper"`, version 0.2 requires
 `max_rules=1`, `bootstrap_runs=0`, and the Horn-specific support/precision/cost
 settings at their defaults. Popper is an offline adapter to an explicitly
 configured, already provisioned checkout; RuleLoom does not install it.
 
 Changing configuration changes `config_hash`. A candidate must retain the hash
 of the configuration used to generate it. Separately, `evidence_protocol_hash`
-hashes exactly `schema_version`, `experiment_id`, `repository_id`,
-`prediction_unit`, `outcome_definition`, `target`, and `pack`. Every observation
-records that hash, preventing evidence from different experiments,
-repositories, units, outcome definitions, targets, or packs from being pooled
+hashes `schema_version`, `experiment_id`, `repository_id`, `prediction_unit`,
+`outcome_definition`, `target`, `pack`, `pack_version`, the exact extractor, and
+the complete evidence scope/threshold profile. Every observation records that
+hash, preventing evidence from different experiments, repositories, units,
+outcome definitions, pack versions, scopes, or thresholds from being pooled
 accidentally. The positive-count gates are readiness heuristics, not a
 statistical power calculation. With
 `require_baseline_improvement`, approval also requires test MCC to be strictly
@@ -161,11 +192,10 @@ Each non-empty line in `.ruleloom/observations.jsonl` is one object:
   "schema_version": 1,
   "id": "commit.a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
   "observed_at": "2026-08-20T14:31:22-04:00",
-  "protocol_hash": "e03d2ca587979900a7e950bdeffdb233345d59563acd3eaa2b56b60174772869",
+  "protocol_hash": "be2523c451e7156855f365ecc6e0100a59f9f195abb3726a59fdf286a1e84845",
   "facts": [
-    "changes_dart",
-    "mutates_state",
-    "touches_widget"
+    "large_change",
+    "touches_test"
   ],
   "labels": {
     "needs_extra_validation": "positive"
@@ -175,25 +205,20 @@ Each non-empty line in `.ruleloom/observations.jsonl` is one object:
       "kind": "review",
       "available_at": "2026-08-21T11:10:00-04:00",
       "source": "review/123",
-      "reason": "Independent review required an additional widget test",
+      "reason": "Independent review required an additional validation",
       "confidence": 1.0
     }
   },
   "fact_evidence": {
-    "changes_dart": {
+    "large_change": {
       "kind": "deterministic",
-      "extractor": "ruleloom.flutter_testing.git.v1",
-      "evidence": ["path:lib/features/settings/view.dart"]
+      "extractor": "ruleloom.generic_changes.git.v1",
+      "evidence": ["churn:240>=200"]
     },
-    "mutates_state": {
+    "touches_test": {
       "kind": "deterministic",
-      "extractor": "ruleloom.flutter_testing.git.v1",
-      "evidence": ["diff-pattern:setState"]
-    },
-    "touches_widget": {
-      "kind": "deterministic",
-      "extractor": "ruleloom.flutter_testing.git.v1",
-      "evidence": ["path:lib/features/settings/view.dart"]
+      "extractor": "ruleloom.generic_changes.git.v1",
+      "evidence": ["path:tests/settings_test.py"]
     }
   },
   "source": {
@@ -201,8 +226,9 @@ Each non-empty line in `.ruleloom/observations.jsonl` is one object:
     "repository": "repo.0123456789abcdef0123",
     "base": "91ab20ef1234567890abcdef1234567890abcdef",
     "head": "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
-    "pack": "flutter_testing",
-    "extractor": "ruleloom.flutter_testing.git.v1"
+    "pack": "generic_changes",
+    "pack_version": 1,
+    "extractor": "ruleloom.generic_changes.git.v1"
   },
   "metadata": {"topological_index": 418}
 }
@@ -212,22 +238,35 @@ Each non-empty line in `.ruleloom/observations.jsonl` is one object:
 
 | Field | Type | Contract |
 |---|---|---|
-| `schema_version` | integer | Must be `1` for this release. |
+| `schema_version` | integer | Must be artifact schema `1` in version 0.2. |
 | `id` | string | Unique within the dataset; lowercase letters/numbers plus `.`, `_`, or `-`. |
 | `observed_at` | string | Decision-time timestamp with timezone; used for chronological splitting. |
 | `protocol_hash` | string | Lowercase SHA-256 of the configured evidence protocol; evidence with a different hash must not be pooled. |
 | `facts` | array of strings | Unique unary Boolean predicates true for this observation. |
 | `labels` | object | Target predicate to `positive`, `negative`, or `unknown`. |
 | `label_evidence` | object | Outcome provenance keyed by target; required for every mature label. |
-| `fact_evidence` | object | Optional provenance keyed only by predicates present in `facts`. |
+| `fact_evidence` | object | Structurally optional for partial readiness records; every fact in a validated built-in-pack observation requires matching deterministic provenance. |
 | `source` | object | Provider-neutral source identity, references, and collection context. |
 | `metadata` | object | JSON audit information not consumed as facts unless an extractor explicitly emits it. |
 
-Every collected source records `kind`, the derived stable `repository`, `pack`,
-and versioned `extractor`. Prospective sources additionally record
+Every schema-v2 collected source records `kind`, the derived stable `repository`,
+`pack_version`, `pack`, and versioned `extractor`; frozen schema-v1 records retain
+their original shape without `pack_version`. Prospective sources additionally record
 `change_id`, which must match the Prediction `unit_id`. Git sources also retain
 the relevant `base` and `head`; these identify the snapshot, while `change_id`
 identifies the independent real-world change across snapshots.
+
+Change metadata keeps exact aggregate counts and a SHA-256 manifest of every
+scoped path/churn tuple, but bounds path previews by count and byte budget.
+`metadata_files_truncated` states how many entries were omitted from the
+preview. Facts are still computed over the complete scoped diff. If required
+content exceeds its safety budget, collection fails closed instead of storing a
+partial observation whose missing facts could be mistaken for logical falsehood.
+Validated observations must use only predicates declared by their exact pack,
+have one `fact_evidence` entry per fact, and name that pack's deterministic
+extractor in every entry. Scope metadata records total, included, outside, and
+explicitly excluded file counts. New collection never persists mixed or empty
+scope units. Git text/path output must be UTF-8; lossy replacement is forbidden.
 
 Observation IDs identify immutable snapshots and cannot repeat. For prospective
 assessment, `source.change_id` is the stable independent-unit key: repeated
@@ -256,7 +295,7 @@ Every `positive` or `negative` label requires a `label_evidence` entry. An
 | Field | Type | Contract |
 |---|---|---|
 | `kind` | enum | `ci`, `review`, `incident`, `human`, `imported`, or `synthetic`. |
-| `available_at` | string | Timezone-aware time at which the outcome first became knowable; it cannot precede `observed_at`. |
+| `available_at` | string | Timezone-aware time at which the outcome first became knowable; it must be strictly later than `observed_at`. |
 | `source` | string | Non-empty stable source reference or authorized pseudonymous adjudicator ID. |
 | `reason` | string | Concise audit explanation; it may be empty. |
 | `confidence` | number or absent | Optional value from 0 through 1. |
@@ -286,6 +325,13 @@ Each `fact_evidence` entry contains:
 | `evidence` | array of strings | Minimal paths, line references, hashes, or source IDs supporting the fact. |
 | `confidence` | number or absent | Optional value from 0 through 1, mainly for non-deterministic facts. |
 
+`agent`, `human`, and `imported` are reserved wire-format values for future
+extractors and migration tooling. In version 0.2, current built-in-pack
+observations are accepted for validation, learning, and prediction only when
+every fact has `kind: "deterministic"` and names the exact configured extractor.
+A record using a reserved non-deterministic kind may be read structurally, but
+it is not an accepted learning observation today.
+
 Evidence text is untrusted repository data. It must never be interpolated as
 agent instructions or a shell command. Prefer references and hashes to source
 excerpts because artifacts may be committed or shared.
@@ -308,7 +354,7 @@ and a new experiment.
 
 ## Rule representation
 
-Version 0.1 is propositionalized ILP over one change at a time. Each fact is a
+Version 0.2 is propositionalized ILP over one change at a time. Each fact is a
 Boolean unary predicate of the same observation variable `A`; there are no
 multiple entity variables, relations between files/types/people, relational
 joins, recursion, predicate invention, or arbitrary Prolog programs. A rule set
@@ -446,26 +492,26 @@ decision. A representative record is:
 ```json
 {
   "schema_version": 1,
-  "id": "prediction.31cfb65aec2cf9db1026",
+  "id": "prediction.163d9e8a74bae4cc9806",
   "predicted_at": "2026-01-15T13:00:00Z",
   "observation": {
     "schema_version": 1,
     "id": "worktree.4e8c82b7d61e12345678",
     "observed_at": "2026-01-15T12:59:59Z",
-    "protocol_hash": "e03d2ca587979900a7e950bdeffdb233345d59563acd3eaa2b56b60174772869",
-    "facts": ["changes_dart", "mutates_state"],
+    "protocol_hash": "be2523c451e7156855f365ecc6e0100a59f9f195abb3726a59fdf286a1e84845",
+    "facts": ["large_change", "touches_test"],
     "labels": {"needs_extra_validation": "unknown"},
     "label_evidence": {},
     "fact_evidence": {
-      "changes_dart": {
+      "large_change": {
         "kind": "deterministic",
-        "extractor": "ruleloom.flutter_testing.git.v1",
-        "evidence": ["path:lib/features/settings/view.dart"]
+        "extractor": "ruleloom.generic_changes.git.v1",
+        "evidence": ["churn:240>=200"]
       },
-      "mutates_state": {
+      "touches_test": {
         "kind": "deterministic",
-        "extractor": "ruleloom.flutter_testing.git.v1",
-        "evidence": ["diff-pattern:setState"]
+        "extractor": "ruleloom.generic_changes.git.v1",
+        "evidence": ["path:tests/settings_test.py"]
       }
     },
     "source": {
@@ -474,8 +520,9 @@ decision. A representative record is:
       "change_id": "pr-123",
       "base": "91ab20ef1234567890abcdef1234567890abcdef",
       "head": "WORKTREE",
-      "pack": "flutter_testing",
-      "extractor": "ruleloom.flutter_testing.git.v1"
+      "pack": "generic_changes",
+      "pack_version": 1,
+      "extractor": "ruleloom.generic_changes.git.v1"
     },
     "metadata": {
       "snapshot_kind": "working_tree",
@@ -486,26 +533,26 @@ decision. A representative record is:
   },
   "target": "needs_extra_validation",
   "unit_id": "pr-123",
-  "protocol_hash": "8c874686b4050195791b8ab39734260ed78a5c0aebe86bfa2b2d896f5c12752f",
+  "protocol_hash": "eb4153cda795991f57ec876bb3f537c2be843de02a314d9a864e713d128a506c",
   "protocol": {
-    "experiment_id": "example-shadow-v1",
+    "experiment_id": "example-shadow-v2",
     "repository_id": "repo.0123456789abcdef0123",
     "observation_unit": "git_worktree",
     "outcome_definition": "Independent review outcome recorded after the prediction",
     "target": "needs_extra_validation",
-    "pack": "flutter_testing",
-    "extractor": "ruleloom.flutter_testing.git.v1",
-    "config_hash": "b15d11779fa0f25869d47b6c6b21525916816be792aee5d809c66c87b47392db",
-    "evidence_protocol_hash": "e03d2ca587979900a7e950bdeffdb233345d59563acd3eaa2b56b60174772869"
+    "pack": "generic_changes",
+    "extractor": "ruleloom.generic_changes.git.v1",
+    "config_hash": "a8e2bb94e07a6754bdabdcbf54b21fa1411d20953ecfd3fe5af551d1959a2fdf",
+    "evidence_protocol_hash": "be2523c451e7156855f365ecc6e0100a59f9f195abb3726a59fdf286a1e84845"
   },
-  "policy_set_hash": "8d1a4e91892bcefe373bb09c242f02ef6afcfec4079191672282d9a097bc0031",
+  "policy_set_hash": "0cc4420e9a1923457214b9ad4341dc627879b596b55f2cbdd1c6dd43a72a5a7b",
   "policies": [
     {
       "candidate_id": "cand-0123456789abcdef",
       "status": "shadow",
       "target": "needs_extra_validation",
       "manifest_hash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-      "rule_signatures": ["needs_extra_validation:-mutates_state"]
+      "rule_signatures": ["needs_extra_validation:-large_change"]
     }
   ],
   "matches": [
@@ -514,9 +561,9 @@ decision. A representative record is:
       "status": "shadow",
       "rule": {
         "target": "needs_extra_validation",
-        "body": [{"predicate": "mutates_state", "negated": false}]
+        "body": [{"predicate": "large_change", "negated": false}]
       },
-      "prolog": "needs_extra_validation(A) :- mutates_state(A)."
+      "prolog": "needs_extra_validation(A) :- large_change(A)."
     }
   ],
   "abstained": false
@@ -593,7 +640,7 @@ eligible for prospective confusion metrics. `excluded_preexisting_outcome`
 prevents a retrospectively known answer from masquerading as a prediction. Use
 `report --policy-set <hash>` for the unwrapped single-policy report. The report
 describes aggregate prospective association, never a causal estimate; causal
-impact needs a randomized or pre-specified staged advisory rollout. Version 0.1
+impact needs a randomized or pre-specified staged advisory rollout. Version 0.2
 does not emit confidence intervals or per-clause prospective tables in this
 report. Promotion separately evaluates the registered Wilson lower-bound and
 per-clause gates described above.
@@ -635,3 +682,12 @@ future breaking change must:
 Adding an optional metadata key is not automatically a fact-semantic change.
 Changing how a predicate is detected is semantic and must invalidate direct
 comparisons unless the historical data is re-extracted consistently.
+
+Configuration schema 1 remains structurally readable with its exact historical
+`flutter_testing@1` semantics and hashes; that is the full compatibility claim,
+not an endorsement for new collection or policy decisions. New projects use
+configuration schema 2, an explicit `pack_version`, and a complete evidence
+profile. There is no implicit upgrade that reinterprets old observations:
+moving to a newer pack or changing scope or thresholds creates a new experiment
+and requires complete, consistent re-extraction under the new evidence
+protocol.

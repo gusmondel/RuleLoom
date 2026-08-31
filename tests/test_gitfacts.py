@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import math
 import os
 import subprocess
@@ -7,18 +8,24 @@ from pathlib import Path
 
 import pytest
 
+import ruleloom.gitfacts as gitfacts_module
+from ruleloom.config import EvidenceConfig, ProtocolConfig, RuleLoomConfig
 from ruleloom.gitfacts import (
     EXTRACTOR,
     DiffEvidence,
     FileChange,
     GitFactsError,
     backfill_commits,
+    backfill_commits_detailed,
     collect_snapshot,
     collect_worktree,
     extract_flutter_testing_facts,
+    extract_generic_change_facts,
     repository_identity,
 )
-from ruleloom.models import LabelValue
+from ruleloom.models import LabelValue, Observation, canonical_json
+from ruleloom.packs.flutter_testing import EXTRACTOR as FLUTTER_EXTRACTOR
+from ruleloom.project import validate_observations
 
 PROTOCOL_HASH = "e" * 64
 
@@ -111,7 +118,13 @@ def test_collect_snapshot_extracts_deterministic_flutter_evidence(
     repo, base, head = flutter_repo
 
     observation = collect_snapshot(
-        repo, base, head, protocol_hash=PROTOCOL_HASH, target="needs_extra_validation"
+        repo,
+        base,
+        head,
+        protocol_hash=PROTOCOL_HASH,
+        target="needs_extra_validation",
+        pack="flutter_testing",
+        pack_version=2,
     )
 
     assert observation.labels == {"needs_extra_validation": LabelValue.UNKNOWN}
@@ -129,7 +142,7 @@ def test_collect_snapshot_extracts_deterministic_flutter_evidence(
     assert "auth" not in observation.facts
     assert set(observation.fact_evidence) == set(observation.facts)
     assert all(item.kind == "deterministic" for item in observation.fact_evidence.values())
-    assert all(item.extractor == EXTRACTOR for item in observation.fact_evidence.values())
+    assert all(item.extractor == FLUTTER_EXTRACTOR for item in observation.fact_evidence.values())
     assert all(item.evidence for item in observation.fact_evidence.values())
 
     assert observation.metadata["files_changed"] == 2
@@ -171,9 +184,104 @@ def test_backfill_is_chronological_and_never_infers_labels(
 def test_collection_is_reproducible(flutter_repo: tuple[Path, str, str]) -> None:
     repo, base, head = flutter_repo
 
-    assert collect_snapshot(repo, base, head, protocol_hash=PROTOCOL_HASH) == collect_snapshot(
-        repo, base, head, protocol_hash=PROTOCOL_HASH
+    first = collect_snapshot(repo, base, head, protocol_hash=PROTOCOL_HASH)
+    second = collect_snapshot(repo, base, head, protocol_hash=PROTOCOL_HASH)
+
+    assert first == second
+    assert first.source["pack"] == "flutter_testing"
+    assert "pack_version" not in first.source
+    assert first.source["extractor"] == "ruleloom.flutter_testing.git.v1"
+
+
+def test_legacy_config_and_bare_collector_defaults_remain_compatible(
+    flutter_repo: tuple[Path, str, str],
+) -> None:
+    repo, base, head = flutter_repo
+    config = RuleLoomConfig(
+        project="LegacyApi",
+        protocol=ProtocolConfig(repository_id=repository_identity(repo)),
     )
+    observation = collect_snapshot(
+        repo,
+        base,
+        head,
+        protocol_hash=config.evidence_protocol_hash,
+        repository_id=config.protocol.repository_id,
+    )
+
+    validate_observations([observation], config)
+
+
+def test_flutter_v1_recollection_preserves_legacy_observation_shape(tmp_path: Path) -> None:
+    repo = tmp_path / "legacy"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "ruleloom@example.test")
+    _git(repo, "config", "user.name", "RuleLoom Test")
+    _write(repo / "README.md", "# Legacy\n")
+    base = _commit(repo, "Initial", "2026-01-01T10:00:00Z")
+    _write(repo / "lib/controller.dart", "void update() { ref.state = 1; }\n")
+    message = "Legacy subject\n\nLegacy body"
+    head = _commit(repo, message, "2026-01-02T10:00:00Z")
+
+    observation = collect_snapshot(
+        repo,
+        base,
+        head,
+        protocol_hash=PROTOCOL_HASH,
+        pack="flutter_testing",
+        pack_version=1,
+    )
+
+    assert observation.metadata["commit_message"] == message
+    assert "commit_message_hash" not in observation.metadata
+    assert "scope_include" not in observation.metadata
+    assert observation.source == {
+        "kind": "git_range",
+        "repository": repository_identity(repo),
+        "base": base,
+        "head": head,
+        "pack": "flutter_testing",
+        "extractor": "ruleloom.flutter_testing.git.v1",
+    }
+    assert observation.source["extractor"] == EXTRACTOR
+
+
+def test_flutter_v1_rejects_configurable_evidence_collection(
+    flutter_repo: tuple[Path, str, str],
+) -> None:
+    repo, base, head = flutter_repo
+    profile = EvidenceConfig(include_paths=("lib/**",))
+    expected = "flutter_testing@1 only supports the default evidence configuration"
+
+    with pytest.raises(GitFactsError, match=expected):
+        collect_snapshot(
+            repo,
+            base,
+            head,
+            protocol_hash=PROTOCOL_HASH,
+            pack="flutter_testing",
+            pack_version=1,
+            evidence_config=profile,
+        )
+    with pytest.raises(GitFactsError, match=expected):
+        collect_worktree(
+            repo,
+            head,
+            protocol_hash=PROTOCOL_HASH,
+            pack="flutter_testing",
+            pack_version=1,
+            evidence_config=profile,
+        )
+    with pytest.raises(GitFactsError, match=expected):
+        backfill_commits(
+            repo,
+            1,
+            protocol_hash=PROTOCOL_HASH,
+            pack="flutter_testing",
+            pack_version=1,
+            evidence_config=profile,
+        )
 
 
 def test_collection_verifies_configured_repository_identity(
@@ -230,8 +338,20 @@ def test_collect_worktree_includes_tracked_and_untracked_flutter_changes(
 """,
     )
 
-    first = collect_worktree(repo, head, protocol_hash=PROTOCOL_HASH)
-    second = collect_worktree(repo, head, protocol_hash=PROTOCOL_HASH)
+    first = collect_worktree(
+        repo,
+        head,
+        protocol_hash=PROTOCOL_HASH,
+        pack="flutter_testing",
+        pack_version=2,
+    )
+    second = collect_worktree(
+        repo,
+        head,
+        protocol_hash=PROTOCOL_HASH,
+        pack="flutter_testing",
+        pack_version=2,
+    )
 
     assert first.id == second.id
     assert first.facts == second.facts
@@ -246,6 +366,77 @@ def test_collect_worktree_includes_tracked_and_untracked_flutter_changes(
     assert first.source["head"] == "WORKTREE"
     assert first.metadata["files_changed"] == 2
     assert first.labels == {"needs_extra_validation": LabelValue.UNKNOWN}
+
+
+def test_collect_worktree_rejects_lossy_untracked_content_decode(
+    flutter_repo: tuple[Path, str, str],
+) -> None:
+    repo, _, head = flutter_repo
+    invalid = repo / "lib/invalid.dart"
+    invalid.write_bytes(b"void update() {\n  state = \xff;\n}\n")
+
+    with pytest.raises(GitFactsError, match="content file is not valid UTF-8"):
+        collect_worktree(
+            repo,
+            head,
+            protocol_hash=PROTOCOL_HASH,
+            pack="flutter_testing",
+            pack_version=2,
+        )
+
+
+@pytest.mark.parametrize(("pack_version", "expected_internal"), [(1, 1), (2, 0)])
+def test_worktree_reports_untracked_internal_files_without_using_them_as_evidence(
+    flutter_repo: tuple[Path, str, str],
+    pack_version: int,
+    expected_internal: int,
+) -> None:
+    repo, _, head = flutter_repo
+    _write(repo / "lib/screens/checkout.dart", "void update() { state = 1; }\n")
+    _write(repo / ".ruleloom/local.json", "{}\n")
+
+    observation = collect_worktree(
+        repo,
+        head,
+        protocol_hash=PROTOCOL_HASH,
+        pack="flutter_testing",
+        pack_version=pack_version,
+    )
+
+    assert observation.metadata["excluded_internal_files"] == expected_internal
+    assert observation.metadata["excluded_internal_paths"] == (
+        [".ruleloom/local.json"] if pack_version == 1 else []
+    )
+    assert observation.metadata["files_changed"] == 1
+
+
+def test_current_worktree_identity_ignores_ruleloom_internal_churn(
+    flutter_repo: tuple[Path, str, str],
+) -> None:
+    repo, _, head = flutter_repo
+    _write(repo / "lib/screens/checkout.dart", "void update() { state = 1; }\n")
+    before = collect_worktree(
+        repo,
+        head,
+        protocol_hash=PROTOCOL_HASH,
+        pack="generic_changes",
+        pack_version=1,
+    )
+    _write(repo / ".ruleloom/observations.jsonl", '{"self":"generated"}\n')
+    _write(repo / ".ruleloom/.observations.jsonl.lock", "lock\n")
+    after = collect_worktree(
+        repo,
+        head,
+        protocol_hash=PROTOCOL_HASH,
+        pack="generic_changes",
+        pack_version=1,
+    )
+
+    assert before.id == after.id
+    assert before.facts == after.facts
+    assert before.fact_evidence == after.fact_evidence
+    assert before.metadata == after.metadata
+    assert after.metadata["excluded_internal_files"] == 0
 
 
 def test_worktree_identity_includes_base_even_when_trees_are_identical(
@@ -271,7 +462,7 @@ def test_pure_extractor_marks_threshold_and_contract_facts() -> None:
             FileChange("lib/models/account.dart", additions=0, deletions=0),
             FileChange("assets/logo.png", additions=0, deletions=0),
         ),
-        dart_patch="""@@ -0,0 +1,2 @@
+        content_patch="""@@ -0,0 +1,2 @@
 +final auth = FirebaseAuth.instance;
 +final account = Account.fromJson(payload);
 """,
@@ -296,7 +487,7 @@ def test_empty_or_binary_only_diff_has_zero_entropy() -> None:
     facts, _, metadata = extract_flutter_testing_facts(
         DiffEvidence(
             changes=(FileChange("assets/logo.png", additions=0, deletions=0),),
-            dart_patch="",
+            content_patch="",
         )
     )
 
@@ -313,7 +504,7 @@ def test_excludes_ruleloom_generated_paths_from_change_facts() -> None:
                 FileChange(".agents/skills/ruleloom/SKILL.md", additions=100, deletions=0),
                 FileChange("lib/item.dart", additions=1, deletions=0),
             ),
-            dart_patch="+final item = Item.fromJson(data);",
+            content_patch="+final item = Item.fromJson(data);",
         )
     )
 
@@ -323,8 +514,345 @@ def test_excludes_ruleloom_generated_paths_from_change_facts() -> None:
     assert metadata["excluded_internal_files"] == 2
 
 
+def test_generic_pack_is_language_neutral() -> None:
+    python = DiffEvidence(
+        changes=(FileChange("tests/test_service.py", additions=250, deletions=0),)
+    )
+    typescript = DiffEvidence(
+        changes=(FileChange("tests/service.test.ts", additions=250, deletions=0),)
+    )
+
+    python_facts, _, python_metadata = extract_generic_change_facts(python)
+    typescript_facts, _, typescript_metadata = extract_generic_change_facts(typescript)
+
+    assert python_facts == typescript_facts == frozenset({"touches_test", "large_change"})
+    assert python_metadata["churn"] == typescript_metadata["churn"] == 250
+
+
+def test_flutter_v2_detects_bare_riverpod_state_without_local_variable_false_positive() -> None:
+    bare_assignment = DiffEvidence(
+        changes=(FileChange("lib/controller.dart", additions=1, deletions=0),),
+        content_patch="+state = const AsyncLoading();",
+    )
+    local_variable = DiffEvidence(
+        changes=(FileChange("lib/controller.dart", additions=1, deletions=0),),
+        content_patch="+final state = const AsyncLoading();",
+    )
+    comparisons = DiffEvidence(
+        changes=(FileChange("lib/controller.dart", additions=2, deletions=0),),
+        content_patch="+if (state == value) {}\n+if (ref.state == value) {}",
+    )
+
+    bare_facts, bare_provenance, _ = extract_flutter_testing_facts(bare_assignment)
+    local_facts, _, _ = extract_flutter_testing_facts(local_variable)
+    comparison_facts, _, _ = extract_flutter_testing_facts(comparisons)
+
+    assert "mutates_state" in bare_facts
+    assert bare_provenance["mutates_state"].extractor == "ruleloom.flutter_testing.git.v2"
+    assert "mutates_state" not in local_facts
+    assert "mutates_state" not in comparison_facts
+
+
+def test_collection_scope_rejects_mixed_units_and_backfill_skips_ineligible(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "monorepo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "ruleloom@example.test")
+    _git(repo, "config", "user.name", "RuleLoom Test")
+    _write(repo / "README.md", "# Monorepo\n")
+    base = _commit(repo, "Initial", "2026-01-01T10:00:00Z")
+    _write(repo / "apps/mobile/lib/controller.dart", "void update() {\n  state = 1;\n}\n")
+    _write(repo / "apps/mobile/test/controller_test.dart", "void main() {}\n")
+    _write(repo / "apps/web/lib/payment.dart", "void pay() { Stripe.checkout(); }\n")
+    head = _commit(repo, "Cross component", "2026-01-02T10:00:00Z")
+
+    profile = EvidenceConfig(
+        include_paths=("apps/mobile/**",),
+        large_change_churn=100,
+        multi_file_count=3,
+    )
+    with pytest.raises(GitFactsError, match="mixes files inside and outside"):
+        collect_snapshot(
+            repo,
+            base,
+            head,
+            protocol_hash=PROTOCOL_HASH,
+            pack="flutter_testing",
+            pack_version=2,
+            evidence_config=profile,
+        )
+
+    _write(repo / "apps/mobile/lib/controller.dart", "void update() {\n  state = 2;\n}\n")
+    _write(
+        repo / "apps/mobile/test/controller_test.dart",
+        "void main() { testWidgets('x', (_) {}); }\n",
+    )
+    pure_mobile = _commit(repo, "Mobile only", "2026-01-03T10:00:00Z")
+    observation = collect_snapshot(
+        repo,
+        head,
+        pure_mobile,
+        protocol_hash=PROTOCOL_HASH,
+        pack="flutter_testing",
+        pack_version=2,
+        evidence_config=profile,
+    )
+
+    _write(repo / "apps/web/lib/payment.dart", "void pay() { Stripe.refund(); }\n")
+    web_only = _commit(repo, "Web only", "2026-01-04T10:00:00Z")
+    report = backfill_commits_detailed(
+        repo,
+        4,
+        protocol_hash=PROTOCOL_HASH,
+        pack="flutter_testing",
+        pack_version=2,
+        evidence_config=profile,
+    )
+    eligible = list(report.observations)
+
+    assert observation.metadata["files_changed"] == 2
+    assert observation.metadata["scope_include"] == ["apps/mobile/**"]
+    assert observation.metadata["scope_outside_files"] == 0
+    assert {"changes_dart", "touches_test", "mutates_state"} <= observation.facts
+    assert "payment" not in observation.facts
+    assert "multi_file_change" not in observation.facts
+    assert [item.source["head"] for item in eligible] == [pure_mobile]
+    assert report.examined == 4
+    assert report.eligible == 1
+    assert report.skipped == 3
+    assert report.skipped_no_in_scope_files == 2
+    assert report.skipped_mixed_scope == 1
+    assert report.skipped_preview == (
+        (base, "no_in_scope_files"),
+        (head, "mixed_scope"),
+        (web_only, "no_in_scope_files"),
+    )
+    assert len(report.skipped_manifest_hash) == 64
+    assert (
+        backfill_commits(
+            repo,
+            4,
+            protocol_hash=PROTOCOL_HASH,
+            pack="flutter_testing",
+            pack_version=2,
+            evidence_config=profile,
+        )
+        == eligible
+    )
+
+
+def test_worktree_uses_git_glob_semantics_for_tracked_and_untracked_paths(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "glob-scope"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "ruleloom@example.test")
+    _git(repo, "config", "user.name", "RuleLoom Test")
+    _write(repo / "apps/mobile/lib/excluded_tracked.dart", "int value = 1;\n")
+    _write(repo / "apps/mobile/lib/deeper/included_tracked.dart", "int value = 1;\n")
+    base = _commit(repo, "Initial", "2026-01-01T10:00:00Z")
+    _write(repo / "apps/mobile/lib/excluded_tracked.dart", "int value = 2;\n")
+    _write(repo / "apps/mobile/lib/deeper/included_tracked.dart", "int value = 2;\n")
+    _write(repo / "apps/mobile/lib/excluded_untracked.dart", "int value = 3;\n")
+    _write(repo / "apps/mobile/lib/deeper/included_untracked.dart", "int value = 3;\n")
+
+    observation = collect_worktree(
+        repo,
+        base,
+        protocol_hash=PROTOCOL_HASH,
+        pack="generic_changes",
+        pack_version=1,
+        evidence_config=EvidenceConfig(
+            include_paths=("apps/**",),
+            exclude_paths=("apps/mobile/lib/*",),
+        ),
+    )
+
+    assert observation.metadata["changed_files"] == [
+        "apps/mobile/lib/deeper/included_tracked.dart",
+        "apps/mobile/lib/deeper/included_untracked.dart",
+    ]
+    assert observation.metadata["scope_outside_files"] == 0
+    assert observation.metadata["scope_excluded_files"] == 2
+
+    (repo / "apps/mobile/lib/excluded_untracked.dart").unlink()
+    changed_scope_metadata = collect_worktree(
+        repo,
+        base,
+        protocol_hash=PROTOCOL_HASH,
+        pack="generic_changes",
+        pack_version=1,
+        evidence_config=EvidenceConfig(
+            include_paths=("apps/**",),
+            exclude_paths=("apps/mobile/lib/*",),
+        ),
+    )
+    assert changed_scope_metadata.metadata["scope_excluded_files"] == 1
+    assert changed_scope_metadata.id != observation.id
+
+
+def test_v2_preserves_posix_backslash_filename_for_literal_content_selection(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "backslash-path"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "ruleloom@example.test")
+    _git(repo, "config", "user.name", "RuleLoom Test")
+    _write(repo / "README.md", "# Example\n")
+    base = _commit(repo, "Initial", "2026-01-01T10:00:00Z")
+    unusual = "lib/.ruleloom\\controller.dart"
+    _write(repo / unusual, "void update() {\n  state = 1;\n}\n")
+    head = _commit(repo, "Unusual path", "2026-01-02T10:00:00Z")
+
+    observation = collect_snapshot(
+        repo,
+        base,
+        head,
+        protocol_hash=PROTOCOL_HASH,
+        pack="flutter_testing",
+        pack_version=2,
+    )
+
+    assert observation.metadata["changed_files"] == [unusual]
+    assert {"changes_dart", "mutates_state"} <= observation.facts
+
+
+def test_v2_metadata_is_bounded_for_megachanges() -> None:
+    changes = tuple(
+        FileChange(
+            f"packages/component_{index:05d}/lib/very_long_generated_feature_name_{index:05d}.dart",
+            additions=200,
+            deletions=20,
+        )
+        for index in range(6_700)
+    )
+    evidence = DiffEvidence(changes=changes)
+
+    facts, _, metadata = extract_flutter_testing_facts(evidence)
+    encoded = json.dumps(metadata, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+    assert {"large_change", "multi_file_change", "changes_dart"} <= facts
+    assert metadata["files_changed"] == 6_700
+    assert metadata["churn"] == 1_474_000
+    assert metadata["metadata_files_truncated"] > 0
+    assert len(metadata["change_manifest_hash"]) == 64
+    assert len(encoded) < 256 * 1024
+
+
+def test_complete_adversarial_megachange_observation_fits_jsonl_record() -> None:
+    control_run = "\x01" * 180
+    changes = tuple(
+        FileChange(
+            f"tests/control_{index:05d}_{control_run}.test.py",
+            additions=200,
+            deletions=20,
+        )
+        for index in range(6_700)
+    )
+    evidence = DiffEvidence(
+        changes=changes,
+        excluded_paths=tuple(
+            f".ruleloom/generated_{index:04d}_{control_run}.json" for index in range(1_000)
+        ),
+    )
+    facts, provenance, metadata = extract_generic_change_facts(
+        evidence,
+        EvidenceConfig(metadata_file_limit=10_000),
+    )
+    metadata.update(
+        {
+            "commit_timestamp": "2026-01-02T10:00:00Z",
+            "commit_message": "\x01" * 4_096,
+            "commit_message_hash": "a" * 64,
+            "commit_message_truncated": True,
+            "scope_include": ["**"],
+            "scope_exclude": [],
+        }
+    )
+    observation = Observation(
+        id="commit." + "a" * 40,
+        observed_at="2026-01-02T10:00:00Z",
+        protocol_hash=PROTOCOL_HASH,
+        facts=facts,
+        labels={"needs_extra_validation": LabelValue.UNKNOWN},
+        fact_evidence=provenance,
+        source={
+            "kind": "git_commit",
+            "repository": "repo.example",
+            "base": "b" * 40,
+            "head": "a" * 40,
+            "pack": "generic_changes",
+            "pack_version": 1,
+            "extractor": "ruleloom.generic_changes.git.v1",
+        },
+        metadata=metadata,
+    )
+
+    encoded = (canonical_json(observation.to_dict()) + "\n").encode("utf-8")
+
+    assert len(encoded) < 1024 * 1024
+    assert observation.metadata["metadata_files_truncated"] > 0
+
+
+def test_content_patch_has_global_batch_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[object, ...]] = []
+
+    def fake_git(*args: object, **_kwargs: object) -> str:
+        calls.append(args)
+        return ""
+
+    monkeypatch.setattr(gitfacts_module, "_git", fake_git)
+    monkeypatch.setattr(gitfacts_module, "_PATCH_PATH_BATCH", 1)
+    monkeypatch.setattr(gitfacts_module, "_MAX_CONTENT_PATCH_BATCHES", 2)
+
+    with pytest.raises(GitFactsError, match="more than 2 Git batches"):
+        gitfacts_module._content_patch(
+            Path("/unused"),
+            ("base", "head"),
+            ["one.dart", "two.dart", "three.dart"],
+        )
+
+    assert len(calls) == 2
+
+
+def test_content_path_batches_bound_argument_bytes() -> None:
+    paths = [f"lib/{index:04d}_" + "x" * 4_000 + ".dart" for index in range(100)]
+
+    batches = gitfacts_module._content_path_batches(paths)
+
+    assert len(batches) > 1
+    assert all(len(batch) <= gitfacts_module._PATCH_PATH_BATCH for batch in batches)
+    assert all(
+        sum(len(f":(literal){path}".encode()) + 1 for path in batch)
+        <= gitfacts_module._MAX_PATCH_PATHSPEC_BYTES
+        for batch in batches
+    )
+
+
+def test_collection_rejects_non_utf8_git_output_without_lossy_decoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        gitfacts_module,
+        "_run_git_capped",
+        lambda *_args, **_kwargs: (b"invalid_\xff.dart\x00", b"", 0),
+    )
+
+    with pytest.raises(GitFactsError, match="non-UTF-8"):
+        gitfacts_module._git(Path("/unused"), "status")
+
+
 def test_rejects_invalid_requests(tmp_path: Path) -> None:
     with pytest.raises(GitFactsError, match="does not exist"):
         collect_snapshot(tmp_path / "missing", "HEAD~1", "HEAD", protocol_hash=PROTOCOL_HASH)
-    with pytest.raises(GitFactsError, match="limit"):
-        backfill_commits(tmp_path, 0, protocol_hash=PROTOCOL_HASH)
+    for invalid in (0, True, 1.0, "1"):
+        with pytest.raises(GitFactsError, match="integer >= 1"):
+            backfill_commits(
+                tmp_path,
+                invalid,  # type: ignore[arg-type]
+                protocol_hash=PROTOCOL_HASH,
+            )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import json
 import shutil
 import sys
@@ -17,8 +18,9 @@ from ruleloom import __version__
 from ruleloom.agents import sync_agents
 from ruleloom.config import CONFIG_PATH, RuleLoomConfig, discover_root
 from ruleloom.gitfacts import (
+    BackfillReport,
     GitFactsError,
-    backfill_commits,
+    backfill_commits_detailed,
     collect_snapshot,
     collect_worktree,
 )
@@ -41,6 +43,7 @@ from ruleloom.models import (
     parse_timestamp,
     validate_subject,
 )
+from ruleloom.packs import available_packs, latest_pack_version
 from ruleloom.project import initialize_project, validate_observations, validate_project
 from ruleloom.reporting import build_pilot_report, build_pilot_reports
 from ruleloom.storage import (
@@ -64,7 +67,16 @@ def _json(value: object) -> None:
 
 def _root(args: argparse.Namespace) -> Path:
     configured = getattr(args, "root", None)
-    return discover_root(Path(configured) if configured else None)
+    if configured == "":
+        raise ModelError("--root must not be empty")
+    if configured is None:
+        return discover_root()
+    root = Path(configured).resolve()
+    if not root.is_dir():
+        raise ModelError(f"--root is not an existing directory: {root}")
+    if not (root / CONFIG_PATH).is_file():
+        raise ModelError(f"--root is not an initialized RuleLoom project: {root}")
+    return root
 
 
 def _project(args: argparse.Namespace) -> tuple[Path, RuleLoomConfig]:
@@ -100,13 +112,22 @@ def _external_popper_checkout(root: Path, config: RuleLoomConfig) -> Path:
 
 
 def _cmd_init(args: argparse.Namespace) -> int:
+    if args.path == "":
+        raise ModelError("init path must not be empty")
     selected = {
         "none": (),
         "all": ("codex", "claude"),
         "codex": ("codex",),
         "claude": ("claude",),
     }[args.agents]
-    result = initialize_project(Path(args.path), args.project, agents=selected)
+    result = initialize_project(
+        Path(args.path if args.path is not None else "."),
+        args.project,
+        pack=args.pack,
+        pack_version=args.pack_version,
+        schema_version=2,
+        agents=selected,
+    )
     print(f"Initialized RuleLoom in {result.root}")
     print(f"Config: {result.root / CONFIG_PATH}")
     if selected:
@@ -122,48 +143,72 @@ def _cmd_init(args: argparse.Namespace) -> int:
 
 def _cmd_collect_git(args: argparse.Namespace) -> int:
     root, config = _project(args)
+    audit: BackfillReport | None = None
     if args.last is not None:
-        observations = backfill_commits(
+        if args.head is not None:
+            raise ModelError("collect git --head is valid only with --base")
+        audit = backfill_commits_detailed(
             root,
             args.last,
             protocol_hash=config.evidence_protocol_hash,
             target=config.target,
-            ref=args.ref,
+            ref=args.ref if args.ref is not None else "HEAD",
             pack=config.pack,
+            pack_version=config.pack_version,
+            evidence_config=config.evidence,
             repository_id=config.protocol.repository_id,
         )
+        observations = list(audit.observations)
     elif args.working_tree:
+        if args.head is not None:
+            raise ModelError("collect git --head is valid only with --base")
         observations = [
             collect_worktree(
                 root,
-                args.ref,
+                args.ref if args.ref is not None else "HEAD",
                 protocol_hash=config.evidence_protocol_hash,
                 target=config.target,
                 pack=config.pack,
+                pack_version=config.pack_version,
+                evidence_config=config.evidence,
                 repository_id=config.protocol.repository_id,
             )
         ]
     else:
         if args.base is None:
             raise ModelError("collect git requires --last or --base")
+        if args.ref is not None:
+            raise ModelError("collect git --ref is valid only with --last or --working-tree")
         observations = [
             collect_snapshot(
                 root,
                 args.base,
-                args.head,
+                args.head if args.head is not None else "HEAD",
                 protocol_hash=config.evidence_protocol_hash,
                 target=config.target,
                 pack=config.pack,
+                pack_version=config.pack_version,
+                evidence_config=config.evidence,
                 repository_id=config.protocol.repository_id,
             )
         ]
     inserted, updated, observations = _persist_collected(dataset_path(root, config), observations)
+    if audit is None:
+        audit = BackfillReport(
+            observations=tuple(observations),
+            examined=1,
+            skipped_no_in_scope_files=0,
+            skipped_mixed_scope=0,
+            skipped_preview=(),
+            skipped_manifest_hash=hashlib.sha256().hexdigest(),
+        )
     _json(
         {
             "collected": len(observations),
             "inserted": inserted,
             "updated": updated,
             "ids": [item.id for item in observations],
+            **audit.to_dict(),
         }
     )
     return 0
@@ -222,11 +267,11 @@ def _cmd_label(args: argparse.Namespace) -> int:
         _label_one(
             observations,
             observation_id=args.observation_id,
-            target=args.target or config.target,
+            target=args.target if args.target is not None else config.target,
             value=LabelValue(args.value),
             kind=args.kind,
             source=args.source,
-            available_at=args.available_at or utc_now(as_of),
+            available_at=args.available_at if args.available_at is not None else utc_now(as_of),
             reason=args.reason,
             confidence=args.confidence,
             as_of=as_of,
@@ -302,6 +347,7 @@ def _cmd_learn(args: argparse.Namespace) -> int:
     if config.learner.engine == "popper":
         _external_popper_checkout(root, config)
     observations = load_observations(dataset_path(root, config))
+    validate_observations(observations, config)
     candidate = learn_candidate(observations, config)
     path = save_learned_candidate(root, config, candidate)
     if args.json:
@@ -404,7 +450,15 @@ def _merge_collected_observation(
             f"immutable Git snapshot {collected.id} produced different evidence or protocol; "
             "start a new experiment or check extractor/version provenance"
         )
-    source_keys = {"kind", "repository", "base", "head", "pack", "extractor"}
+    source_keys = {
+        "kind",
+        "repository",
+        "base",
+        "head",
+        "pack",
+        "pack_version",
+        "extractor",
+    }
     if any(prior.source.get(key) != collected.source.get(key) for key in source_keys):
         raise ModelError(f"immutable Git snapshot {collected.id} has conflicting provenance")
     prior_change = prior.source.get("change_id")
@@ -454,6 +508,8 @@ def _cmd_assess(args: argparse.Namespace) -> int:
             protocol_hash=config.evidence_protocol_hash,
             target=config.target,
             pack=config.pack,
+            pack_version=config.pack_version,
+            evidence_config=config.evidence,
             repository_id=config.protocol.repository_id,
         )
         if args.head == "WORKTREE"
@@ -464,6 +520,8 @@ def _cmd_assess(args: argparse.Namespace) -> int:
             protocol_hash=config.evidence_protocol_hash,
             target=config.target,
             pack=config.pack,
+            pack_version=config.pack_version,
+            evidence_config=config.evidence,
             repository_id=config.protocol.repository_id,
         )
     )
@@ -590,12 +648,19 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
         "git": {"ok": shutil.which("git") is not None, "path": shutil.which("git")},
     }
     try:
-        root, config = _project(args)
+        root, loaded_config = _project(args)
     except ModelError as exc:
         checks["project"] = {"ok": False, "detail": str(exc)}
         config = None
     else:
-        checks["project"] = {"ok": True, "root": str(root), "config": str(root / CONFIG_PATH)}
+        config = loaded_config
+        checks["project"] = {
+            "ok": True,
+            "root": str(root),
+            "config": str(root / CONFIG_PATH),
+            "pack": loaded_config.pack,
+            "pack_version": loaded_config.pack_version,
+        }
     from ruleloom.learners.popper import doctor_popper
 
     popper_dir: str | Path | None = config.learner.popper_dir if config else None
@@ -628,6 +693,27 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     return 0 if required_ok else 1
 
 
+def _cmd_packs_list(args: argparse.Namespace) -> int:
+    packs = [
+        {
+            "name": item.name,
+            "version": item.version,
+            "extractor": item.extractor,
+            "description": item.description,
+            "predicates": list(item.predicates),
+            "latest": item.version == latest_pack_version(item.name),
+        }
+        for item in available_packs()
+    ]
+    if args.json:
+        _json(packs)
+    else:
+        for item in packs:
+            suffix = " (latest)" if item["latest"] else " (frozen compatibility)"
+            print(f"{item['name']}@{item['version']}{suffix}: {item['description']}")
+    return 0
+
+
 def _add_root(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--root",
@@ -644,8 +730,20 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
 
     init = subparsers.add_parser("init", help="initialize a repository")
-    init.add_argument("path", nargs="?", default=".")
+    init.add_argument("path", nargs="?")
     init.add_argument("--project")
+    pack_names = sorted({item.name for item in available_packs()})
+    init.add_argument(
+        "--pack",
+        choices=pack_names,
+        default="generic_changes",
+        help="evidence pack for this experiment (default: generic_changes)",
+    )
+    init.add_argument(
+        "--pack-version",
+        type=int,
+        help="explicit built-in pack version (default: latest registered version)",
+    )
     init.add_argument(
         "--agents",
         choices=["none", "all", "codex", "claude"],
@@ -653,6 +751,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="install agent skills now (default none for shadow-mode isolation)",
     )
     init.set_defaults(handler=_cmd_init)
+
+    packs = subparsers.add_parser("packs", help="inspect built-in evidence packs")
+    pack_commands = packs.add_subparsers(dest="packs_command", required=True)
+    packs_list = pack_commands.add_parser("list")
+    packs_list.add_argument("--json", action="store_true")
+    packs_list.set_defaults(handler=_cmd_packs_list)
 
     collect = subparsers.add_parser("collect", help="collect prediction-time facts")
     _add_root(collect)
@@ -666,8 +770,11 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="collect staged, unstaged, and untracked files against --ref",
     )
-    git.add_argument("--head", default="HEAD")
-    git.add_argument("--ref", default="HEAD", help="history ref used with --last")
+    git.add_argument("--head", help="range head used with --base (default: HEAD)")
+    git.add_argument(
+        "--ref",
+        help="history ref for --last or worktree base for --working-tree (default: HEAD)",
+    )
     git.set_defaults(handler=_cmd_collect_git)
 
     label = subparsers.add_parser("label", help="record a mature outcome with provenance")

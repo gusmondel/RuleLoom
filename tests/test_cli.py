@@ -11,8 +11,9 @@ import pytest
 
 from ruleloom import cli
 from ruleloom.config import LearnerConfig, RuleLoomConfig
+from ruleloom.gitfacts import collect_snapshot
 from ruleloom.learners.popper import PopperDoctorReport
-from ruleloom.models import LabelValue
+from ruleloom.models import LabelValue, ModelError
 from ruleloom.storage import dataset_path, load_observations, load_predictions
 
 
@@ -133,6 +134,140 @@ def _label_history(
     assert stderr == ""
 
 
+def test_cli_defaults_to_generic_pack_and_lists_versioned_packs(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = tmp_path / "technology_neutral"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "ruleloom@example.test")
+    _git(repo, "config", "user.name", "RuleLoom Test")
+    (repo / "service.py").write_text("def run():\n    return True\n", encoding="utf-8")
+    _commit(repo, "Initial", "2026-01-01T10:00:00Z")
+
+    exit_code, _, stderr = _run_cli(["init", str(repo)], capsys)
+    assert exit_code == 0
+    assert stderr == ""
+    config = RuleLoomConfig.load(repo)
+    assert config.schema_version == 2
+    assert (config.pack, config.pack_version) == ("generic_changes", 1)
+
+    exit_code, stdout, stderr = _run_cli(["packs", "list", "--json"], capsys)
+    assert exit_code == 0
+    assert stderr == ""
+    packs = json.loads(stdout)
+    assert {(item["name"], item["version"]) for item in packs} == {
+        ("generic_changes", 1),
+        ("flutter_testing", 1),
+        ("flutter_testing", 2),
+    }
+    assert (
+        next(item for item in packs if item["name"] == "flutter_testing" and item["latest"])[
+            "version"
+        ]
+        == 2
+    )
+
+
+def test_cli_rejects_an_explicit_empty_init_path(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    exit_code, stdout, stderr = _run_cli(["init", ""], capsys)
+
+    assert exit_code == 2
+    assert stdout == ""
+    assert "init path must not be empty" in stderr
+
+
+def test_explicit_root_must_name_the_initialized_project_exactly(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = tmp_path / "project"
+    _create_flutter_history(repo, count=1)
+    exit_code, _, stderr = _run_cli(["init", str(repo)], capsys)
+    assert exit_code == 0
+    assert stderr == ""
+    child = repo / "nested"
+    child.mkdir()
+
+    for wrong_root, message in (
+        (repo / "typo", "not an existing directory"),
+        (child, "not an initialized RuleLoom project"),
+    ):
+        exit_code, stdout, stderr = _run_cli(
+            ["readiness", "--root", str(wrong_root)],
+            capsys,
+        )
+        assert exit_code == 2
+        assert stdout == ""
+        assert message in stderr
+
+
+def test_collection_merge_rejects_conflicting_pack_version(tmp_path: Path) -> None:
+    repo = tmp_path / "conflicting_pack_version"
+    commits = _create_flutter_history(repo, count=2)
+    collected = collect_snapshot(
+        repo,
+        commits[0],
+        commits[1],
+        protocol_hash="e" * 64,
+    )
+    prior = replace(collected, source={**collected.source, "pack_version": 2})
+
+    with pytest.raises(ModelError, match="conflicting provenance"):
+        cli._merge_collected_observation([prior], collected)
+
+
+def test_collect_git_rejects_mode_arguments_that_would_be_ignored(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = tmp_path / "collect_modes"
+    commits = _create_flutter_history(repo, count=2)
+    exit_code, _, stderr = _run_cli(["init", str(repo), "--agents", "none"], capsys)
+    assert exit_code == 0
+    assert stderr == ""
+
+    cases = (
+        (["--last", "1", "--head", "HEAD"], "--head is valid only with --base"),
+        (["--working-tree", "--head", "HEAD"], "--head is valid only with --base"),
+        (
+            ["--base", commits[0], "--ref", "HEAD"],
+            "--ref is valid only with --last or --working-tree",
+        ),
+        (["--last", "1", "--ref", ""], "unsafe or empty Git revision"),
+        (["--base", commits[0], "--head", ""], "unsafe or empty Git revision"),
+    )
+    for arguments, message in cases:
+        exit_code, stdout, stderr = _run_cli(
+            ["collect", "--root", str(repo), "git", *arguments],
+            capsys,
+        )
+        assert exit_code == 2
+        assert stdout == ""
+        assert message in stderr
+
+    exit_code, stdout, stderr = _run_cli(
+        [
+            "collect",
+            "--root",
+            str(repo),
+            "git",
+            "--base",
+            commits[0],
+            "--head",
+            commits[1],
+        ],
+        capsys,
+    )
+    assert exit_code == 0
+    assert stderr == ""
+    payload = json.loads(stdout)
+    assert (payload["examined"], payload["eligible"], payload["skipped"]) == (1, 1, 0)
+
+
 def test_cli_runs_evidence_to_reviewed_policy_workflow(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -141,7 +276,17 @@ def test_cli_runs_evidence_to_reviewed_policy_workflow(
     commits = _create_flutter_history(repo)
 
     exit_code, stdout, stderr = _run_cli(
-        ["init", str(repo), "--project", "example_project", "--agents", "all"], capsys
+        [
+            "init",
+            str(repo),
+            "--project",
+            "example_project",
+            "--pack",
+            "flutter_testing",
+            "--agents",
+            "all",
+        ],
+        capsys,
     )
     assert exit_code == 0
     assert f"Initialized RuleLoom in {repo}" in stdout
@@ -170,6 +315,16 @@ def test_cli_runs_evidence_to_reviewed_policy_workflow(
     assert collection["inserted"] == len(commits)
     assert collection["updated"] == 0
     assert collection["ids"] == [f"commit.{commit}" for commit in commits]
+    assert collection["examined"] == len(commits)
+    assert collection["eligible"] == len(commits)
+    assert collection["skipped"] == 0
+    assert collection["skipped_by_reason"] == {
+        "mixed_scope": 0,
+        "no_in_scope_files": 0,
+    }
+    assert collection["skipped_preview"] == []
+    assert collection["skipped_preview_truncated"] == 0
+    assert len(collection["skipped_manifest_hash"]) == 64
 
     exit_code, stdout, stderr = _run_cli(["readiness", "--root", str(repo)], capsys)
     assert exit_code == 0
@@ -350,7 +505,13 @@ def test_cli_runs_evidence_to_reviewed_policy_workflow(
     )
     assert exit_code == 0
     assert stderr == ""
-    assert json.loads(stdout)["collected"] == 1
+    worktree_collection = json.loads(stdout)
+    assert worktree_collection["collected"] == 1
+    assert (
+        worktree_collection["examined"],
+        worktree_collection["eligible"],
+        worktree_collection["skipped"],
+    ) == (1, 1, 0)
 
     before_invalid_assessment = load_observations(repo / config.dataset)
     exit_code, stdout, stderr = _run_cli(
@@ -524,7 +685,7 @@ def test_doctor_reports_required_checks_without_requiring_popper(
     assert stderr == ""
     checks = json.loads(stdout)
     assert checks["project"]["ok"] is False
-    assert "no .ruleloom/config.json found" in checks["project"]["detail"]
+    assert "not an initialized RuleLoom project" in checks["project"]["detail"]
 
     exit_code, stdout, stderr = _run_cli(
         ["doctor", "--root", str(missing), "--probe-popper-runtime"], capsys

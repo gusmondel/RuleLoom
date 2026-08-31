@@ -118,6 +118,28 @@ Read [docs/DATA-SCHEMA.md](docs/DATA-SCHEMA.md) before changing persisted data.
 - Examples must contain no proprietary repository data, secrets, or personal
   information.
 
+## Evidence packs
+
+Keep repository collection and language semantics separate. The Git collector
+owns immutable change evidence, scoping, safety budgets, and provenance; a pack
+maps that evidence to declared Boolean predicates. A new built-in pack must:
+
+- use a stable `name@version` and versioned extractor identity;
+- declare every predicate it may emit and provenance for every emitted fact;
+- operate only on the supplied scoped evidence, without network access or
+  repository writes;
+- distinguish verified absence from unsupported or incomplete input;
+- keep metadata bounded while computing facts over the complete scoped diff;
+- include language-positive, language-negative, adversarial-path, and contract
+  tests; and
+- document the intended semantic scope and known blind spots.
+
+Do not change predicate meaning in place. Add a pack version and start a new
+experiment; retain older implementations when they are needed to reproduce
+persisted evidence. The built-in registry is explicit by design, so adding
+runtime plugin discovery requires a separate security and reproducibility
+proposal.
+
 ## Agent adapters
 
 Keep the canonical rule semantics provider-neutral. Codex- or Claude-specific

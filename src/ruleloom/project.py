@@ -12,6 +12,7 @@ from ruleloom.config import CONFIG_PATH, RuleLoomConfig, default_config
 from ruleloom.gitfacts import GitFactsError, repository_identity
 from ruleloom.lifecycle import Readiness, readiness
 from ruleloom.models import ModelError, Observation, parse_timestamp
+from ruleloom.packs import get_pack, matches_pack_version, validate_persisted_extraction
 from ruleloom.storage import (
     dataset_path,
     load_approved,
@@ -38,6 +39,9 @@ def initialize_project(
     root: Path,
     project: str | None = None,
     *,
+    pack: str | None = None,
+    pack_version: int | None = None,
+    schema_version: int = 2,
     agents: Sequence[str] = (),
 ) -> InitResult:
     root = root.resolve()
@@ -47,7 +51,13 @@ def initialize_project(
         repository_id = repository_identity(root)
     except GitFactsError as exc:
         raise ModelError(f"RuleLoom init requires an initialized Git repository: {exc}") from exc
-    config = default_config(project or root.name, repository_id=repository_id)
+    config = default_config(
+        project if project is not None else root.name,
+        repository_id=repository_id,
+        pack=pack,
+        pack_version=pack_version,
+        schema_version=schema_version,
+    )
     managed_paths = [
         config_path,
         dataset_path(root, config),
@@ -58,20 +68,22 @@ def initialize_project(
         project_path(root, config.approved_dir),
         project_path(root, config.deprecated_dir),
     ]
-    agent_paths = {
+    agent_relative_paths = {
         "codex": (
-            project_path(root, ".agents/skills/ruleloom/SKILL.md"),
-            project_path(root, ".agents/skills/ruleloom/references/approved-rules.md"),
+            ".agents/skills/ruleloom/SKILL.md",
+            ".agents/skills/ruleloom/references/approved-rules.md",
         ),
         "claude": (
-            project_path(root, ".claude/skills/ruleloom/SKILL.md"),
-            project_path(root, ".claude/skills/ruleloom/references/approved-rules.md"),
+            ".claude/skills/ruleloom/SKILL.md",
+            ".claude/skills/ruleloom/references/approved-rules.md",
         ),
     }
     for agent in agents:
-        if agent not in agent_paths:
+        if agent not in agent_relative_paths:
             raise ModelError(f"unsupported agent: {agent}")
-        managed_paths.extend(agent_paths[agent])
+        managed_paths.extend(
+            project_path(root, relative) for relative in agent_relative_paths[agent]
+        )
     try:
         trusted_path = trusted_state_path(root)
     except ModelError:
@@ -118,6 +130,7 @@ def validate_observations(
     identifiers = [item.id for item in observations]
     if len(identifiers) != len(set(identifiers)):
         raise ModelError("observation ids must be unique")
+    descriptor = get_pack(config.pack, config.pack_version)
     for item in observations:
         if item.protocol_hash != config.evidence_protocol_hash:
             raise ModelError(
@@ -131,9 +144,23 @@ def validate_observations(
             raise ModelError(f"observation {item.id!r} belongs to a different repository")
         if item.source.get("pack") != config.pack:
             raise ModelError(f"observation {item.id!r} uses a different fact pack")
+        source_pack_version = item.source.get("pack_version")
+        if (
+            config.schema_version >= 2 or source_pack_version is not None
+        ) and not matches_pack_version(source_pack_version, config.pack_version):
+            raise ModelError(f"observation {item.id!r} uses a different fact pack version")
         extractor = item.source.get("extractor")
-        if not isinstance(extractor, str) or not extractor:
-            raise ModelError(f"observation {item.id!r} lacks extractor provenance")
+        if extractor != descriptor.extractor:
+            raise ModelError(
+                f"observation {item.id!r} extractor provenance {extractor!r} does not match "
+                f"configured extractor {descriptor.extractor!r}"
+            )
+        validate_persisted_extraction(
+            descriptor,
+            item.facts,
+            item.fact_evidence,
+            subject=f"observation {item.id!r}",
+        )
         evidence = item.label_evidence.get(config.target)
         if evidence is not None and parse_timestamp(evidence.available_at) <= parse_timestamp(
             item.observed_at

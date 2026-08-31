@@ -16,6 +16,7 @@ from ruleloom.evaluation import (
 from ruleloom.learners.horn import HornBudget, HornSettings, learn_horn
 from ruleloom.lifecycle import learn_candidate
 from ruleloom.models import (
+    FactEvidence,
     HornClause,
     LabelEvidence,
     LabelValue,
@@ -58,6 +59,14 @@ def _observation(
         facts=frozenset(facts),
         labels={TARGET: label},
         label_evidence=evidence,
+        fact_evidence={
+            fact: FactEvidence(
+                kind="deterministic",
+                extractor="ruleloom.flutter_testing.git.v1",
+                evidence=(f"synthetic:{fact}",),
+            )
+            for fact in facts
+        },
         source={
             "kind": "git_commit",
             "repository": "repository.unspecified",
@@ -264,17 +273,17 @@ def test_temporal_split_prefers_git_topology_over_backdated_commit_time() -> Non
 
 def test_candidate_excludes_labels_unavailable_at_holdout_start() -> None:
     observations = [
-        _dated_observation(1, {"risk"}, LabelValue.POSITIVE),
-        _dated_observation(2, {"safe"}, LabelValue.NEGATIVE),
+        _dated_observation(1, {"large_change"}, LabelValue.POSITIVE),
+        _dated_observation(2, {"touches_test"}, LabelValue.NEGATIVE),
         _dated_observation(
             3,
-            {"future_only"},
+            {"uses_async"},
             LabelValue.POSITIVE,
             available_day=7,
         ),
-        _dated_observation(4, {"safe"}, LabelValue.NEGATIVE),
-        _dated_observation(5, {"risk"}, LabelValue.POSITIVE),
-        _dated_observation(6, {"safe"}, LabelValue.NEGATIVE),
+        _dated_observation(4, {"touches_test"}, LabelValue.NEGATIVE),
+        _dated_observation(5, {"large_change"}, LabelValue.POSITIVE),
+        _dated_observation(6, {"touches_test"}, LabelValue.NEGATIVE),
     ]
     config = RuleLoomConfig(
         project="ExampleProject",

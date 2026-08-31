@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 
-from ruleloom.config import RuleLoomConfig
+from ruleloom.config import RuleLoomConfig, default_config
 from ruleloom.models import (
     Candidate,
     HornClause,
@@ -144,6 +144,7 @@ def test_public_schemas_accept_every_persisted_model_shape() -> None:
     prediction = _prediction()
 
     _validate("config", RuleLoomConfig(project="ExampleProject").to_dict())
+    _validate("config", default_config("ExampleProject").to_dict())
     _validate("observation", observation.to_dict())
     _validate("candidate", candidate.to_dict())
     _validate("prediction", prediction.to_dict())

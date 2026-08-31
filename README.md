@@ -2,14 +2,16 @@
 
 **Inductive logic programming for evidence-backed coding-agent policies.**
 
-RuleLoom is an experimental, provider-neutral CLI that learns small Horn-rule
-policies from a repository's own history. Version 0.1 propositionalizes each
-change as Boolean unary predicates over one stable observation unit; it is not a
-full relational ILP system with entity variables, joins, recursion, or predicate
-invention. It turns deterministic facts about code changes and delayed outcomes
-into inspectable candidate rules, evaluates them on later changes, and only
-exposes explicitly approved rules to coding agents such as Codex and Claude
-Code.
+RuleLoom is an experimental, provider- and language-neutral CLI core that learns
+small Horn-rule policies from a repository's own history. A versioned evidence
+pack projects each change into Boolean unary predicates over one stable
+observation unit; the ILP, evaluation, promotion, reporting, and agent lifecycle
+consume those persisted facts without knowing the implementation language.
+Version 0.2 is not a full relational ILP system with entity variables, joins,
+recursion, or predicate invention. It turns deterministic facts about code
+changes and delayed outcomes into inspectable candidate rules, evaluates them on
+later changes, and only exposes explicitly approved rules to coding agents such
+as Codex and Claude Code.
 
 ```text
 git history -> timestamped facts + delayed labels -> ILP -> candidate rules
@@ -22,7 +24,7 @@ git history -> timestamped facts + delayed labels -> ILP -> candidate rules
 ```
 
 RuleLoom is not an autonomous self-improvement system and does not claim that a
-rule causes better software. Version 0.1 is an instrumented hypothesis: a
+rule causes better software. Version 0.2 is an instrumented hypothesis: a
 repository may contain recurring combinations of Boolean change properties that
 are useful enough to guide an agent, but only local prospective evidence can
 establish that for a particular team.
@@ -42,9 +44,9 @@ available at decision time and outcomes observed later?
 Two papers make this more than a decorative demo while preserving the evidence
 boundary: [Rex](https://www.usenix.org/conference/nsdi20/presentation/mehta)
 reported deployed repository-specific correlated-change rules, and the 2026
-[AutoSpec](https://arxiv.org/abs/2606.24245) preprint applied ILP-guided rule
+[AutoSpec](https://arxiv.org/abs/2606.24245v3) preprint applied ILP-guided rule
 evolution to LLM-agent safety traces. Neither tested RuleLoom's repository
-outcome, Flutter pack, temporal protocol, or effect on Codex/Claude. Every
+outcome, evidence packs, temporal protocol, or effect on Codex/Claude. Every
 repository therefore remains a local, unvalidated test.
 
 The design follows four constraints:
@@ -63,19 +65,39 @@ The research basis and its limits are documented in
 
 ## Status
 
-RuleLoom is alpha research software. The initial pack targets Flutter testing
-decisions and the initial target is `needs_extra_validation`. The built-in Horn
-learner is a deterministic, dependency-free baseline. A Popper adapter is
-optional for MDL learning with noisy labels; Popper and its system dependencies
-are not bundled. The supported Popper fragment is deliberately narrow:
-non-recursive unary rules, `max_rules=1`, and `bootstrap_runs=0`.
+RuleLoom is alpha research software. New `init` runs create schema-v2
+experiments, select `generic_changes@1` by default, and retain
+`needs_extra_validation` as the default target. The built-in evidence packs are
+deliberately small and versioned:
+
+- `generic_changes@1` extracts language-neutral change-shape, test, docs, CI,
+  and dependency facts from Git paths and churn;
+- `flutter_testing@1` is frozen for schema-v1 compatibility and reproducibility;
+- `flutter_testing@2` is the current Flutter/Dart pack and layers domain facts
+  on the shared generic change contract, including Riverpod mutations written
+  as either `.state =` or bare `state =` assignments.
+
+These are only two pack families, not comprehensive language support. External
+pack plugins are not supported yet, and an experiment selects exactly one pack;
+facts from different packs or versions are not pooled. The built-in Horn learner
+is a deterministic, dependency-free baseline. A Popper adapter is optional for
+MDL learning with noisy labels; Popper and its system dependencies are not
+bundled. The supported Popper fragment is deliberately narrow: non-recursive
+unary rules, `max_rules=1`, and `bootstrap_runs=0`.
+
+For Python API compatibility with version 0.1, bare `collect_snapshot`,
+`collect_worktree`, and `backfill_commits` calls retain the frozen
+`flutter_testing@1` default. New integrations should use `default_config()` and
+pass its pack, pack version, evidence profile, protocol hash, and repository ID
+explicitly, as the CLI does. Do not infer the schema-v2 CLI default from those
+legacy bare-call defaults.
 
 Do not use RuleLoom as a merge gate, security control, or autonomous policy
 publisher during the initial pilot.
 
 ## Install
 
-RuleLoom requires Python 3.11 or newer on macOS or Linux. Version 0.1 relies on
+RuleLoom requires Python 3.11 or newer on macOS or Linux. Version 0.2 relies on
 POSIX `fcntl` locking and does not support Windows. From a local checkout:
 
 ```bash
@@ -119,7 +141,7 @@ Run the following inside the repository that will supply the evidence. Before
 can derive a stable repository identity:
 
 ```bash
-ruleloom init . --project example-project
+ruleloom init . --project example-project --pack generic_changes
 ruleloom doctor
 
 ruleloom collect git --last 50
@@ -130,7 +152,11 @@ ruleloom label <observation-id> positive \
   --kind review \
   --source "review/<stable-reference>" \
   --available-at "2026-01-15T15:00:00Z" \
-  --reason "Independent review required an additional widget test"
+  --reason "Independent review required additional validation"
+
+# Repeat collection and independent labeling until `readiness` reports enough
+# mature positive and negative outcomes for a chronological train/holdout split.
+ruleloom readiness
 
 ruleloom learn --engine horn
 ruleloom candidate list
@@ -144,6 +170,27 @@ CHANGE_ID=pr-123
 ruleloom assess --base origin/main --change-id "$CHANGE_ID" \
   --include-shadow --blind --json
 ruleloom report
+```
+
+The single `label` command above only illustrates the provenance contract; it
+is not enough evidence to learn or promote a rule. Pre-register the maturity
+condition and minimum positive/negative sample, then repeat collection and
+independent outcome labeling before `learn` or `promote`. Follow the complete
+[shadow-pilot protocol](docs/PILOT-PROTOCOL.md), including its readiness and
+promotion gates.
+
+The JSON returned by a backfill separates `examined`, `eligible`, and `skipped`
+changes, counts `mixed_scope` and `no_in_scope_files` skips, and includes a
+bounded skip preview plus a manifest hash. Preserve that output with the pilot
+record; `collected` alone is not the sampling denominator.
+
+`generic_changes@1` is the default and does not inspect language syntax. For a
+new Flutter experiment, select the current specialized pack explicitly (omitting
+`--pack-version` also selects the latest registered version):
+
+```bash
+ruleloom init . --project flutter-example \
+  --pack flutter_testing --pack-version 2
 ```
 
 That is the end of the initial shadow-pilot runbook: never approve or synchronize
@@ -178,6 +225,51 @@ recommendations or shadow/prediction files to the developer, adjudicator, or
 coding agent. The runbook is in
 [docs/PILOT-PROTOCOL.md](docs/PILOT-PROTOCOL.md).
 
+### Evidence packs and experiment scope
+
+Run `ruleloom packs list` to inspect the built-in name/version pairs. A pack is a
+deterministic projection from normalized Git diff evidence to named Boolean
+facts with provenance. Pack-specific syntax stays at that boundary; the learner
+and policy lifecycle operate on the resulting fact vocabulary. Adding another
+built-in language pack therefore does not require a language branch in the ILP
+or promotion code, although the current CLI has no external pack-plugin loader.
+
+Schema-v2 configuration records one `pack` and `pack_version` per experiment.
+Its pack-neutral `evidence` object controls repository-relative include/exclude
+globs, the churn threshold for `large_change`, the file-count threshold for
+`multi_file_change`, and the maximum number of file paths retained in metadata:
+
+```json
+{
+  "schema_version": 2,
+  "pack": "generic_changes",
+  "pack_version": 1,
+  "evidence": {
+    "include_paths": ["services/api/**"],
+    "exclude_paths": ["**/generated/**"],
+    "large_change_churn": 400,
+    "multi_file_count": 5,
+    "metadata_file_limit": 256
+  }
+}
+```
+
+Set these fields before collecting the experiment. Pack name/version, scopes,
+thresholds, and metadata limit are part of `evidence_protocol_hash`, so changing
+them creates an incompatible evidence protocol rather than silently
+reinterpreting old observations. Large diffs keep aggregate counts and a full
+change-manifest hash while truncating sampled path and per-file-churn metadata to
+configured and byte bounds.
+
+Scope is also an eligibility boundary for the outcome, not just a fact filter.
+Schema-v2 collection rejects a change that mixes files inside and outside the
+include scope, and history backfill skips both mixed and wholly out-of-scope
+commits. If one outcome legitimately covers multiple components, include all of
+them in the pre-registered scope; otherwise use a component-specific change and
+outcome unit. Explicit excludes inside that include scope may still remove
+generated or vendored files. Git paths must be UTF-8; collection fails rather
+than decode an identity with replacement characters.
+
 ### Collection modes
 
 `collect git` supports three mutually exclusive modes:
@@ -198,12 +290,15 @@ Most commands discover the initialized root from the current directory. Use
 
 ## Lifecycle
 
-1. `init [path] [--project NAME]` requires either `remote.origin.url` or at
-   least one commit, then creates `.ruleloom/config.json` and empty
-   observation/prediction logs. Agent skills are not installed by default.
-   Every configurable evidence/artifact path must stay below `.ruleloom/`;
-   managed paths may not overlap.
-2. `collect git` extracts deterministic facts from changes and records their
+1. `init [path] [--project NAME] [--pack NAME] [--pack-version N]` requires
+   either `remote.origin.url` or at least one commit, then creates a schema-v2
+   `.ruleloom/config.json` and empty observation/prediction logs. It defaults to
+   `generic_changes@1`; an omitted version selects the latest registered version
+   of the chosen pack. Agent skills are not installed by default. Every
+   configurable evidence/artifact path must stay below `.ruleloom/`; managed
+   paths may not overlap.
+2. `collect git` applies the experiment's single evidence pack and pack-neutral
+   scope/threshold configuration, then records deterministic facts and their
    provenance.
 3. `label ID VALUE` or `import-labels CSV` attaches an outcome and the time and
    source at which it became knowable. `readiness` reports evidence coverage and
@@ -232,7 +327,7 @@ Most commands discover the initialized root from the current directory. Use
    prediction for each stable `unit_id` only to outcomes for that unit that
    became available later, and emits aggregate prospective association metrics
    without pooling policy sets. `report --policy-set HASH` selects one exact
-   policy experiment. Version 0.1 does not emit confidence intervals or
+   policy experiment. Version 0.2 does not emit confidence intervals or
    per-clause prospective tables in this report; promotion separately uses
    Wilson 95% lower confidence bounds for precision and recall gates.
 8. `sync-agents` renders only approved rules into portable agent skills.
@@ -246,13 +341,13 @@ warnings, rule cards, and readable Prolog forms. Prediction records embed the
 decision-time observation, stable `unit_id`, target, exact policy snapshots
 (candidate ID, status, target, reviewed-manifest hash, and rule signatures), and
 matching clauses. Their exact protocol snapshot binds experiment, repository,
-observation unit, outcome definition, target, pack, extractor, configuration,
-and `evidence_protocol_hash`; the prediction's `protocol_hash` binds that
-snapshot, and `policy_set_hash` binds the protocol hash plus the ordered policy
-set. The embedded observation's `protocol_hash` must equal the protocol's
-`evidence_protocol_hash`. Both artifact types are content-addressed and
-immutable. This makes a result reviewable without treating it as causal
-evidence.
+observation unit, outcome definition, target, pack name/version, extractor, and
+the exact `EvidenceConfig` scopes and thresholds in `evidence_protocol_hash`;
+the prediction's `protocol_hash` binds that snapshot, and `policy_set_hash`
+binds the protocol hash plus the ordered policy set. The embedded observation's
+`protocol_hash` must equal the protocol's `evidence_protocol_hash`. Both
+artifact types are content-addressed and immutable. This makes a result
+reviewable without treating it as causal evidence.
 
 ### Local trust boundary
 
@@ -317,7 +412,7 @@ coverage/abstention and maturity counts for each exact policy set. Promotion
 uses Wilson 95% lower bounds for precision and recall and the MCC point estimate;
 those gates are distinct from the report schema. Track false-positive burden,
 rule stability and complexity, extraction coverage, latency, tokens, and cost
-separately in the pilot log. Version 0.1 does not expose general uncertainty
+separately in the pilot log. Version 0.2 does not expose general uncertainty
 intervals or a per-rule prospective report.
 
 Day-one data establishes instrumentation, not causality. Product impact would

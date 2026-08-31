@@ -1,144 +1,102 @@
-"""Deterministic Git evidence extraction for RuleLoom's Flutter testing pack."""
+"""Pack-neutral, deterministic Git evidence collection."""
 
 from __future__ import annotations
 
 import hashlib
-import math
-import re
 import subprocess
 import threading
 import time
-from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import BinaryIO, cast
+from typing import BinaryIO
 
+from ruleloom.config import EvidenceConfig
 from ruleloom.models import (
     FactEvidence,
     JsonObject,
-    JsonValue,
     LabelValue,
+    ModelError,
     Observation,
     validate_predicate,
     validate_subject,
 )
+from ruleloom.packs import DiffEvidence, EvidencePack, FileChange, get_pack
+from ruleloom.packs.base import INTERNAL_PREFIXES, PackExtraction, is_internal_path
+from ruleloom.packs.flutter_testing import (
+    extract_flutter_testing_facts as _extract_flutter_testing_facts,
+)
+from ruleloom.packs.flutter_testing_v1 import EXTRACTOR as FLUTTER_V1_EXTRACTOR
+from ruleloom.packs.generic import extract_generic_change_facts as _extract_generic_change_facts
 
-EXTRACTOR = "ruleloom.flutter_testing.git.v1"
+# Compatibility aliases for callers of the original 0.1 module API.
+EXTRACTOR = FLUTTER_V1_EXTRACTOR
 SUPPORTED_PACK = "flutter_testing"
+DEFAULT_PACK = SUPPORTED_PACK
+DEFAULT_EXTRACTOR = FLUTTER_V1_EXTRACTOR
 LARGE_CHANGE_CHURN = 200
 MULTI_FILE_COUNT = 3
-_EVIDENCE_LIMIT = 12
 _MAX_GIT_OUTPUT_BYTES = 64 * 1024 * 1024
+_MAX_CONTENT_PATCH_BYTES = 64 * 1024 * 1024
 _MAX_UNTRACKED_FILE_BYTES = 16 * 1024 * 1024
 _MAX_UNTRACKED_TOTAL_BYTES = 64 * 1024 * 1024
 _MAX_CHANGED_FILES = 100_000
 _MAX_GIT_STDERR_BYTES = 4 * 1024 * 1024
 _GIT_TIMEOUT_SECONDS = 30
-_INTERNAL_PREFIXES = (
-    ".ruleloom/",
-    ".agents/skills/ruleloom/",
-    ".claude/skills/ruleloom/",
-)
+_PATCH_PATH_BATCH = 256
+_MAX_PATCH_PATHSPEC_BYTES = 128 * 1024
+_MAX_CONTENT_PATCH_BATCHES = 128
+_MAX_CONTENT_PATCH_SECONDS = 45.0
+_MAX_COMMIT_SUBJECT_BYTES = 4096
+_MAX_BACKFILL_SKIP_PREVIEW = 128
 
 
 class GitFactsError(RuntimeError):
     """Raised when Git evidence cannot be collected safely."""
 
 
-@dataclass(frozen=True, slots=True)
-class FileChange:
-    """Line-level churn reported by Git for one path."""
+class _ScopeIneligibleError(GitFactsError):
+    """Raised when a change cannot receive an outcome for the configured scope."""
 
-    path: str
-    additions: int
-    deletions: int
+    def __init__(self, reason: str, message: str) -> None:
+        super().__init__(message)
+        self.reason = reason
+
+
+@dataclass(frozen=True, slots=True)
+class BackfillReport:
+    """Auditable result for a first-parent backfill with scope exclusions."""
+
+    observations: tuple[Observation, ...]
+    examined: int
+    skipped_no_in_scope_files: int
+    skipped_mixed_scope: int
+    skipped_preview: tuple[tuple[str, str], ...]
+    skipped_manifest_hash: str
 
     @property
-    def churn(self) -> int:
-        return self.additions + self.deletions
+    def eligible(self) -> int:
+        return len(self.observations)
 
+    @property
+    def skipped(self) -> int:
+        return self.examined - self.eligible
 
-@dataclass(frozen=True, slots=True)
-class DiffEvidence:
-    """Normalized, deterministic evidence from a Git diff."""
-
-    changes: tuple[FileChange, ...]
-    dart_patch: str
-    excluded_paths: tuple[str, ...] = ()
-
-
-def _is_ruleloom_internal(path: str) -> bool:
-    normalized = path.replace("\\", "/")
-    return any(normalized.startswith(prefix) for prefix in _INTERNAL_PREFIXES)
-
-
-_CONTENT_PATTERNS: dict[str, tuple[tuple[str, re.Pattern[str]], ...]] = {
-    "touches_widget": (
-        (
-            "widget superclass",
-            re.compile(r"\bextends\s+(?:StatelessWidget|StatefulWidget|ConsumerWidget)\b"),
-        ),
-        ("widget build method", re.compile(r"\bWidget\s+build\s*\(")),
-    ),
-    "user_input": (
-        (
-            "input widget",
-            re.compile(
-                r"\b(?:TextField|TextFormField|Form|GestureDetector|InkWell|"
-                r"ElevatedButton|TextButton|IconButton)\s*\("
-            ),
-        ),
-        ("input callback", re.compile(r"\b(?:onTap|onPressed|onChanged|onSubmitted)\s*:")),
-    ),
-    "mutates_state": (
-        ("setState", re.compile(r"\bsetState\s*\(")),
-        ("notifier mutation", re.compile(r"\b(?:notifyListeners|emit)\s*\(")),
-        ("provider state assignment", re.compile(r"\.state\s*=")),
-    ),
-    "uses_async": (
-        ("async keyword", re.compile(r"\basync\b")),
-        ("await keyword", re.compile(r"\bawait\b")),
-        ("asynchronous type", re.compile(r"\b(?:Future|Stream)\s*<")),
-    ),
-    "navigation": (
-        ("Navigator API", re.compile(r"\bNavigator\s*\.")),
-        ("router API", re.compile(r"\b(?:GoRouter|AutoRouter|MaterialPageRoute)\b")),
-        ("context navigation", re.compile(r"\bcontext\s*\.\s*(?:go|push|pop)\s*\(")),
-    ),
-    "backend_contract": (
-        (
-            "network or database API",
-            re.compile(
-                r"\b(?:Dio|GraphQLClient|FirebaseFirestore|SupabaseClient)\b|"
-                r"\bhttp\s*\.\s*(?:get|post|put|patch|delete)\s*\("
-            ),
-        ),
-        ("JSON boundary", re.compile(r"\b(?:fromJson|toJson)\s*\(")),
-    ),
-    "auth": (
-        ("authentication provider", re.compile(r"\b(?:FirebaseAuth|OAuth|Auth0)\b", re.I)),
-        (
-            "authentication operation",
-            re.compile(r"\b(?:signIn|signOut|logIn|logOut|login|logout|accessToken|idToken)\b"),
-        ),
-    ),
-    "payment": (
-        (
-            "payment integration",
-            re.compile(r"\b(?:Stripe|RevenueCat|payment|checkout|purchase|subscription)\b", re.I),
-        ),
-    ),
-}
-
-_PATH_PATTERNS: dict[str, re.Pattern[str]] = {
-    "navigation": re.compile(r"(?:^|/)(?:routes?|router|navigation)(?:[./_]|$)", re.I),
-    "backend_contract": re.compile(
-        r"(?:^|/)(?:api|clients?|repositories|services?|models?)(?:/|[._])", re.I
-    ),
-    "auth": re.compile(r"(?:^|/)(?:auth|authentication)(?:/|[._])", re.I),
-    "payment": re.compile(r"(?:^|/)(?:payments?|checkout|billing)(?:/|[._])", re.I),
-}
+    def to_dict(self) -> JsonObject:
+        return {
+            "examined": self.examined,
+            "eligible": self.eligible,
+            "skipped": self.skipped,
+            "skipped_by_reason": {
+                "mixed_scope": self.skipped_mixed_scope,
+                "no_in_scope_files": self.skipped_no_in_scope_files,
+            },
+            "skipped_preview": [
+                {"commit": commit, "reason": reason} for commit, reason in self.skipped_preview
+            ],
+            "skipped_preview_truncated": self.skipped - len(self.skipped_preview),
+            "skipped_manifest_hash": self.skipped_manifest_hash,
+        }
 
 
 def _run_git_capped(
@@ -146,6 +104,7 @@ def _run_git_capped(
     arguments: tuple[str, ...],
     *,
     input_bytes: bytes | None = None,
+    timeout_seconds: float = _GIT_TIMEOUT_SECONDS,
 ) -> tuple[bytes, bytes, int]:
     """Run Git with bounded wall time and incremental output caps."""
     command = ["git", "-C", str(repo), *arguments]
@@ -203,7 +162,7 @@ def _run_git_capped(
     )
     for thread in threads:
         thread.start()
-    deadline = time.monotonic() + _GIT_TIMEOUT_SECONDS
+    deadline = time.monotonic() + timeout_seconds
     try:
         while process.poll() is None:
             if violation.is_set():
@@ -214,7 +173,7 @@ def _run_git_capped(
                 process.kill()
                 process.wait()
                 raise GitFactsError(
-                    f"git {' '.join(arguments)} exceeded {_GIT_TIMEOUT_SECONDS} seconds"
+                    f"git {' '.join(arguments)} exceeded {timeout_seconds:g} seconds"
                 )
             time.sleep(0.01)
         returncode = process.wait()
@@ -232,11 +191,17 @@ def _run_git_capped(
     return bytes(buffers["stdout"]), bytes(buffers["stderr"]), returncode
 
 
-def _git(repo: Path, *arguments: str, input_text: str | None = None) -> str:
+def _git(
+    repo: Path,
+    *arguments: str,
+    input_text: str | None = None,
+    timeout_seconds: float = _GIT_TIMEOUT_SECONDS,
+) -> str:
     stdout, stderr, returncode = _run_git_capped(
         repo,
         arguments,
         input_bytes=input_text.encode() if input_text is not None else None,
+        timeout_seconds=timeout_seconds,
     )
     if returncode != 0:
         detail = (
@@ -245,7 +210,12 @@ def _git(repo: Path, *arguments: str, input_text: str | None = None) -> str:
             or "unknown Git error"
         )
         raise GitFactsError(f"git {' '.join(arguments)} failed: {detail}")
-    return stdout.decode("utf-8", errors="replace")
+    try:
+        return stdout.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise GitFactsError(
+            "Git returned non-UTF-8 text or paths; RuleLoom refuses lossy evidence decoding"
+        ) from exc
 
 
 def _git_bytes(repo: Path, *arguments: str) -> bytes:
@@ -318,7 +288,7 @@ def _parse_numstat(raw: str) -> tuple[FileChange, ...]:
         deletions = 0 if raw_deletions == "-" else int(raw_deletions)
         changes.append(
             FileChange(
-                path=path.replace("\\", "/"),
+                path=path,
                 additions=additions,
                 deletions=deletions,
             )
@@ -326,20 +296,224 @@ def _parse_numstat(raw: str) -> tuple[FileChange, ...]:
     return tuple(sorted(changes, key=lambda item: item.path))
 
 
-def _read_diff(repo: Path, base: str, head: str) -> DiffEvidence:
-    common = ("--no-ext-diff", "--no-textconv", "--no-renames", base, head)
-    exclusions = tuple(f":(exclude){prefix}**" for prefix in _INTERNAL_PREFIXES)
-    numstat = _git(repo, "diff", "--numstat", "-z", *common, "--", ".", *exclusions)
-    dart_patch = _git(
-        repo,
-        "diff",
-        "--no-color",
-        "--unified=0",
-        *common,
-        "--",
-        "*.dart",
-        *exclusions,
+def _scope_pathspecs(
+    config: EvidenceConfig,
+    *,
+    apply_exclusions: bool = True,
+) -> tuple[str, ...]:
+    includes = (
+        (".",)
+        if config.include_paths == ("**",)
+        else tuple(f":(glob){pattern}" for pattern in config.include_paths)
     )
+    exclusions = (
+        tuple(f":(exclude,glob){pattern}" for pattern in config.exclude_paths)
+        if apply_exclusions
+        else ()
+    )
+    internal = tuple(f":(exclude,glob){prefix}**" for prefix in INTERNAL_PREFIXES)
+    return (*includes, *exclusions, *internal)
+
+
+def _universe_pathspecs() -> tuple[str, ...]:
+    internal = tuple(f":(exclude,glob){prefix}**" for prefix in INTERNAL_PREFIXES)
+    return (".", *internal)
+
+
+def _internal_pathspecs() -> tuple[str, ...]:
+    return tuple(f":(glob){prefix}**" for prefix in INTERNAL_PREFIXES)
+
+
+def _scoped_tracked_changes(
+    repo: Path,
+    common: tuple[str, ...],
+    config: EvidenceConfig,
+) -> tuple[tuple[FileChange, ...], int, int, int]:
+    """Return scoped changes and exact eligibility counts using Git pathspecs only."""
+
+    scoped = _parse_numstat(
+        _git(repo, "diff", "--numstat", "-z", *common, "--", *_scope_pathspecs(config))
+    )
+    if config.include_paths == ("**",) and not config.exclude_paths:
+        if len(scoped) > _MAX_CHANGED_FILES:
+            raise GitFactsError(f"Git diff exceeds {_MAX_CHANGED_FILES} changed files")
+        return scoped, len(scoped), 0, 0
+    all_changes = _parse_numstat(
+        _git(repo, "diff", "--numstat", "-z", *common, "--", *_universe_pathspecs())
+    )
+    included = (
+        all_changes
+        if config.include_paths == ("**",)
+        else _parse_numstat(
+            _git(
+                repo,
+                "diff",
+                "--numstat",
+                "-z",
+                *common,
+                "--",
+                *_scope_pathspecs(config, apply_exclusions=False),
+            )
+        )
+    )
+    if max(len(scoped), len(all_changes), len(included)) > _MAX_CHANGED_FILES:
+        raise GitFactsError(f"Git diff exceeds {_MAX_CHANGED_FILES} changed files")
+    all_paths = {change.path for change in all_changes}
+    included_paths = {change.path for change in included}
+    scoped_paths = {change.path for change in scoped}
+    return (
+        scoped,
+        len(all_paths),
+        len(all_paths.difference(included_paths)),
+        len(included_paths.difference(scoped_paths)),
+    )
+
+
+def _untracked_paths(repo: Path, pathspecs: tuple[str, ...]) -> tuple[str, ...]:
+    raw = _git(
+        repo,
+        "ls-files",
+        "--others",
+        "--exclude-standard",
+        "-z",
+        "--",
+        *pathspecs,
+    )
+    return tuple(sorted(path for path in raw.split("\x00") if path))
+
+
+def _scope_counts_eligibility(included_files: int, outside_files: int) -> None:
+    if included_files == 0:
+        raise _ScopeIneligibleError(
+            "no_in_scope_files",
+            "change has no files in the configured evidence scope",
+        )
+    if outside_files:
+        raise _ScopeIneligibleError(
+            "mixed_scope",
+            "change mixes files inside and outside the configured evidence scope; "
+            "widen the scope or use a component-specific change/outcome unit",
+        )
+
+
+def _scope_eligibility(evidence: DiffEvidence) -> None:
+    _scope_counts_eligibility(len(evidence.changes), evidence.scope_outside_files)
+
+
+def _content_patch(
+    repo: Path,
+    common: tuple[str, ...],
+    paths: list[str],
+) -> str:
+    parts: list[str] = []
+    total = 0
+    started = time.monotonic()
+    for batch_index, batch in enumerate(_content_path_batches(paths), start=1):
+        if batch_index > _MAX_CONTENT_PATCH_BATCHES:
+            raise GitFactsError(
+                f"content evidence requires more than {_MAX_CONTENT_PATCH_BATCHES} Git batches"
+            )
+        remaining = _MAX_CONTENT_PATCH_SECONDS - (time.monotonic() - started)
+        if remaining <= 0:
+            raise GitFactsError(f"content evidence exceeded {_MAX_CONTENT_PATCH_SECONDS:g} seconds")
+        patch = _git(
+            repo,
+            "diff",
+            "--no-color",
+            "--unified=0",
+            *common,
+            "--",
+            *(f":(literal){path}" for path in batch),
+            timeout_seconds=min(_GIT_TIMEOUT_SECONDS, remaining),
+        )
+        total += len(patch.encode("utf-8"))
+        if total > _MAX_CONTENT_PATCH_BYTES:
+            raise GitFactsError(
+                f"content evidence exceeds {_MAX_CONTENT_PATCH_BYTES} bytes; refusing to "
+                "record partial facts"
+            )
+        parts.append(patch)
+    return "\n".join(parts)
+
+
+def _content_path_batches(paths: list[str]) -> tuple[tuple[str, ...], ...]:
+    """Batch literal pathspecs under both count and conservative argv byte limits."""
+
+    batches: list[tuple[str, ...]] = []
+    current: list[str] = []
+    current_bytes = 0
+    for path in paths:
+        pathspec_bytes = len(f":(literal){path}".encode()) + 1
+        if pathspec_bytes > _MAX_PATCH_PATHSPEC_BYTES:
+            raise GitFactsError("one content path exceeds the safe Git argument budget")
+        if current and (
+            len(current) >= _PATCH_PATH_BATCH
+            or current_bytes + pathspec_bytes > _MAX_PATCH_PATHSPEC_BYTES
+        ):
+            batches.append(tuple(current))
+            current = []
+            current_bytes = 0
+        current.append(path)
+        current_bytes += pathspec_bytes
+    if current:
+        batches.append(tuple(current))
+    return tuple(batches)
+
+
+def _pack(name: str, version: int) -> EvidencePack:
+    try:
+        return get_pack(name, version)
+    except ModelError as exc:
+        raise GitFactsError(str(exc)) from exc
+
+
+def _evidence_profile(
+    pack: str,
+    pack_version: int,
+    evidence_config: EvidenceConfig | None,
+) -> EvidenceConfig:
+    profile = evidence_config or EvidenceConfig()
+    if pack == SUPPORTED_PACK and pack_version == 1 and profile != EvidenceConfig():
+        raise GitFactsError(
+            "flutter_testing@1 only supports the default evidence configuration; "
+            "use flutter_testing@2 for scoped or configurable collection"
+        )
+    return profile
+
+
+def _read_diff(
+    repo: Path,
+    base: str,
+    head: str,
+    *,
+    pack: str,
+    pack_version: int,
+    evidence_config: EvidenceConfig,
+) -> DiffEvidence:
+    common = ("--no-ext-diff", "--no-textconv", "--no-renames", base, head)
+    raw_changes, total_files, outside_files, excluded_files = _scoped_tracked_changes(
+        repo,
+        common,
+        evidence_config,
+    )
+    if len(raw_changes) > _MAX_CHANGED_FILES:
+        raise GitFactsError(f"Git diff exceeds {_MAX_CHANGED_FILES} changed files")
+    descriptor = _pack(pack, pack_version)
+    content_paths = [change.path for change in raw_changes if descriptor.content_path(change.path)]
+    changes = (
+        tuple(
+            FileChange(
+                path=change.path.replace("\\", "/"),
+                additions=change.additions,
+                deletions=change.deletions,
+            )
+            for change in raw_changes
+        )
+        if pack == SUPPORTED_PACK and pack_version == 1
+        else raw_changes
+    )
+    if not (pack == SUPPORTED_PACK and pack_version == 1):
+        _scope_counts_eligibility(len(changes), outside_files)
     internal = _git(
         repo,
         "diff",
@@ -347,36 +521,39 @@ def _read_diff(repo: Path, base: str, head: str) -> DiffEvidence:
         "-z",
         *common,
         "--",
-        *_INTERNAL_PREFIXES,
+        *INTERNAL_PREFIXES,
     )
-    changes = _parse_numstat(numstat)
-    if len(changes) > _MAX_CHANGED_FILES:
-        raise GitFactsError(f"Git diff exceeds {_MAX_CHANGED_FILES} changed files")
     return DiffEvidence(
         changes=changes,
-        dart_patch=dart_patch,
+        content_patch=_content_patch(repo, common, content_paths),
         excluded_paths=tuple(sorted(path for path in internal.split("\x00") if path)),
+        scope_total_files=total_files,
+        scope_outside_files=outside_files,
+        scope_excluded_files=excluded_files,
     )
 
 
-def _read_worktree_diff(repo: Path, base: str) -> tuple[DiffEvidence, str]:
+def _read_worktree_diff(
+    repo: Path,
+    base: str,
+    *,
+    pack: str,
+    pack_version: int,
+    evidence_config: EvidenceConfig,
+) -> tuple[DiffEvidence, str]:
     common = ("--no-ext-diff", "--no-textconv", "--no-renames", base)
-    exclusions = tuple(f":(exclude){prefix}**" for prefix in _INTERNAL_PREFIXES)
-    tracked_numstat = _git(repo, "diff", "--numstat", "-z", *common, "--", ".", *exclusions)
-    tracked_patch = _git(
+    scope = _scope_pathspecs(evidence_config)
+    tracked, tracked_total, tracked_outside, tracked_excluded = _scoped_tracked_changes(
         repo,
-        "diff",
-        "--no-color",
-        "--unified=0",
-        *common,
-        "--",
-        "*.dart",
-        *exclusions,
+        common,
+        evidence_config,
     )
-    changes = list(_parse_numstat(tracked_numstat))
-    if len(changes) > _MAX_CHANGED_FILES:
-        raise GitFactsError(f"Git diff exceeds {_MAX_CHANGED_FILES} changed files")
-    dart_patch_parts = [tracked_patch]
+    changes = list(tracked)
+    descriptor = _pack(pack, pack_version)
+    legacy_v1 = pack == SUPPORTED_PACK and pack_version == 1
+    content_paths = [change.path for change in changes if descriptor.content_path(change.path)]
+    content_parts = [_content_patch(repo, common, content_paths)]
+    content_bytes = len(content_parts[0].encode("utf-8"))
     fingerprint = hashlib.sha256(
         _git_bytes(
             repo,
@@ -385,29 +562,68 @@ def _read_worktree_diff(repo: Path, base: str) -> tuple[DiffEvidence, str]:
             "--binary",
             *common,
             "--",
-            ".",
-            *exclusions,
+            *scope,
         )
     )
-    internal = _git(
-        repo,
-        "diff",
-        "--name-only",
-        "-z",
-        *common,
-        "--",
-        *_INTERNAL_PREFIXES,
-    )
-    excluded_paths = [path for path in internal.split("\x00") if path]
-    untracked_raw = _git(repo, "ls-files", "--others", "--exclude-standard", "-z")
-    untracked_paths = sorted(path for path in untracked_raw.split("\x00") if path)
-    if len(changes) + len(untracked_paths) > _MAX_CHANGED_FILES:
+    excluded_paths: list[str] = []
+    if legacy_v1:
+        internal = _git(
+            repo,
+            "diff",
+            "--name-only",
+            "-z",
+            *common,
+            "--",
+            *INTERNAL_PREFIXES,
+        )
+        excluded_paths.extend(path for path in internal.split("\x00") if path)
+        untracked_internal = _untracked_paths(repo, _internal_pathspecs())
+        if len(untracked_internal) > _MAX_CHANGED_FILES:
+            raise GitFactsError(f"working tree exceeds {_MAX_CHANGED_FILES} internal files")
+        excluded_paths.extend(untracked_internal)
+    untracked_paths = _untracked_paths(repo, scope)
+    if evidence_config.include_paths == ("**",) and not evidence_config.exclude_paths:
+        untracked_total_files = len(untracked_paths)
+        untracked_outside = 0
+        untracked_excluded = 0
+    else:
+        all_untracked = set(_untracked_paths(repo, _universe_pathspecs()))
+        included_untracked = (
+            all_untracked
+            if evidence_config.include_paths == ("**",)
+            else set(
+                _untracked_paths(
+                    repo,
+                    _scope_pathspecs(evidence_config, apply_exclusions=False),
+                )
+            )
+        )
+        scoped_untracked = set(untracked_paths)
+        untracked_total_files = len(all_untracked)
+        untracked_outside = len(all_untracked.difference(included_untracked))
+        untracked_excluded = len(included_untracked.difference(scoped_untracked))
+    if tracked_total + untracked_total_files > _MAX_CHANGED_FILES:
         raise GitFactsError(f"working tree exceeds {_MAX_CHANGED_FILES} changed files")
+    if not legacy_v1:
+        _scope_counts_eligibility(
+            len(changes) + len(untracked_paths),
+            tracked_outside + untracked_outside,
+        )
+        fingerprint.update(
+            (
+                f"\x00scope:{tracked_total + untracked_total_files}:"
+                f"{tracked_outside + untracked_outside}:"
+                f"{tracked_excluded + untracked_excluded}"
+            ).encode()
+        )
     untracked_total = 0
     for raw_path in untracked_paths:
-        if _is_ruleloom_internal(raw_path):
-            excluded_paths.append(raw_path)
+        if is_internal_path(raw_path):
+            if legacy_v1:
+                excluded_paths.append(raw_path)
             continue
+        if len(changes) >= _MAX_CHANGED_FILES:
+            raise GitFactsError(f"working tree exceeds {_MAX_CHANGED_FILES} changed files")
         unresolved = repo / raw_path
         if unresolved.is_symlink():
             raise GitFactsError(f"refusing to read untracked symlink: {raw_path!r}")
@@ -429,127 +645,92 @@ def _read_worktree_diff(repo: Path, base: str) -> tuple[DiffEvidence, str]:
         except OSError as exc:
             raise GitFactsError(f"cannot read untracked file {raw_path}: {exc}") from exc
         additions = payload.count(b"\n") + bool(payload and not payload.endswith(b"\n"))
-        changes.append(
-            FileChange(path=raw_path.replace("\\", "/"), additions=additions, deletions=0)
-        )
+        changes.append(FileChange(path=raw_path, additions=additions, deletions=0))
         fingerprint.update(raw_path.encode())
         fingerprint.update(b"\x00")
         fingerprint.update(hashlib.sha256(payload).digest())
-        if raw_path.lower().endswith(".dart"):
-            text = payload.decode("utf-8", errors="replace")
-            dart_patch_parts.append("\n".join(f"+{line}" for line in text.splitlines()))
+        if descriptor.content_path(raw_path):
+            try:
+                decoded = payload.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise GitFactsError(f"content file is not valid UTF-8: {raw_path}") from exc
+            rendered = "\n".join(f"+{line}" for line in decoded.splitlines())
+            content_bytes += len(rendered.encode("utf-8"))
+            if content_bytes > _MAX_CONTENT_PATCH_BYTES:
+                raise GitFactsError(
+                    f"content evidence exceeds {_MAX_CONTENT_PATCH_BYTES} bytes; refusing to "
+                    "record partial facts"
+                )
+            content_parts.append(rendered)
+    evidence_changes = (
+        tuple(
+            FileChange(
+                path=change.path.replace("\\", "/"),
+                additions=change.additions,
+                deletions=change.deletions,
+            )
+            for change in changes
+        )
+        if legacy_v1
+        else tuple(changes)
+    )
     evidence = DiffEvidence(
-        changes=tuple(sorted(changes, key=lambda item: item.path)),
-        dart_patch="\n".join(dart_patch_parts),
-        excluded_paths=tuple(excluded_paths),
+        changes=tuple(sorted(evidence_changes, key=lambda item: item.path)),
+        content_patch="\n".join(content_parts),
+        excluded_paths=tuple(sorted(set(excluded_paths))),
+        scope_total_files=tracked_total + untracked_total_files,
+        scope_outside_files=tracked_outside + untracked_outside,
+        scope_excluded_files=tracked_excluded + untracked_excluded,
     )
     return evidence, fingerprint.hexdigest()[:20]
 
 
-def _changed_payload(patch: str) -> tuple[str, str]:
-    changed: list[str] = []
-    added: list[str] = []
-    for line in patch.splitlines():
-        if line.startswith(("+++", "---")):
-            continue
-        if line.startswith("+"):
-            payload = line[1:]
-            changed.append(payload)
-            added.append(payload)
-        elif line.startswith("-"):
-            changed.append(line[1:])
-    return "\n".join(changed), "\n".join(added)
-
-
-def _entropy(churn_by_file: Sequence[int]) -> tuple[float, float]:
-    total = sum(churn_by_file)
-    if total <= 0:
-        return 0.0, 0.0
-    entropy = -sum(
-        (churn / total) * math.log2(churn / total) for churn in churn_by_file if churn > 0
-    )
-    nonzero_files = sum(churn > 0 for churn in churn_by_file)
-    normalized = entropy / math.log2(nonzero_files) if nonzero_files > 1 else 0.0
-    return round(entropy, 6), round(normalized, 6)
+def _extract(
+    evidence: DiffEvidence,
+    *,
+    pack: str,
+    pack_version: int,
+    evidence_config: EvidenceConfig,
+) -> PackExtraction:
+    try:
+        return _pack(pack, pack_version).run(evidence, evidence_config.pack_options)
+    except ValueError as exc:
+        raise GitFactsError(str(exc)) from exc
 
 
 def extract_flutter_testing_facts(
     evidence: DiffEvidence,
+    evidence_config: EvidenceConfig | None = None,
 ) -> tuple[frozenset[str], dict[str, FactEvidence], JsonObject]:
-    """Turn normalized diff evidence into facts, provenance, and churn metadata."""
+    """Compatibility facade for the current Flutter v2 pure extractor."""
 
-    reasons: dict[str, set[str]] = {}
-
-    def record(fact: str, reason: str) -> None:
-        reasons.setdefault(fact, set()).add(reason)
-
-    visible_changes = tuple(
-        change for change in evidence.changes if not _is_ruleloom_internal(change.path)
+    result = _extract_flutter_testing_facts(
+        evidence,
+        (evidence_config or EvidenceConfig()).pack_options,
     )
-    internal_paths = sorted(
-        {
-            *evidence.excluded_paths,
-            *(change.path for change in evidence.changes if _is_ruleloom_internal(change.path)),
-        }
+    return result.facts, dict(result.provenance), result.metadata
+
+
+def extract_generic_change_facts(
+    evidence: DiffEvidence,
+    evidence_config: EvidenceConfig | None = None,
+) -> tuple[frozenset[str], dict[str, FactEvidence], JsonObject]:
+    result = _extract_generic_change_facts(
+        evidence,
+        (evidence_config or EvidenceConfig()).pack_options,
     )
-    paths = [change.path for change in visible_changes]
-    for path in paths:
-        lowered = path.lower()
-        is_dart = lowered.endswith(".dart")
-        if is_dart:
-            record("changes_dart", f"path:{path}")
-        parts = lowered.split("/")
-        if lowered.endswith("_test.dart") or "test" in parts or "integration_test" in parts:
-            record("touches_test", f"path:{path}")
-        if is_dart:
-            for fact, pattern in _PATH_PATTERNS.items():
-                if pattern.search(path):
-                    record(fact, f"path:{path}")
-
-    changed_payload, added_payload = _changed_payload(evidence.dart_patch)
-    for fact, patterns in _CONTENT_PATTERNS.items():
-        for marker, pattern in patterns:
-            if pattern.search(changed_payload):
-                record(fact, f"diff-pattern:{marker}")
-    if re.search(r"\btestWidgets\s*\(", added_payload):
-        record("adds_widget_test", "added-pattern:testWidgets")
-
-    additions = sum(change.additions for change in visible_changes)
-    deletions = sum(change.deletions for change in visible_changes)
-    churn = additions + deletions
-    files_changed = len(visible_changes)
-    if churn >= LARGE_CHANGE_CHURN:
-        record("large_change", f"churn:{churn}>={LARGE_CHANGE_CHURN}")
-    if files_changed >= MULTI_FILE_COUNT:
-        record("multi_file_change", f"files:{files_changed}>={MULTI_FILE_COUNT}")
-
-    entropy, normalized_entropy = _entropy([change.churn for change in visible_changes])
-    metadata: JsonObject = {
-        "additions": additions,
-        "deletions": deletions,
-        "churn": churn,
-        "files_changed": files_changed,
-        "change_entropy": entropy,
-        "normalized_change_entropy": normalized_entropy,
-        "changed_files": cast(JsonValue, paths),
-        "file_churn": cast(JsonValue, {change.path: change.churn for change in visible_changes}),
-        "excluded_internal_files": len(internal_paths),
-        "excluded_internal_paths": cast(JsonValue, internal_paths),
-    }
-    provenance = {
-        fact: FactEvidence(
-            kind="deterministic",
-            extractor=EXTRACTOR,
-            evidence=tuple(sorted(fact_reasons)[:_EVIDENCE_LIMIT]),
-        )
-        for fact, fact_reasons in reasons.items()
-    }
-    return frozenset(reasons), provenance, metadata
+    return result.facts, dict(result.provenance), result.metadata
 
 
-def _commit_metadata(repo: Path, commit: str) -> tuple[str, str]:
-    raw = _git(repo, "show", "-s", "--format=%cI%x00%B", commit)
-    timestamp, separator, message = raw.partition("\x00")
+def _commit_metadata(
+    repo: Path,
+    commit: str,
+    *,
+    legacy_full_message: bool = False,
+) -> tuple[str, str, str, bool]:
+    message_format = "%B" if legacy_full_message else "%s"
+    raw = _git(repo, "show", "-s", f"--format=%cI%x00{message_format}", commit)
+    timestamp, separator, subject = raw.partition("\x00")
     if not separator:
         raise GitFactsError("Git returned malformed commit metadata")
     try:
@@ -558,7 +739,15 @@ def _commit_metadata(repo: Path, commit: str) -> tuple[str, str]:
         raise GitFactsError(f"Git returned an invalid commit timestamp: {timestamp!r}") from exc
     if parsed.tzinfo is None:
         raise GitFactsError("Git returned a commit timestamp without a timezone")
-    return timestamp.strip(), message.strip()
+    subject = subject.strip()
+    subject_hash = hashlib.sha256(subject.encode("utf-8")).hexdigest()
+    if legacy_full_message:
+        return timestamp.strip(), subject, subject_hash, False
+    encoded = subject.encode("utf-8")
+    truncated = len(encoded) > _MAX_COMMIT_SUBJECT_BYTES
+    if truncated:
+        subject = encoded[:_MAX_COMMIT_SUBJECT_BYTES].decode("utf-8", errors="ignore")
+    return timestamp.strip(), subject, subject_hash, truncated
 
 
 def _observation(
@@ -569,14 +758,48 @@ def _observation(
     head: str,
     target: str,
     protocol_hash: str,
+    pack: str,
+    pack_version: int,
+    evidence_config: EvidenceConfig,
     observation_id: str,
     source_kind: str,
     topological_index: int | None = None,
 ) -> Observation:
     validate_predicate(target, field_name="target")
-    facts, fact_evidence, metadata = extract_flutter_testing_facts(_read_diff(repo, base, head))
-    timestamp, message = _commit_metadata(repo, head)
+    descriptor = _pack(pack, pack_version)
+    legacy_v1 = pack == SUPPORTED_PACK and pack_version == 1
+    evidence = _read_diff(
+        repo,
+        base,
+        head,
+        pack=pack,
+        pack_version=pack_version,
+        evidence_config=evidence_config,
+    )
+    if not legacy_v1:
+        _scope_eligibility(evidence)
+    result = _extract(
+        evidence,
+        pack=pack,
+        pack_version=pack_version,
+        evidence_config=evidence_config,
+    )
+    timestamp, message, message_hash, message_truncated = _commit_metadata(
+        repo,
+        head,
+        legacy_full_message=legacy_v1,
+    )
+    metadata = result.metadata
     metadata.update({"commit_timestamp": timestamp, "commit_message": message})
+    if not legacy_v1:
+        metadata.update(
+            {
+                "commit_message_hash": message_hash,
+                "commit_message_truncated": message_truncated,
+                "scope_include": list(evidence_config.include_paths),
+                "scope_exclude": list(evidence_config.exclude_paths),
+            }
+        )
     if topological_index is not None:
         metadata["topological_index"] = topological_index
     source: JsonObject = {
@@ -584,16 +807,18 @@ def _observation(
         "repository": repository_name,
         "base": base,
         "head": head,
-        "pack": SUPPORTED_PACK,
-        "extractor": EXTRACTOR,
+        "pack": pack,
+        "extractor": descriptor.extractor,
     }
+    if not legacy_v1:
+        source["pack_version"] = pack_version
     return Observation(
         id=observation_id,
         observed_at=timestamp,
         protocol_hash=protocol_hash,
-        facts=facts,
+        facts=result.facts,
         labels={target: LabelValue.UNKNOWN},
-        fact_evidence=fact_evidence,
+        fact_evidence=dict(result.provenance),
         source=source,
         metadata=metadata,
     )
@@ -606,13 +831,15 @@ def collect_snapshot(
     *,
     protocol_hash: str,
     target: str = "needs_extra_validation",
-    pack: str = SUPPORTED_PACK,
+    pack: str = DEFAULT_PACK,
+    pack_version: int = 1,
+    evidence_config: EvidenceConfig | None = None,
     repository_id: str | None = None,
 ) -> Observation:
     """Collect one immutable observation for a committed ``base``/``head`` range."""
 
-    if pack != SUPPORTED_PACK:
-        raise GitFactsError(f"unsupported fact pack: {pack!r}")
+    _pack(pack, pack_version)
+    extraction = _evidence_profile(pack, pack_version, evidence_config)
     root, repository_name = _repository(repo, repository_id)
     base_commit = _resolve_commit(root, base)
     head_commit = _resolve_commit(root, head)
@@ -624,6 +851,9 @@ def collect_snapshot(
         head=head_commit,
         target=target,
         protocol_hash=protocol_hash,
+        pack=pack,
+        pack_version=pack_version,
+        evidence_config=extraction,
         observation_id=f"range.{digest}",
         source_kind="git_range",
         topological_index=_first_parent_position(root, head_commit),
@@ -636,18 +866,35 @@ def collect_worktree(
     *,
     protocol_hash: str,
     target: str = "needs_extra_validation",
-    pack: str = SUPPORTED_PACK,
+    pack: str = DEFAULT_PACK,
+    pack_version: int = 1,
+    evidence_config: EvidenceConfig | None = None,
     repository_id: str | None = None,
 ) -> Observation:
     """Collect staged, unstaged, and untracked changes against a committed base."""
-    if pack != SUPPORTED_PACK:
-        raise GitFactsError(f"unsupported fact pack: {pack!r}")
+    descriptor = _pack(pack, pack_version)
+    legacy_v1 = pack == SUPPORTED_PACK and pack_version == 1
+    extraction = _evidence_profile(pack, pack_version, evidence_config)
     validate_predicate(target, field_name="target")
     root, repository_name = _repository(repo, repository_id)
     base_commit = _resolve_commit(root, base)
-    diff, digest = _read_worktree_diff(root, base_commit)
+    diff, digest = _read_worktree_diff(
+        root,
+        base_commit,
+        pack=pack,
+        pack_version=pack_version,
+        evidence_config=extraction,
+    )
+    if not legacy_v1:
+        _scope_eligibility(diff)
     digest = hashlib.sha256(f"{base_commit}\x00{digest}".encode()).hexdigest()[:20]
-    facts, fact_evidence, metadata = extract_flutter_testing_facts(diff)
+    result = _extract(
+        diff,
+        pack=pack,
+        pack_version=pack_version,
+        evidence_config=extraction,
+    )
+    metadata = result.metadata
     observed_at = datetime.now(UTC).isoformat().replace("+00:00", "Z")
     metadata.update(
         {
@@ -657,21 +904,30 @@ def collect_worktree(
             "topological_index": _first_parent_position(root, base_commit) + 1,
         }
     )
+    if not legacy_v1:
+        metadata.update(
+            {
+                "scope_include": list(extraction.include_paths),
+                "scope_exclude": list(extraction.exclude_paths),
+            }
+        )
     source: JsonObject = {
         "kind": "git_worktree",
         "repository": repository_name,
         "base": base_commit,
         "head": "WORKTREE",
-        "pack": SUPPORTED_PACK,
-        "extractor": EXTRACTOR,
+        "pack": pack,
+        "extractor": descriptor.extractor,
     }
+    if not legacy_v1:
+        source["pack_version"] = pack_version
     return Observation(
         id=f"worktree.{digest}",
         observed_at=observed_at,
         protocol_hash=protocol_hash,
-        facts=facts,
+        facts=result.facts,
         labels={target: LabelValue.UNKNOWN},
-        fact_evidence=fact_evidence,
+        fact_evidence=dict(result.provenance),
         source=source,
         metadata=metadata,
     )
@@ -699,22 +955,24 @@ def _first_parent_position(repo: Path, commit: str) -> int:
     return position
 
 
-def backfill_commits(
+def backfill_commits_detailed(
     repo: Path,
     limit: int,
     *,
     protocol_hash: str,
     target: str = "needs_extra_validation",
     ref: str = "HEAD",
-    pack: str = SUPPORTED_PACK,
+    pack: str = DEFAULT_PACK,
+    pack_version: int = 1,
+    evidence_config: EvidenceConfig | None = None,
     repository_id: str | None = None,
-) -> list[Observation]:
-    """Collect the last ``limit`` first-parent commits in chronological order."""
+) -> BackfillReport:
+    """Collect a first-parent backfill and retain an auditable scope denominator."""
 
-    if isinstance(limit, bool) or limit < 1:
+    if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise GitFactsError("backfill limit must be an integer >= 1")
-    if pack != SUPPORTED_PACK:
-        raise GitFactsError(f"unsupported fact pack: {pack!r}")
+    _pack(pack, pack_version)
+    extraction = _evidence_profile(pack, pack_version, evidence_config)
     root, repository_name = _repository(repo, repository_id)
     resolved_ref = _resolve_commit(root, ref)
     commits = _git(
@@ -725,18 +983,68 @@ def backfill_commits(
         resolved_ref,
     ).splitlines()
     observations: list[Observation] = []
+    skipped_counts = {"no_in_scope_files": 0, "mixed_scope": 0}
+    skipped_preview: list[tuple[str, str]] = []
+    skipped_manifest = hashlib.sha256()
     for commit in reversed(commits):
-        observations.append(
-            _observation(
+        try:
+            observation = _observation(
                 root,
                 repository_name,
                 base=_first_parent(root, commit),
                 head=commit,
                 target=target,
                 protocol_hash=protocol_hash,
+                pack=pack,
+                pack_version=pack_version,
+                evidence_config=extraction,
                 observation_id=f"commit.{commit}",
                 source_kind="git_commit",
                 topological_index=_first_parent_position(root, commit),
             )
-        )
-    return observations
+        except _ScopeIneligibleError as exc:
+            skipped_counts[exc.reason] += 1
+            skipped_manifest.update(commit.encode())
+            skipped_manifest.update(b"\x00")
+            skipped_manifest.update(exc.reason.encode())
+            skipped_manifest.update(b"\n")
+            if len(skipped_preview) < _MAX_BACKFILL_SKIP_PREVIEW:
+                skipped_preview.append((commit, exc.reason))
+            continue
+        observations.append(observation)
+    return BackfillReport(
+        observations=tuple(observations),
+        examined=len(commits),
+        skipped_no_in_scope_files=skipped_counts["no_in_scope_files"],
+        skipped_mixed_scope=skipped_counts["mixed_scope"],
+        skipped_preview=tuple(skipped_preview),
+        skipped_manifest_hash=skipped_manifest.hexdigest(),
+    )
+
+
+def backfill_commits(
+    repo: Path,
+    limit: int,
+    *,
+    protocol_hash: str,
+    target: str = "needs_extra_validation",
+    ref: str = "HEAD",
+    pack: str = DEFAULT_PACK,
+    pack_version: int = 1,
+    evidence_config: EvidenceConfig | None = None,
+    repository_id: str | None = None,
+) -> list[Observation]:
+    """Collect eligible commits; use ``backfill_commits_detailed`` for skip telemetry."""
+
+    report = backfill_commits_detailed(
+        repo,
+        limit,
+        protocol_hash=protocol_hash,
+        target=target,
+        ref=ref,
+        pack=pack,
+        pack_version=pack_version,
+        evidence_config=evidence_config,
+        repository_id=repository_id,
+    )
+    return list(report.observations)

@@ -21,10 +21,21 @@ specific repository.
 The exact RuleLoom integration therefore remains a new product hypothesis even
 when each component has supporting evidence.
 
-The term ILP is deliberately scoped: RuleLoom 0.1 propositionalizes each change
+The term ILP is deliberately scoped: RuleLoom 0.2 propositionalizes each change
 into Boolean unary predicates over one variable and learns bounded Horn
 conjunctions. It is not a full relational ILP implementation with multiple
 entities, joins, recursion, predicate invention, or arbitrary logic programs.
+
+The implementation now separates that ILP and the entire policy lifecycle from
+language-specific extraction. One versioned evidence pack maps normalized Git
+evidence to facts for an experiment; learning, evaluation, promotion, reporting,
+and agent synchronization consume the persisted Boolean vocabulary without
+language branches. New schema-v2 initializations default to
+`generic_changes@1`. The built-in registry contains only two pack families:
+`generic_changes@1`, frozen compatibility pack `flutter_testing@1`, and current
+`flutter_testing@2`. External pack plugins and multi-pack experiments are not
+supported. This is an implemented architectural boundary, not research evidence
+that predicates or learned rules transfer across languages.
 
 ## Evidence-to-design matrix
 
@@ -33,7 +44,7 @@ entities, joins, recursion, predicate invention, or arbitrary logic programs.
 | Cropper et al., *Inductive Logic Programming at 30* | Peer-reviewed review, 2022 | ILP induces logic programs from examples and background knowledge; the review covers modern search, recursion, predicate invention, and limitations. | Use ILP only where predicates and labels have explicit domain meaning; keep the learned program inspectable. | A general ILP review does not establish coding-agent utility. |
 | Cropper & Morel, *Learning Programs by Learning from Failures* | Peer-reviewed, Machine Learning, 2021 | Popper's generate-test-constrain loop prunes failed hypothesis regions and learns textually minimal logic programs in its evaluated domains. | Offer Popper as an optional serious ILP engine; bound and record its hypothesis bias. | The original clean-example objective is not a license to treat repository labels as noise-free. |
 | Hocquette et al., *Learning MDL Logic Programs from Noisy Data* | Peer-reviewed, AAAI 2024 | MAXSYNTH trades program size against fit and outperformed compared approaches in several domains under moderate label noise. | Prefer an MDL/noisy mode when labels are imperfect; record engine revision and cost assumptions. | The evaluated domains were not coding-agent policy learning. Current Popper behavior must be tested against a pinned revision rather than inferred from the paper artifact. |
-| Law et al., *FastLAS* | Peer-reviewed, AAAI 2020 | FastLAS supports user-defined hypothesis scoring; the evaluated access-control tasks showed that scoring can target domain-specific objectives and that the system was faster and more scalable than compared ILP systems. | A future engine could encode asymmetric interruption and missed-risk costs explicitly. | RuleLoom 0.1 does not implement FastLAS, and access-control results do not establish coding-agent value. |
+| Law et al., *FastLAS* | Peer-reviewed, AAAI 2020 | FastLAS supports user-defined hypothesis scoring; the evaluated access-control tasks showed that scoring can target domain-specific objectives and that the system was faster and more scalable than compared ILP systems. | A future engine could encode asymmetric interruption and missed-risk costs explicitly. | RuleLoom 0.2 does not implement FastLAS, and access-control results do not establish coding-agent value. |
 | Law, *Conflict-driven ILP* | Peer-reviewed, TPLP 2023 | Formalizes conflict-driven ILP and reports ILASP3/4 scalability gains over earlier ILASP systems, particularly with noise. | Constraint learning from failed hypotheses is a credible route beyond exhaustive rule enumeration. | It learns answer-set programs, not RuleLoom's current bounded Horn model. |
 | Ma et al., *AutoSpec* | arXiv preprint v3, 7 July 2026 | ILP-guided CEGIS evolves expert LLM-agent safety rules from safe/unsafe trace annotations. Across 291 code-execution and embodied-agent traces, the authors report F1 0.98 and 0.933, up to 94% false-positive reduction, and convergence in 4–5 iterations. | This is the closest direct evidence that ILP can turn agent feedback into readable, auditable rule revisions. Counterexamples, review, and selective rule lifecycle are well-motivated. | It covers two safety domains, assumes a predicate library and usually an expert seed rule, relies on human labels, uses a random 70/30 generalization split rather than temporal validation, reports a 10-person user study, has event/local-context rules, and makes no global-optimality claim. Web/database agents and native temporal operators remain untested. It is a preprint and does not test coding-quality guidance. |
 | Mehta et al., *Rex* | Peer-reviewed, NSDI 2020 | Rex learns correlated file-change rules using machine learning and program analysis. The authors report a 14-month deployment over 360 Microsoft repositories and 4,926 affected changes. | Repository-specific change rules can solve a real maintenance problem and can be surfaced at change time. | Proprietary large-service evidence; correlated file edits are not outcome-labeled ILP, and the operational count is not a randomized causal estimate. |
@@ -42,13 +53,12 @@ entities, joins, recursion, predicate invention, or arbitrary logic programs.
 | Zeng et al., *Deep Just-in-Time Defect Prediction: How Far Are We?* | Peer-reviewed, ISSTA 2021 | On 310,370 changes, the study found deep JIT approaches did not consistently outperform traditional models; a simple added-lines logistic baseline outperformed DeepJIT and CC2Vec in the reported comparison and was far faster. | Always compare learned clauses with trivial and single-feature baselines before crediting ILP complexity. | The size baseline predicts defect-inducing changes, not missing validation or agent benefit. |
 | Herbold et al., *Problems with SZZ and Features* | Peer-reviewed, Empirical Software Engineering 2022 | Manual/heuristic analysis of 398 releases from 38 Apache projects found severe SZZ label problems; only about half of commits labeled bug-fixing were actually bug-fixing, with substantial false and missed defect labels. | Outcome provenance, availability time, `unknown`, and manual audit—especially of evaluation labels—are central validity controls. | The findings concern SZZ-derived defect data; they do not quantify noise in a target repository's review labels. |
 | Wang et al., *Improving Code Localization with Repository Memory* (RepoMem) | ICLR 2026 paper | Non-parametric memory over commits/issues and active-file summaries improved LocAgent on SWE-bench Verified and Live; reported gains were not uniform and the low-history subgroup worsened. | Repository history can carry useful signal, but RuleLoom must measure evidence sufficiency and abstain when history is weak. | Code localization is narrower than end-to-end code quality; retrieval also increased cost. |
-| Lindenbauer et al., *From Knowledge to Noise* (CTIM-Rover) | REALM 2025 / arXiv preprint | Broad cross-task memory did not outperform AutoCodeRover in the reported configurations; distractors were identified as a likely cause and token use increased. | Do not dump raw experience into context. Keep rules few, selective, evaluated, and removable. | A negative result for episodic memory is not a direct test of ILP rules. |
-| Chen et al., *SWE-Exp* | arXiv preprint, 2025 | Compact successful and failed experiences with retrieval/reranking improved reported SWE-bench Verified results; removing abstraction or reranking hurt. | Preserve negative examples and evaluate abstraction/selectivity as core components, not formatting details. | Preprint results are benchmark- and implementation-specific. |
+| Lindenbauer et al., *From Knowledge to Noise* (CTIM-Rover) | Peer-reviewed REALM workshop paper, 2025 | Broad cross-task memory did not outperform AutoCodeRover in the reported configurations; distractors were identified as a likely cause and token use increased. | Do not dump raw experience into context. Keep rules few, selective, evaluated, and removable. | A negative result for episodic memory is not a direct test of ILP rules. |
+| Chen et al., *SWE-Exp* | arXiv preprint v2, 2 February 2026 | Compact successful and failed experiences with retrieval/reranking improved reported SWE-bench Verified results; removing abstraction or reranking hurt. | Preserve negative examples and evaluate abstraction/selectivity as core components, not formatting details. | Preprint results are benchmark- and implementation-specific. |
 | Lin et al., *LLMs as Continuous Learners* (EvoCoder) | arXiv preprint, 2024 | A hierarchical general/repository-specific experience pool with add, modify, merge, endorse, and remove operations improved issue-reproduction results in the reported setup. | Rules need lifecycle operations, repository scope, and deprecation—not append-only memory. | The task used issue reproduction and golden-patch-oriented evaluation, not live policy guidance. |
-| Shen et al., *Structurally Aligned Subtask-Level Memory* | arXiv preprint, 2026 | Subtask-aligned memory improved mean SWE-bench Verified Pass@1 by 4.7 percentage points over vanilla agents in the reported experiments. | Match rule granularity to a concrete decision such as extra validation, rather than maintaining a monolithic “repository memory.” | Recent preprint; no evidence yet for a specific Flutter repository or ILP. |
+| Shen et al., *Structurally Aligned Subtask-Level Memory* | arXiv preprint, 2026 | Subtask-aligned memory improved mean SWE-bench Verified Pass@1 by 4.7 percentage points over vanilla agents in the reported experiments. | Match rule granularity to a concrete decision such as extra validation, rather than maintaining a monolithic “repository memory.” | Recent preprint; no evidence yet for any RuleLoom evidence pack or ILP. |
 | Xu et al., *STAIR* | arXiv preprint, 2026 | Hierarchical trajectory abstraction transferred better than raw trajectories and improved reported Pass@1 across agent integrations. | Render compact abstractions, not raw traces; keep the canonical policy independent of the agent adapter. | Repair-plan retrieval is not the same intervention as Horn-rule guidance. |
-| Zhang et al., *FastContext* | arXiv preprint, 2026 | A specialized repository explorer improved reported resolution rates by up to 5.5% while reducing coding-agent tokens by up to 60%. | Measure context/token overhead and return focused evidence. | This evaluates learned exploration models, not repository policy induction. |
-| Song, Minku & Yao, *Validity of Retrospective Predictive Performance Evaluation in JIT-SDP* | Peer-reviewed, Empirical Software Engineering, 2023 | Change labels arrive with delay; waiting-time choices can introduce label noise, and predictive performance should be considered over time. | Keep recent outcomes `unknown`, define maturation before collection, and split chronologically. | Defect-inducing changes are only one possible RuleLoom target; label delays differ by workflow. |
+| Song, Minku & Yao, *Validity of Retrospective Predictive Performance Evaluation in JIT-SDP* | Peer-reviewed, Empirical Software Engineering, 2023 | Across 13 projects, waiting time did not significantly alter retrospective validity and even short waits often produced high validity. | Treat maturation time as an empirical protocol choice, keep availability explicit, and test it locally rather than assuming a large waiting-time bias. | Defect-inducing changes are only one possible RuleLoom target; label delays differ by workflow. |
 
 ## What the literature supports
 
@@ -101,10 +111,28 @@ learner is deliberately smaller: a deterministic, separate-and-conquer search
 over bounded conjunctions of unary Boolean facts. It is a portable baseline,
 not a reimplementation of Popper, FastLAS, ILASP, or AutoSpec's CEGIS loop.
 Although the Prolog rendering uses a variable, every literal refers to the same
-change observation; the v0.1 learner does not discover relations among entities.
+change observation; the v0.2 learner does not discover relations among entities.
+
+The evidence-pack boundary preserves that same core across languages. The
+`generic_changes@1` pack uses portable Git path and change-shape signals such as
+tests, documentation, CI, dependency manifests, churn, and file count without
+parsing source syntax. `flutter_testing@2` layers Dart/Flutter predicates on the
+shared evidence contract and, unlike frozen `flutter_testing@1`, recognizes both
+qualified `.state =` and bare Riverpod `state =` mutations. A semantic extractor
+change receives a new pack version rather than reinterpreting old observations.
+One experiment selects one pack/version; no cited result justifies combining
+different predicate vocabularies as if they were one sample.
+
+Pack-neutral `EvidenceConfig` supplies repository-relative include/exclude
+scopes and configurable churn/file-count thresholds. Schema v2 binds those
+settings, the pack version, and extractor identity into
+`evidence_protocol_hash`. The collector also bounds sampled file-path metadata
+for large changes while retaining aggregate counts, explicit truncation counts,
+and a full change-manifest hash. These are reproducibility and integrity
+controls; they do not establish that the extracted facts are useful predictors.
 
 The optional Popper adapter should not be confused with a reproduced paper
-artifact. Version 0.1 accepts only one non-recursive learned rule, disables
+artifact. Version 0.2 accepts only one non-recursive learned rule, disables
 RuleLoom bootstrap reruns, fingerprints an explicitly configured checkout, and
 requires an already provisioned compatible Python environment, SWI-Prolog, and
 GNU `timeout`. The adapter boundary is tested with controlled process output,
@@ -117,10 +145,12 @@ results.
 
 Kamei establishes the practical change-level quality-assurance setting. Falessi
 shows that validation order can materially alter the measured performance of
-within-project defect classifiers, while Song, Minku, and Yao show that outcome
-delay and waiting policy affect retrospective validity. Repository outcomes are
-delayed: calling an uneventful new change `negative` creates false certainty,
-while random splitting can train on the future and test on the past.
+within-project defect classifiers. Song, Minku, and Yao found no significant
+waiting-time effect across 13 projects, so RuleLoom treats maturation as a local
+protocol choice rather than assuming a universally large bias. Repository
+outcomes are still delayed: calling an uneventful new change `negative` creates
+false certainty, while random splitting can train on the future and test on the
+past.
 
 RuleLoom orders mature labels by `observed_at`, trains on the older partition,
 and tests on the newer partition. Before learning, it removes a nominal training
@@ -132,8 +162,10 @@ across observations with the same `source.change_id`, and elapsed shadow time is
 computed from the earliest retained unit predictions.
 `Observation.protocol_hash` and
 `Prediction.protocol.evidence_protocol_hash` are the same digest binding
-experiment, repository, observation unit, outcome definition, target, and pack;
-the full Prediction protocol additionally binds extractor and configuration.
+the evidence protocol. For schema v2 that identity includes experiment,
+repository, observation unit, outcome definition, target, pack name/version,
+extractor identity, and exact `EvidenceConfig` scopes and thresholds; the full
+Prediction protocol additionally binds the complete configuration hash.
 
 Herbold's results make label provenance a first-order requirement, not optional
 metadata. RuleLoom therefore requires `label_evidence` for mature labels and
@@ -152,7 +184,9 @@ identity can still leak or confound results and require review.
 No cited result establishes that:
 
 - a RuleLoom rule improves a Codex or Claude session;
-- a Flutter predicate pack transfers from one repository to another;
+- the generic pack is equally predictive across programming languages;
+- a specialized pack or learned rule transfers across repositories, languages,
+  pack families, or pack versions;
 - `needs_extra_validation` is a valid proxy for defects or product quality;
 - a high retrospective F1 causes fewer regressions;
 - readable rules are necessarily trusted or followed by developers;
@@ -172,6 +206,9 @@ and deprecation.
 | Evidence risk | Required mechanism |
 |---|---|
 | History is sparse or irrelevant | Data-readiness warnings and abstention |
+| Different components contaminate one observation | Repository-relative include/exclude scopes fixed before collection |
+| Extractor semantics drift or vocabularies are mixed | One versioned pack per experiment; pack, extractor, scopes, and thresholds bound into `evidence_protocol_hash` |
+| Very large changes exceed practical artifact limits | Bounded path/per-file metadata, explicit truncation counts, aggregate totals, and a full manifest hash |
 | Raw memory distracts agents | Compact matching rules only |
 | Labels contain noise | Required `label_evidence`, `unknown` state, maturation policy, optional MDL engine |
 | Future leakage inflates results | Chronological holdout, label-availability filtering, and persisted split IDs |
@@ -192,7 +229,10 @@ Every RuleLoom evaluation should report:
 
 - repository and observation window;
 - target definition and maturation rule;
-- predicate pack and extractor versions;
+- config schema, the experiment's single predicate pack/version, and extractor
+  identity;
+- `EvidenceConfig` include/exclude scopes, large-change and multi-file
+  thresholds, metadata limit, and any metadata truncation counts;
 - number of eligible, collected, labeled, positive, negative, and unknown cases;
 - class prevalence and missing/extraction errors;
 - chronological train/test boundary and exact IDs;
@@ -248,7 +288,7 @@ target or maturity window after inspecting which one makes the rules look best.
   Programming](https://doi.org/10.1017/S1471068422000011). *Theory and Practice
   of Logic Programming*, 2023.
 - Pingchuan Ma et al. [AutoSpec: Safety Rule Evolution for LLM Agents via
-  Inductive Logic Programming](https://arxiv.org/abs/2606.24245), arXiv v3, 7
+  Inductive Logic Programming](https://arxiv.org/abs/2606.24245v3), arXiv v3, 7
   July 2026.
 - [Popper official repository and current usage
   documentation](https://github.com/logic-and-learning-lab/Popper).
@@ -259,17 +299,15 @@ target or maturity window after inspecting which one makes the rules look best.
   Memory](https://arxiv.org/abs/2510.01003), 2025/ICLR 2026.
 - Tobias Lindenbauer, Georg Groh, and Hinrich Schütze. [From Knowledge to Noise:
   CTIM-Rover and the Pitfalls of Episodic Memory in Software Engineering
-  Agents](https://arxiv.org/abs/2505.23422), 2025.
+  Agents](https://aclanthology.org/2025.realm-1.30/). *REALM*, 2025.
 - Silin Chen et al. [SWE-Exp: Experience-Driven Software Issue
-  Resolution](https://arxiv.org/abs/2507.23361), 2025.
+  Resolution](https://arxiv.org/abs/2507.23361v2), arXiv v2, 2 February 2026.
 - Yalan Lin et al. [LLMs as Continuous Learners: Improving the Reproduction of
   Defective Code in Software Issues](https://arxiv.org/abs/2411.13941), 2024.
 - Kangning Shen et al. [Structurally Aligned Subtask-Level Memory for Software
   Engineering Agents](https://arxiv.org/abs/2602.21611), 2026.
 - Yisen Xu et al. [Reusing Past Repairs Through Hierarchical Trajectory
   Abstraction for Coding Agents](https://arxiv.org/abs/2607.29658), 2026.
-- Shaoqiu Zhang et al. [FastContext: Training Efficient Repository Explorer for
-  Coding Agents](https://arxiv.org/abs/2606.14066), 2026.
 
 ### Repository change quality and evaluation
 

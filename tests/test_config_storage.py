@@ -15,10 +15,12 @@ from ruleloom import storage
 from ruleloom.config import (
     CONFIG_PATH,
     EvaluationConfig,
+    EvidenceConfig,
     LearnerConfig,
     PromotionConfig,
     ProtocolConfig,
     RuleLoomConfig,
+    default_config,
 )
 from ruleloom.models import (
     Candidate,
@@ -204,6 +206,121 @@ def test_config_round_trip_load_and_hash(tmp_path: Path) -> None:
     assert loaded == config
     assert loaded.hash == config.hash
     assert RuleLoomConfig.from_dict(config.to_dict()) == config
+
+
+def test_schema_v1_config_identity_remains_stable() -> None:
+    config = RuleLoomConfig(project="ExampleProject")
+
+    assert config.schema_version == 1
+    assert "pack_version" not in config.to_dict()
+    assert "evidence" not in config.to_dict()
+    assert config.hash == "c2432c752b22fc5f9c178c65e7e0157d9b2e034dc0d14eee650c8b3459487db3"
+    assert (
+        config.evidence_protocol_hash
+        == "0b8c8c7e25b4975d8c84a3b83dbf160902760c9b7bc2212e80dfc85008697188"
+    )
+
+
+def test_schema_v2_binds_pack_version_scope_and_thresholds_to_protocol() -> None:
+    baseline = default_config("ExampleProject")
+    scoped = replace(
+        baseline,
+        evidence=EvidenceConfig(
+            include_paths=("apps/mobile/**",),
+            exclude_paths=("apps/mobile/generated/**",),
+            large_change_churn=500,
+            multi_file_count=8,
+        ),
+    )
+    flutter = replace(baseline, pack="flutter_testing", pack_version=2)
+
+    assert baseline.schema_version == 2
+    assert baseline.pack == "generic_changes"
+    assert baseline.to_dict()["pack_version"] == 1
+    assert baseline.evidence_protocol_hash != scoped.evidence_protocol_hash
+    assert baseline.evidence_protocol_hash != flutter.evidence_protocol_hash
+    assert baseline.evidence_protocol["extractor"] == "ruleloom.generic_changes.git.v1"
+    assert flutter.evidence_protocol["extractor"] == "ruleloom.flutter_testing.git.v2"
+
+
+def test_schema_v2_deserialization_requires_the_complete_persisted_profile() -> None:
+    serialized = default_config("ExampleProject").to_dict()
+    required_top_level = {
+        "project",
+        "target",
+        "pack",
+        "pack_version",
+        "dataset",
+        "candidates_dir",
+        "shadow_dir",
+        "approved_dir",
+        "deprecated_dir",
+        "predictions",
+        "protocol",
+        "evidence",
+        "learner",
+        "evaluation",
+        "promotion",
+    }
+    for field in required_top_level:
+        incomplete = dict(serialized)
+        incomplete.pop(field)
+        with pytest.raises(ModelError, match="schema-v2 config is missing required fields"):
+            RuleLoomConfig.from_dict(incomplete)
+
+    incomplete_evidence = dict(serialized)
+    evidence = dict(serialized["evidence"])  # type: ignore[arg-type]
+    evidence.pop("include_paths")
+    incomplete_evidence["evidence"] = evidence
+    with pytest.raises(ModelError, match="schema-v2 evidence is missing required fields"):
+        RuleLoomConfig.from_dict(incomplete_evidence)
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"include_paths": "**"},
+        {"include_paths": ("apps/**", 7)},
+        {"exclude_paths": "generated/**"},
+        {"include_paths": ()},
+        {"include_paths": ("../outside/**",)},
+        {"include_paths": ("/absolute/**",)},
+        {"exclude_paths": (":(top)secret/**",)},
+        {"large_change_churn": 0},
+        {"large_change_churn": True},
+        {"multi_file_count": 0},
+        {"multi_file_count": "3"},
+        {"metadata_file_limit": 0},
+        {"metadata_file_limit": 3.5},
+    ],
+)
+def test_evidence_config_rejects_unsafe_profiles(kwargs: dict[str, object]) -> None:
+    with pytest.raises(ModelError):
+        EvidenceConfig(**kwargs)  # type: ignore[arg-type]
+
+
+def test_config_rejects_non_integer_pack_version() -> None:
+    with pytest.raises(ModelError, match="pack_version"):
+        RuleLoomConfig(project="ExampleProject", pack_version="1")  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize("schema_version", [True, 1.0, 2.0])
+def test_config_rejects_non_integer_schema_version(schema_version: object) -> None:
+    with pytest.raises(ModelError, match="schema_version"):
+        RuleLoomConfig(
+            project="ExampleProject",
+            schema_version=schema_version,  # type: ignore[arg-type]
+        )
+    with pytest.raises(ModelError, match="schema_version"):
+        default_config(
+            "ExampleProject",
+            schema_version=schema_version,  # type: ignore[arg-type]
+        )
+
+
+def test_default_config_does_not_replace_an_explicit_empty_pack() -> None:
+    with pytest.raises(ModelError, match="unsupported evidence pack"):
+        default_config("ExampleProject", pack="")
 
 
 @pytest.mark.parametrize(

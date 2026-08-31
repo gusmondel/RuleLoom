@@ -29,6 +29,7 @@ from ruleloom.models import (
     validate_json_value,
     validate_subject,
 )
+from ruleloom.packs import get_pack, validate_policy_pack_contract
 
 _MAX_JSON_BYTES = 8 * 1024 * 1024
 _MAX_JSONL_BYTES = 64 * 1024 * 1024
@@ -652,15 +653,17 @@ def _validate_active(
             f"active policy {candidate.id} uses engine {candidate.engine!r}, not "
             f"{config.learner.engine!r}"
         )
-    if candidate.metadata.get("pack") != config.pack:
-        raise ModelError(
-            f"active policy {candidate.id} was not learned with fact pack {config.pack!r}"
-        )
+    descriptor = get_pack(config.pack, config.pack_version)
+    validate_policy_pack_contract(
+        descriptor,
+        candidate.metadata,
+        {literal.predicate for clause in candidate.rules.clauses for literal in clause.body},
+        schema_version=config.schema_version,
+        evidence_protocol_hash=config.evidence_protocol_hash,
+        subject=f"active policy {candidate.id}",
+    )
     if candidate.metadata.get("repository_id") != config.protocol.repository_id:
         raise ModelError(f"active policy {candidate.id} belongs to a different repository")
-    extractors = candidate.metadata.get("extractors")
-    if not isinstance(extractors, list) or not all(isinstance(item, str) for item in extractors):
-        raise ModelError(f"active policy {candidate.id} lacks valid extractor provenance")
     reviewer = candidate.review.get("reviewer")
     reviewed_at = candidate.review.get("reviewed_at")
     note = candidate.review.get("note")

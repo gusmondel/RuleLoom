@@ -18,6 +18,7 @@ from ruleloom.models import (
     validate_predicate,
     validate_subject,
 )
+from ruleloom.packs import PackOptions, get_pack, latest_pack_version
 
 CONFIG_PATH = Path(".ruleloom/config.json")
 _MAX_CONFIG_BYTES = 1024 * 1024
@@ -70,6 +71,12 @@ def _reject_unknown(value: dict[str, object], allowed: set[str], name: str) -> N
     unknown = set(value).difference(allowed)
     if unknown:
         raise ModelError(f"unknown {name} fields: {', '.join(sorted(unknown))}")
+
+
+def _require_fields(value: dict[str, object], required: set[str], name: str) -> None:
+    missing = required.difference(value)
+    if missing:
+        raise ModelError(f"{name} is missing required fields: {', '.join(sorted(missing))}")
 
 
 @dataclass(frozen=True, slots=True)
@@ -513,11 +520,142 @@ class PromotionConfig:
         )
 
 
+def _scope_pattern(value: object, name: str) -> str:
+    pattern = _string(value, name)
+    path = Path(pattern)
+    if (
+        len(pattern) > 256
+        or any(ord(character) < 32 or ord(character) == 127 for character in pattern)
+        or "\\" in pattern
+        or path.is_absolute()
+        or ".." in path.parts
+        or pattern.startswith(":")
+    ):
+        raise ModelError(
+            f"{name} must be a portable repository-relative glob without '..', backslashes, "
+            "Git pathspec magic, or control characters"
+        )
+    return pattern
+
+
+@dataclass(frozen=True, slots=True)
+class EvidenceConfig:
+    """Pack-neutral collection scope and change-shape thresholds."""
+
+    include_paths: tuple[str, ...] = ("**",)
+    exclude_paths: tuple[str, ...] = ()
+    large_change_churn: int = 200
+    multi_file_count: int = 3
+    metadata_file_limit: int = 512
+
+    def __post_init__(self) -> None:
+        for value, name in (
+            (self.include_paths, "evidence.include_paths"),
+            (self.exclude_paths, "evidence.exclude_paths"),
+        ):
+            if isinstance(value, str) or not isinstance(value, tuple | list):
+                raise ModelError(f"{name} must be an array of globs")
+            if not all(isinstance(item, str) for item in value):
+                raise ModelError(f"{name} items must be strings")
+        if not self.include_paths:
+            raise ModelError("evidence.include_paths must contain at least one glob")
+        if len(self.include_paths) > 128 or len(self.exclude_paths) > 128:
+            raise ModelError("evidence path scopes support at most 128 include and exclude globs")
+        include = tuple(
+            sorted(
+                {_scope_pattern(item, "evidence.include_paths item") for item in self.include_paths}
+            )
+        )
+        exclude = tuple(
+            sorted(
+                {_scope_pattern(item, "evidence.exclude_paths item") for item in self.exclude_paths}
+            )
+        )
+        object.__setattr__(self, "include_paths", include)
+        object.__setattr__(self, "exclude_paths", exclude)
+        if (
+            isinstance(self.large_change_churn, bool)
+            or not isinstance(self.large_change_churn, int)
+            or not 1 <= self.large_change_churn <= 10_000_000
+        ):
+            raise ModelError("evidence.large_change_churn must be between 1 and 10000000")
+        if (
+            isinstance(self.multi_file_count, bool)
+            or not isinstance(self.multi_file_count, int)
+            or not 1 <= self.multi_file_count <= 100_000
+        ):
+            raise ModelError("evidence.multi_file_count must be between 1 and 100000")
+        if (
+            isinstance(self.metadata_file_limit, bool)
+            or not isinstance(self.metadata_file_limit, int)
+            or not 1 <= self.metadata_file_limit <= 10_000
+        ):
+            raise ModelError("evidence.metadata_file_limit must be between 1 and 10000")
+
+    @property
+    def pack_options(self) -> PackOptions:
+        return PackOptions(
+            large_change_churn=self.large_change_churn,
+            multi_file_count=self.multi_file_count,
+            metadata_file_limit=self.metadata_file_limit,
+        )
+
+    def to_dict(self) -> JsonObject:
+        return {
+            "include_paths": list(self.include_paths),
+            "exclude_paths": list(self.exclude_paths),
+            "large_change_churn": self.large_change_churn,
+            "multi_file_count": self.multi_file_count,
+            "metadata_file_limit": self.metadata_file_limit,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, object]) -> EvidenceConfig:
+        _reject_unknown(
+            value,
+            {
+                "include_paths",
+                "exclude_paths",
+                "large_change_churn",
+                "multi_file_count",
+                "metadata_file_limit",
+            },
+            "evidence",
+        )
+
+        def patterns(key: str, default: list[str]) -> tuple[str, ...]:
+            raw = value.get(key, default)
+            if not isinstance(raw, list):
+                raise ModelError(f"evidence.{key} must be an array of path globs")
+            return tuple(_scope_pattern(item, f"evidence.{key} item") for item in raw)
+
+        return cls(
+            include_paths=patterns("include_paths", ["**"]),
+            exclude_paths=patterns("exclude_paths", []),
+            large_change_churn=_integer(
+                value.get("large_change_churn", 200),
+                "evidence.large_change_churn",
+                minimum=1,
+            ),
+            multi_file_count=_integer(
+                value.get("multi_file_count", 3),
+                "evidence.multi_file_count",
+                minimum=1,
+            ),
+            metadata_file_limit=_integer(
+                value.get("metadata_file_limit", 512),
+                "evidence.metadata_file_limit",
+                minimum=1,
+            ),
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class RuleLoomConfig:
     project: str
     target: str = "needs_extra_validation"
     pack: str = "flutter_testing"
+    pack_version: int = 1
     dataset: str = ".ruleloom/observations.jsonl"
     candidates_dir: str = ".ruleloom/candidates"
     shadow_dir: str = ".ruleloom/shadow"
@@ -525,13 +663,18 @@ class RuleLoomConfig:
     deprecated_dir: str = ".ruleloom/deprecated"
     predictions: str = ".ruleloom/predictions.jsonl"
     protocol: ProtocolConfig = field(default_factory=ProtocolConfig)
+    evidence: EvidenceConfig = field(default_factory=EvidenceConfig)
     learner: LearnerConfig = field(default_factory=LearnerConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     promotion: PromotionConfig = field(default_factory=PromotionConfig)
     schema_version: int = 1
 
     def __post_init__(self) -> None:
-        if self.schema_version != 1:
+        if (
+            isinstance(self.schema_version, bool)
+            or not isinstance(self.schema_version, int)
+            or self.schema_version not in {1, 2}
+        ):
             raise ModelError("unsupported config schema_version")
         if not self.project.strip():
             raise ModelError("project cannot be empty")
@@ -545,8 +688,23 @@ class RuleLoomConfig:
                 "and start alphanumerically"
             )
         validate_predicate(self.target, field_name="target")
-        if self.pack != "flutter_testing":
-            raise ModelError("the 0.1 release supports only the flutter_testing pack")
+        if (
+            isinstance(self.pack_version, bool)
+            or not isinstance(self.pack_version, int)
+            or self.pack_version < 1
+        ):
+            raise ModelError("pack_version must be an integer >= 1")
+        if self.schema_version == 1:
+            if self.pack != "flutter_testing" or self.pack_version != 1:
+                raise ModelError("schema-v1 configs support only flutter_testing version 1")
+            if self.evidence != EvidenceConfig():
+                raise ModelError("schema-v1 configs cannot customize evidence collection")
+        elif self.pack == "flutter_testing" and self.pack_version == 1:
+            raise ModelError(
+                "flutter_testing version 1 is frozen for schema-v1 compatibility; "
+                "schema-v2 experiments must use flutter_testing version 2"
+            )
+        get_pack(self.pack, self.pack_version)
         managed = {
             "dataset": self.dataset,
             "candidates_dir": self.candidates_dir,
@@ -600,7 +758,7 @@ class RuleLoomConfig:
     @property
     def evidence_protocol(self) -> JsonObject:
         """Fields that decide whether observations and outcomes may be pooled."""
-        return {
+        protocol: JsonObject = {
             "schema_version": self.schema_version,
             "experiment_id": self.protocol.experiment_id,
             "repository_id": self.protocol.repository_id,
@@ -609,13 +767,18 @@ class RuleLoomConfig:
             "target": self.target,
             "pack": self.pack,
         }
+        if self.schema_version >= 2:
+            protocol["pack_version"] = self.pack_version
+            protocol["extractor"] = get_pack(self.pack, self.pack_version).extractor
+            protocol["evidence"] = self.evidence.to_dict()
+        return protocol
 
     @property
     def evidence_protocol_hash(self) -> str:
         return content_hash(self.evidence_protocol)
 
     def to_dict(self) -> JsonObject:
-        return {
+        value: JsonObject = {
             "schema_version": self.schema_version,
             "project": self.project,
             "target": self.target,
@@ -631,9 +794,17 @@ class RuleLoomConfig:
             "evaluation": self.evaluation.to_dict(),
             "promotion": self.promotion.to_dict(),
         }
+        if self.schema_version >= 2:
+            value["pack_version"] = self.pack_version
+            value["evidence"] = self.evidence.to_dict()
+        return value
 
     @classmethod
     def from_dict(cls, value: dict[str, object]) -> RuleLoomConfig:
+        raw_version = value.get("schema_version")
+        if isinstance(raw_version, bool) or not isinstance(raw_version, int):
+            raise ModelError("config.schema_version must be an integer")
+        version_fields = {"pack_version", "evidence"} if raw_version >= 2 else set()
         _reject_unknown(
             value,
             {
@@ -641,6 +812,7 @@ class RuleLoomConfig:
                 "project",
                 "target",
                 "pack",
+                *version_fields,
                 "dataset",
                 "candidates_dir",
                 "shadow_dir",
@@ -654,14 +826,104 @@ class RuleLoomConfig:
             },
             "config",
         )
-        raw_version = value.get("schema_version")
-        if isinstance(raw_version, bool) or not isinstance(raw_version, int):
-            raise ModelError("config.schema_version must be an integer")
+        raw_protocol = _object(value.get("protocol", {}), "protocol")
+        raw_evidence = _object(value.get("evidence", {}), "evidence")
+        raw_learner = _object(value.get("learner", {}), "learner")
+        raw_evaluation = _object(value.get("evaluation", {}), "evaluation")
+        raw_promotion = _object(value.get("promotion", {}), "promotion")
+        if raw_version >= 2:
+            _require_fields(
+                value,
+                {
+                    "schema_version",
+                    "project",
+                    "target",
+                    "pack",
+                    "pack_version",
+                    "dataset",
+                    "candidates_dir",
+                    "shadow_dir",
+                    "approved_dir",
+                    "deprecated_dir",
+                    "predictions",
+                    "protocol",
+                    "evidence",
+                    "learner",
+                    "evaluation",
+                    "promotion",
+                },
+                "schema-v2 config",
+            )
+            _require_fields(
+                raw_protocol,
+                {"experiment_id", "repository_id", "prediction_unit", "outcome_definition"},
+                "schema-v2 protocol",
+            )
+            _require_fields(
+                raw_evidence,
+                {
+                    "include_paths",
+                    "exclude_paths",
+                    "large_change_churn",
+                    "multi_file_count",
+                    "metadata_file_limit",
+                },
+                "schema-v2 evidence",
+            )
+            _require_fields(
+                raw_learner,
+                {
+                    "engine",
+                    "max_body",
+                    "max_rules",
+                    "allow_negation",
+                    "min_precision",
+                    "min_support",
+                    "false_positive_cost",
+                    "bootstrap_runs",
+                    "max_predicates",
+                    "popper_dir",
+                    "popper_timeout_seconds",
+                },
+                "schema-v2 learner",
+            )
+            _require_fields(
+                raw_evaluation,
+                {"test_fraction", "min_train_examples", "min_test_examples", "seed"},
+                "schema-v2 evaluation",
+            )
+            _require_fields(
+                raw_promotion,
+                {
+                    "min_test_precision",
+                    "min_test_recall",
+                    "min_stability",
+                    "require_test_set",
+                    "min_positive_for_shadow",
+                    "min_positive_for_approval",
+                    "require_baseline_improvement",
+                    "min_shadow_predictions_for_approval",
+                    "min_shadow_mature_outcomes_for_approval",
+                    "min_shadow_days_for_approval",
+                    "min_shadow_precision",
+                    "min_shadow_recall",
+                    "min_shadow_mcc",
+                    "min_shadow_positive_outcomes_for_approval",
+                    "min_shadow_negative_outcomes_for_approval",
+                    "min_shadow_matches_per_rule_for_approval",
+                },
+                "schema-v2 promotion",
+            )
+        default_pack = "flutter_testing" if raw_version == 1 else "generic_changes"
+        raw_pack_version = value.get("pack_version", 1)
+        if isinstance(raw_pack_version, bool) or not isinstance(raw_pack_version, int):
+            raise ModelError("pack_version must be an integer")
         return cls(
             schema_version=raw_version,
             project=_string(value.get("project"), "project"),
             target=_string(value.get("target", "needs_extra_validation"), "target"),
-            pack=_string(value.get("pack", "flutter_testing"), "pack"),
+            pack=_string(value.get("pack", default_pack), "pack"),
+            pack_version=raw_pack_version,
             dataset=_string(value.get("dataset", ".ruleloom/observations.jsonl"), "dataset"),
             candidates_dir=_string(
                 value.get("candidates_dir", ".ruleloom/candidates"), "candidates_dir"
@@ -674,12 +936,13 @@ class RuleLoomConfig:
             predictions=_string(
                 value.get("predictions", ".ruleloom/predictions.jsonl"), "predictions"
             ),
-            protocol=ProtocolConfig.from_dict(_object(value.get("protocol", {}), "protocol")),
-            learner=LearnerConfig.from_dict(_object(value.get("learner", {}), "learner")),
-            evaluation=EvaluationConfig.from_dict(
-                _object(value.get("evaluation", {}), "evaluation")
+            protocol=ProtocolConfig.from_dict(raw_protocol),
+            evidence=(
+                EvidenceConfig.from_dict(raw_evidence) if raw_version >= 2 else EvidenceConfig()
             ),
-            promotion=PromotionConfig.from_dict(_object(value.get("promotion", {}), "promotion")),
+            learner=LearnerConfig.from_dict(raw_learner),
+            evaluation=EvaluationConfig.from_dict(raw_evaluation),
+            promotion=PromotionConfig.from_dict(raw_promotion),
         )
 
     @classmethod
@@ -708,6 +971,29 @@ def discover_root(start: Path | None = None) -> Path:
 
 
 def default_config(
-    project: str, *, repository_id: str = "repository.unspecified"
+    project: str,
+    *,
+    repository_id: str = "repository.unspecified",
+    pack: str | None = None,
+    pack_version: int | None = None,
+    schema_version: int = 2,
 ) -> RuleLoomConfig:
-    return RuleLoomConfig(project=project, protocol=ProtocolConfig(repository_id=repository_id))
+    selected_pack = (
+        pack
+        if pack is not None
+        else ("flutter_testing" if schema_version == 1 else "generic_changes")
+    )
+    selected_version = (
+        1
+        if schema_version == 1 and pack_version is None
+        else latest_pack_version(selected_pack)
+        if pack_version is None
+        else pack_version
+    )
+    return RuleLoomConfig(
+        schema_version=schema_version,
+        project=project,
+        pack=selected_pack,
+        pack_version=selected_version,
+        protocol=ProtocolConfig(repository_id=repository_id),
+    )

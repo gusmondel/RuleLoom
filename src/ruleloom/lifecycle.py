@@ -39,6 +39,12 @@ from ruleloom.models import (
     parse_timestamp,
     validate_prediction_cohort,
 )
+from ruleloom.packs import (
+    get_pack,
+    matches_pack_version,
+    validate_persisted_extraction,
+    validate_policy_pack_contract,
+)
 from ruleloom.storage import (
     approved_path,
     candidate_path,
@@ -319,6 +325,39 @@ def learn_candidate(
             "learning data contains observations from a different evidence protocol: "
             + ", ".join(sorted(mismatched_protocol)[:10])
         )
+    descriptor = get_pack(config.pack, config.pack_version)
+    for item in observations:
+        kind = item.source.get("kind")
+        if not isinstance(kind, str) or kind not in {
+            "git_commit",
+            "git_range",
+            "git_worktree",
+        }:
+            raise ModelError(f"learning observation {item.id!r} lacks a supported observation unit")
+        repository = item.source.get("repository")
+        if not isinstance(repository, str) or not repository:
+            raise ModelError(f"learning observation {item.id!r} lacks repository provenance")
+        if repository != config.protocol.repository_id:
+            raise ModelError(
+                f"learning observation {item.id!r} belongs to a different configured repository"
+            )
+        if item.source.get("pack") != config.pack:
+            raise ModelError(f"learning observation {item.id!r} uses a different fact pack")
+        source_pack_version = item.source.get("pack_version")
+        if (
+            config.schema_version >= 2 or source_pack_version is not None
+        ) and not matches_pack_version(source_pack_version, config.pack_version):
+            raise ModelError(f"learning observation {item.id!r} uses a different fact pack version")
+        if item.source.get("extractor") != descriptor.extractor:
+            raise ModelError(
+                f"learning observation {item.id!r} has incompatible extractor provenance"
+            )
+        validate_persisted_extraction(
+            descriptor,
+            item.facts,
+            item.fact_evidence,
+            subject=f"learning observation {item.id!r}",
+        )
     mature_examples = labeled(observations, target, as_of=cutoff)
     units: set[str] = set()
     repositories: set[str] = set()
@@ -339,7 +378,7 @@ def learn_candidate(
         raise ModelError("learning data mixes Git observation units: " + ", ".join(sorted(units)))
     if units != {"git_commit"}:
         raise ModelError(
-            "the 0.1 retrospective learner accepts canonical git_commit units only; "
+            "the retrospective learner accepts canonical git_commit units only; "
             "git_range/worktree observations remain prospective pilot evidence"
         )
     if repositories != {config.protocol.repository_id}:
@@ -442,6 +481,7 @@ def learn_candidate(
     best_literal_name, _ = best_literal_baseline(train, split.test, target, as_of=cutoff)
     metadata: JsonObject = {
         "pack": config.pack,
+        "pack_version": config.pack_version,
         "repository_id": config.protocol.repository_id,
         "evidence_protocol_hash": config.evidence_protocol_hash,
         "historical_observation_unit": "git_commit",
@@ -1119,7 +1159,9 @@ def make_prediction(
     repository_id = observation.source.get("repository")
     unit_id = observation.source.get("change_id")
     observation_pack = observation.source.get("pack")
+    observation_pack_version = observation.source.get("pack_version")
     source_extractor = observation.source.get("extractor")
+    descriptor = get_pack(config.pack, config.pack_version)
     if source_kind != config.protocol.prediction_unit:
         raise ModelError(
             f"observation unit {source_kind!r} does not match configured prospective unit "
@@ -1140,9 +1182,24 @@ def make_prediction(
             f"observation fact pack {observation_pack!r} does not match configured pack "
             f"{config.pack!r}"
         )
-    if not isinstance(source_extractor, str) or not source_extractor:
-        raise ModelError("observation lacks deterministic extractor provenance")
-    current_extractors = set(_extractors([observation]))
+    if (
+        config.schema_version >= 2 or observation_pack_version is not None
+    ) and not matches_pack_version(observation_pack_version, config.pack_version):
+        raise ModelError(
+            f"observation fact pack version {observation_pack_version!r} does not match "
+            f"configured version {config.pack_version!r}"
+        )
+    if source_extractor != descriptor.extractor:
+        raise ModelError(
+            f"observation extractor provenance {source_extractor!r} does not match configured "
+            f"extractor {descriptor.extractor!r}"
+        )
+    validate_persisted_extraction(
+        descriptor,
+        observation.facts,
+        observation.fact_evidence,
+        subject=f"prediction observation {observation.id!r}",
+    )
     targets = {candidate.rules.target for candidate in candidates}
     if len(targets) > 1:
         raise ModelError("active policy set contains multiple prediction targets")
@@ -1166,18 +1223,14 @@ def make_prediction(
                 f"observation fact pack {observation_pack!r} is incompatible with "
                 f"candidate {candidate.id} pack {candidate_pack!r}"
             )
-        raw_extractors = candidate.metadata.get("extractors")
-        if raw_extractors is not None:
-            if not isinstance(raw_extractors, list) or not all(
-                isinstance(item, str) for item in raw_extractors
-            ):
-                raise ModelError(f"candidate {candidate.id} has invalid extractor provenance")
-            learned_extractors = set(cast(list[str], raw_extractors))
-            if current_extractors and not current_extractors.issubset(learned_extractors):
-                raise ModelError(
-                    f"observation extractor provenance is incompatible with candidate "
-                    f"{candidate.id}"
-                )
+        validate_policy_pack_contract(
+            descriptor,
+            candidate.metadata,
+            {literal.predicate for clause in candidate.rules.clauses for literal in clause.body},
+            schema_version=config.schema_version,
+            evidence_protocol_hash=config.evidence_protocol_hash,
+            subject=f"candidate {candidate.id}",
+        )
     matches = match_rules(observation.facts, candidates)
     policies: list[JsonObject] = [
         {

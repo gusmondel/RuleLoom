@@ -40,6 +40,7 @@ from ruleloom.models import (
     RuleLiteral,
     RuleSet,
 )
+from ruleloom.packs import get_pack
 from ruleloom.project import initialize_project, validate_observations, validate_project
 from ruleloom.storage import (
     append_prediction,
@@ -93,17 +94,30 @@ def _observation(
     kind: str = "git_commit",
     repository_id: str = "repository.unspecified",
     protocol_hash: str | None = None,
+    config: RuleLoomConfig | None = None,
 ) -> Observation:
     observed = datetime(2026, 1, 1, tzinfo=UTC) + timedelta(days=index)
     available = observed + timedelta(hours=1)
     facts = facts or set()
+    effective_config = config or RuleLoomConfig(
+        project="Tests",
+        protocol=ProtocolConfig(repository_id=repository_id),
+    )
+    descriptor = get_pack(effective_config.pack, effective_config.pack_version)
+    provenance_facts = facts if evidence_facts is None else evidence_facts
+    source = {
+        "kind": kind,
+        "repository": effective_config.protocol.repository_id,
+        "change_id": f"change-{index}",
+        "pack": effective_config.pack,
+        "extractor": descriptor.extractor,
+    }
+    if effective_config.schema_version >= 2:
+        source["pack_version"] = effective_config.pack_version
     return Observation(
         id=f"outcome-{index}",
         observed_at=observed.isoformat(),
-        protocol_hash=protocol_hash
-        or RuleLoomConfig(
-            project="Tests", protocol=ProtocolConfig(repository_id=repository_id)
-        ).evidence_protocol_hash,
+        protocol_hash=protocol_hash or effective_config.evidence_protocol_hash,
         facts=frozenset(facts),
         labels={TARGET: label},
         label_evidence=(
@@ -120,18 +134,12 @@ def _observation(
         fact_evidence={
             fact: FactEvidence(
                 kind="deterministic",
-                extractor="tests",
+                extractor=descriptor.extractor,
                 evidence=(f"synthetic:{fact}",),
             )
-            for fact in (evidence_facts or set())
+            for fact in provenance_facts
         },
-        source={
-            "kind": kind,
-            "repository": repository_id,
-            "change_id": f"change-{index}",
-            "pack": "flutter_testing",
-            "extractor": "ruleloom.flutter_testing.git.v1",
-        },
+        source=source,
     )
 
 
@@ -148,7 +156,7 @@ def _candidate(
     dataset_hash: str | None = None,
 ) -> Candidate:
     effective_config = config or _promotion_config()
-    clauses = (HornClause(TARGET, (RuleLiteral("risk"),)),) if with_rules else ()
+    clauses = (HornClause(TARGET, (RuleLiteral("large_change"),)),) if with_rules else ()
     test = test_metrics or Metrics.from_counts(8, 2, 8, 2)
     baseline = baseline_metrics or Metrics.from_counts(0, 0, 10, 10)
     return Candidate(
@@ -171,13 +179,17 @@ def _candidate(
         test_ids=("test-1", "test-2", "test-3", "test-4"),
         metadata={
             "pack": effective_config.pack,
+            "pack_version": effective_config.pack_version,
             "repository_id": effective_config.protocol.repository_id,
+            "evidence_protocol_hash": effective_config.evidence_protocol_hash,
             "historical_observation_unit": "git_commit",
-            "extractors": ["ruleloom.flutter_testing.git.v1"],
+            "extractors": [
+                get_pack(effective_config.pack, effective_config.pack_version).extractor
+            ],
             "readiness": {"positive": positive},
             "rule_evaluation": [
                 {
-                    "signature": f"{TARGET}:-risk",
+                    "signature": f"{TARGET}:-large_change",
                     "train": test.to_dict(),
                     "test": test.to_dict(),
                 }
@@ -227,10 +239,10 @@ def test_readiness_reports_evidence_coverage_stages_and_censoring() -> None:
         _observation(
             0,
             LabelValue.POSITIVE,
-            {"risk", "uses_async"},
-            evidence_facts={"risk"},
+            {"large_change", "uses_async"},
+            evidence_facts={"large_change"},
         ),
-        _observation(1, LabelValue.NEGATIVE, {"safe"}, evidence_facts={"safe"}),
+        _observation(1, LabelValue.NEGATIVE, {"touches_test"}, evidence_facts={"touches_test"}),
         _observation(2, LabelValue.UNKNOWN),
     ]
 
@@ -253,7 +265,7 @@ def test_readiness_reports_evidence_coverage_stages_and_censoring() -> None:
 
 
 def test_project_validation_rejects_labels_available_before_observation() -> None:
-    item = _observation(0, LabelValue.POSITIVE, {"risk"})
+    item = _observation(0, LabelValue.POSITIVE, {"large_change"})
     invalid_evidence = LabelEvidence(
         kind="synthetic",
         available_at="2025-12-31T23:00:00+00:00",
@@ -274,7 +286,7 @@ def test_project_validation_rejects_source_and_checkout_mismatch(tmp_path: Path)
     valid = _observation(
         0,
         LabelValue.UNKNOWN,
-        repository_id=initialized.config.protocol.repository_id,
+        config=initialized.config,
     )
     for source, message in (
         ({}, "source.kind"),
@@ -296,6 +308,178 @@ def test_project_validation_rejects_source_and_checkout_mismatch(tmp_path: Path)
     )
     with pytest.raises(ModelError, match="does not match this checkout"):
         validate_project(root, wrong_config)
+
+
+def test_validation_and_learning_reject_tampered_pack_facts() -> None:
+    config = RuleLoomConfig(project="ExampleProject")
+    valid = _observation(0, LabelValue.POSITIVE, {"large_change"}, config=config)
+    undeclared_evidence = FactEvidence(
+        kind="deterministic",
+        extractor="ruleloom.flutter_testing.git.v1",
+        evidence=("synthetic:injected_predicate",),
+    )
+    cases = (
+        (
+            replace(
+                valid,
+                facts=frozenset({"large_change", "injected_predicate"}),
+                fact_evidence={
+                    **valid.fact_evidence,
+                    "injected_predicate": undeclared_evidence,
+                },
+            ),
+            "not declared",
+        ),
+        (replace(valid, fact_evidence={}), "facts and fact_evidence differ"),
+        (
+            replace(
+                valid,
+                fact_evidence={
+                    "large_change": replace(
+                        valid.fact_evidence["large_change"],
+                        extractor="untrusted.extractor.v1",
+                    )
+                },
+            ),
+            "deterministic provenance",
+        ),
+    )
+
+    for tampered, message in cases:
+        with pytest.raises(ModelError, match=message):
+            validate_observations([tampered], config)
+        with pytest.raises(ModelError, match=message):
+            learn_candidate([tampered], config)
+
+
+@pytest.mark.parametrize("invalid_version", [True, 1.0, None])
+def test_v2_consumers_reject_non_integer_or_missing_pack_version(
+    invalid_version: object,
+) -> None:
+    config = RuleLoomConfig(
+        project="ExampleProject",
+        schema_version=2,
+        pack="generic_changes",
+        pack_version=1,
+    )
+    historical = _observation(
+        0,
+        LabelValue.POSITIVE,
+        {"large_change"},
+        config=config,
+    )
+    prospective = _observation(
+        1,
+        LabelValue.UNKNOWN,
+        {"large_change"},
+        kind="git_worktree",
+        config=config,
+    )
+    if invalid_version is None:
+        historical_source = {
+            key: value for key, value in historical.source.items() if key != "pack_version"
+        }
+        prospective_source = {
+            key: value for key, value in prospective.source.items() if key != "pack_version"
+        }
+    else:
+        historical_source = {**historical.source, "pack_version": invalid_version}
+        prospective_source = {**prospective.source, "pack_version": invalid_version}
+
+    with pytest.raises(ModelError, match="fact pack version"):
+        validate_observations([replace(historical, source=historical_source)], config)
+    with pytest.raises(ModelError, match="fact pack version"):
+        learn_candidate([replace(historical, source=historical_source)], config)
+    with pytest.raises(ModelError, match="fact pack version"):
+        make_prediction(
+            replace(prospective, source=prospective_source),
+            [_candidate(status="approved", config=config)],
+            config,
+        )
+
+
+@pytest.mark.parametrize("invalid_version", [2, True, 1.0])
+def test_v1_consumers_reject_conflicting_present_pack_version(
+    invalid_version: object,
+) -> None:
+    config = RuleLoomConfig(project="ExampleProject")
+    historical = _observation(0, LabelValue.POSITIVE, {"large_change"}, config=config)
+    prospective = _observation(
+        1,
+        LabelValue.UNKNOWN,
+        {"large_change"},
+        kind="git_worktree",
+        config=config,
+    )
+    historical_source = {**historical.source, "pack_version": invalid_version}
+    prospective_source = {**prospective.source, "pack_version": invalid_version}
+
+    with pytest.raises(ModelError, match="fact pack version"):
+        validate_observations([replace(historical, source=historical_source)], config)
+    with pytest.raises(ModelError, match="fact pack version"):
+        learn_candidate([replace(historical, source=historical_source)], config)
+    with pytest.raises(ModelError, match="fact pack version"):
+        make_prediction(
+            replace(prospective, source=prospective_source),
+            [_candidate(status="approved", config=config)],
+            config,
+        )
+
+
+def test_prediction_rejects_candidate_outside_v2_pack_contract() -> None:
+    config = RuleLoomConfig(
+        project="ExampleProject",
+        schema_version=2,
+        pack="generic_changes",
+        pack_version=1,
+    )
+    observation = _observation(
+        1,
+        LabelValue.UNKNOWN,
+        {"large_change"},
+        kind="git_worktree",
+        config=config,
+    )
+    baseline = _candidate(status="approved", config=config)
+    invalid = (
+        (
+            replace(
+                baseline,
+                metadata={**baseline.metadata, "pack_version": True},
+            ).with_identity(),
+            "pack-version provenance",
+        ),
+        (
+            replace(
+                baseline,
+                metadata={
+                    key: value
+                    for key, value in baseline.metadata.items()
+                    if key != "evidence_protocol_hash"
+                },
+            ).with_identity(),
+            "evidence-protocol provenance",
+        ),
+        (
+            replace(
+                baseline,
+                rules=RuleSet(
+                    TARGET,
+                    (
+                        HornClause(
+                            TARGET,
+                            (RuleLiteral("undeclared_predicate", negated=True),),
+                        ),
+                    ),
+                ),
+            ).with_identity(),
+            "predicates not declared",
+        ),
+    )
+
+    for candidate, message in invalid:
+        with pytest.raises(ModelError, match=message):
+            make_prediction(observation, [candidate], config)
 
 
 def test_approval_gates_require_data_quality_performance_and_stability() -> None:
@@ -379,6 +563,11 @@ def test_initialize_creates_portable_agent_skills_and_refuses_reinitialization(
     result = initialize_project(root, "ExampleProject", agents=("codex", "claude"))
 
     assert result.config.project == "ExampleProject"
+    assert (result.config.schema_version, result.config.pack, result.config.pack_version) == (
+        2,
+        "generic_changes",
+        1,
+    )
     assert (root / ".ruleloom/config.json").is_file()
     assert (root / ".ruleloom/observations.jsonl").read_text(encoding="utf-8") == ""
     assert (root / ".ruleloom/predictions.jsonl").read_text(encoding="utf-8") == ""
@@ -402,6 +591,14 @@ def test_initialize_creates_portable_agent_skills_and_refuses_reinitialization(
         initialize_project(root, "ExampleProject", agents=("codex", "claude"))
 
 
+def test_initialize_does_not_replace_an_explicit_empty_project_name(tmp_path: Path) -> None:
+    root = tmp_path / "named_repository"
+    _git_init(root)
+
+    with pytest.raises(ModelError, match="project cannot be empty"):
+        initialize_project(root, "")
+
+
 def test_initialize_refuses_managed_directory_symlink_escape(tmp_path: Path) -> None:
     root = tmp_path / "example_project"
     outside = tmp_path / "outside"
@@ -412,6 +609,31 @@ def test_initialize_refuses_managed_directory_symlink_escape(tmp_path: Path) -> 
     with pytest.raises(ModelError, match="symlink"):
         initialize_project(root, "ExampleProject")
 
+    assert list(outside.iterdir()) == []
+
+
+def test_initialize_only_resolves_selected_agent_destinations(tmp_path: Path) -> None:
+    outside = tmp_path / "shared-claude-skills"
+    outside.mkdir()
+
+    def repository(name: str) -> Path:
+        root = tmp_path / name
+        _git_init(root)
+        (root / ".claude").mkdir()
+        (root / ".claude/skills").symlink_to(outside, target_is_directory=True)
+        return root
+
+    no_agents = repository("no-agents")
+    codex_only = repository("codex-only")
+    claude_selected = repository("claude-selected")
+
+    initialize_project(no_agents, "NoAgents", agents=())
+    initialize_project(codex_only, "CodexOnly", agents=("codex",))
+    with pytest.raises(ModelError, match="symlink"):
+        initialize_project(claude_selected, "ClaudeSelected", agents=("claude",))
+
+    assert (no_agents / ".ruleloom/config.json").is_file()
+    assert (codex_only / ".agents/skills/ruleloom/SKILL.md").is_file()
     assert list(outside.iterdir()) == []
 
 
@@ -514,8 +736,8 @@ def test_promote_candidate_records_human_review_and_syncs_approved_rules(
         _observation(
             index,
             LabelValue.POSITIVE if index % 2 == 0 else LabelValue.NEGATIVE,
-            {"risk"} if index % 2 == 0 else {"safe"},
-            repository_id=config.protocol.repository_id,
+            {"large_change"} if index % 2 == 0 else {"touches_test"},
+            config=config,
         )
         for index in range(8)
     ]
@@ -546,9 +768,9 @@ def test_promote_candidate_records_human_review_and_syncs_approved_rules(
         _observation(
             100,
             LabelValue.UNKNOWN,
-            {"risk"},
+            {"large_change"},
             kind="git_worktree",
-            repository_id=config.protocol.repository_id,
+            config=config,
         ),
         observed_at=prediction_time.isoformat(),
     )
@@ -556,9 +778,9 @@ def test_promote_candidate_records_human_review_and_syncs_approved_rules(
         _observation(
             101,
             LabelValue.UNKNOWN,
-            {"safe"},
+            {"touches_test"},
             kind="git_worktree",
-            repository_id=config.protocol.repository_id,
+            config=config,
         ),
         observed_at=prediction_time.isoformat(),
     )
@@ -567,9 +789,9 @@ def test_promote_candidate_records_human_review_and_syncs_approved_rules(
         _observation(
             102,
             LabelValue.UNKNOWN,
-            {"risk"},
+            {"large_change"},
             kind="git_worktree",
-            repository_id=config.protocol.repository_id,
+            config=config,
         ),
         observed_at=iteration_time.isoformat(),
         source={**positive_snapshot.source},
@@ -630,7 +852,7 @@ def test_promote_candidate_records_human_review_and_syncs_approved_rules(
     rule_cards_path = root / ".agents/skills/ruleloom/references/approved-rules.md"
     rule_cards = rule_cards_path.read_text(encoding="utf-8")
     assert candidate.id in rule_cards
-    assert "needs_extra_validation(A) :- risk(A)." in rule_cards
+    assert candidate.rules.clauses[0].to_prolog() in rule_cards
 
     deprecated, tombstone = deprecate_candidate(
         root,
@@ -689,8 +911,8 @@ def test_failed_promotion_requires_explicit_override_with_note(tmp_path: Path) -
         _observation(
             index,
             LabelValue.POSITIVE if index % 2 == 0 else LabelValue.NEGATIVE,
-            {"risk"} if index % 2 == 0 else {"safe"},
-            repository_id=config.protocol.repository_id,
+            {"large_change"} if index % 2 == 0 else {"touches_test"},
+            config=config,
         )
         for index in range(8)
     ]
@@ -745,8 +967,8 @@ def test_failed_promotion_requires_explicit_override_with_note(tmp_path: Path) -
 def test_predictions_are_selective_and_include_matching_rule_identity() -> None:
     config = _promotion_config()
     candidate = _candidate(status="approved", config=config)
-    matching = _observation(100, LabelValue.UNKNOWN, {"risk"}, kind="git_worktree")
-    unrelated = _observation(101, LabelValue.UNKNOWN, {"safe"}, kind="git_worktree")
+    matching = _observation(100, LabelValue.UNKNOWN, {"large_change"}, kind="git_worktree")
+    unrelated = _observation(101, LabelValue.UNKNOWN, {"touches_test"}, kind="git_worktree")
 
     matches = match_rules(matching.facts, [candidate])
     prediction = make_prediction(matching, [candidate], config)
@@ -754,7 +976,7 @@ def test_predictions_are_selective_and_include_matching_rule_identity() -> None:
 
     assert len(matches) == 1
     assert matches[0].candidate_id == candidate.id
-    assert matches[0].clause.signature == f"{TARGET}:-risk"
+    assert matches[0].clause.signature == f"{TARGET}:-large_change"
     assert not prediction.abstained
     assert prediction.matches[0]["candidate_id"] == candidate.id
     assert prediction.matches[0]["status"] == "approved"
@@ -783,7 +1005,7 @@ def test_learning_fails_closed_on_unknown_units_repositories_and_excessive_work(
         _observation(
             index,
             LabelValue.POSITIVE if index % 2 == 0 else LabelValue.NEGATIVE,
-            {"risk"} if index % 2 == 0 else {"safe"},
+            {"large_change"} if index % 2 == 0 else {"touches_test"},
         )
         for index in range(8)
     ]
@@ -819,7 +1041,7 @@ def test_learning_fails_closed_on_unknown_units_repositories_and_excessive_work(
         _observation(
             index,
             LabelValue.POSITIVE if index % 2 == 0 else LabelValue.NEGATIVE,
-            {f"predicate_{number}" for number in range(12)},
+            set(get_pack("flutter_testing", 1).predicates[:12]),
         )
         for index in range(400)
     ]
@@ -850,10 +1072,22 @@ def test_evidence_cannot_be_reinterpreted_under_a_changed_protocol() -> None:
         learn_candidate([observation], changed)
 
 
+def test_learning_rejects_unknown_observation_from_another_repository() -> None:
+    config = RuleLoomConfig(project="ExampleProject")
+    observation = _observation(1, LabelValue.UNKNOWN, config=config)
+    foreign = replace(
+        observation,
+        source={**observation.source, "repository": "repository.other"},
+    )
+
+    with pytest.raises(ModelError, match="different configured repository"):
+        learn_candidate([foreign], config)
+
+
 def test_prediction_builder_enforces_protocol_and_candidate_compatibility() -> None:
     config = _promotion_config()
     candidate = _candidate(status="approved", config=config)
-    observation = _observation(100, LabelValue.UNKNOWN, {"risk"}, kind="git_worktree")
+    observation = _observation(100, LabelValue.UNKNOWN, {"large_change"}, kind="git_worktree")
     with pytest.raises(ModelError, match="duplicate candidate ids"):
         make_prediction(observation, [candidate, candidate], config)
     with pytest.raises(ModelError, match=r"stable source\.change_id"):
@@ -903,7 +1137,10 @@ def test_prediction_builder_enforces_protocol_and_candidate_compatibility() -> N
 
     other_target = replace(
         candidate,
-        rules=RuleSet("other_target", (HornClause("other_target", (RuleLiteral("risk"),)),)),
+        rules=RuleSet(
+            "other_target",
+            (HornClause("other_target", (RuleLiteral("large_change"),)),),
+        ),
     ).with_identity()
     with pytest.raises(ModelError, match="multiple prediction targets"):
         make_prediction(observation, [candidate, other_target], config)
@@ -1044,6 +1281,58 @@ def test_explicit_clone_trust_binds_a_reviewed_artifact_locally(tmp_path: Path) 
             reviewer="reviewer",
             note="nothing to deprecate",
         )
+
+
+def test_clone_trust_rejects_policy_outside_the_pack_contract(tmp_path: Path) -> None:
+    root = tmp_path / "pack-contract"
+    _git_init(root)
+    config = initialize_project(root, "PackContract").config
+    review = {
+        "reviewer": "upstream-reviewer",
+        "reviewed_at": "2026-08-31T12:00:00Z",
+        "note": "reviewed upstream",
+        "override": False,
+        "unmet_gates": [],
+    }
+    baseline = replace(_candidate(config=config), status="shadow", review=review)
+    invalid = (
+        (
+            replace(
+                baseline,
+                metadata={**baseline.metadata, "extractors": ["untrusted.extractor.v1"]},
+            ).with_identity(),
+            "extractor provenance",
+        ),
+        (
+            replace(
+                baseline,
+                metadata={**baseline.metadata, "pack_version": True},
+            ).with_identity(),
+            "pack-version provenance",
+        ),
+        (
+            replace(
+                baseline,
+                rules=RuleSet(
+                    TARGET,
+                    (HornClause(TARGET, (RuleLiteral("undeclared_predicate"),)),),
+                ),
+            ).with_identity(),
+            "predicates not declared",
+        ),
+    )
+
+    for candidate, message in invalid:
+        save_candidate(shadow_path(root, config, candidate.id), candidate)
+        with pytest.raises(ModelError, match=message):
+            trust_reviewed_artifact(
+                root,
+                config,
+                candidate.id,
+                status="shadow",
+                reviewer="clone-reviewer",
+                note="inspected in this clone",
+            )
 
 
 def test_transition_trust_is_namespaced_by_configuration(tmp_path: Path) -> None:

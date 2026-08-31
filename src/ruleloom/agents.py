@@ -114,18 +114,20 @@ def sync_agents(
         raise ModelError(f"unsupported agents: {', '.join(sorted(unknown))}")
     approved = load_approved(root, config)
     results: list[SyncResult] = []
-    destinations = {
+    relative_destinations = {
         "codex": (
-            project_path(root, ".agents/skills/ruleloom/SKILL.md"),
-            project_path(root, ".agents/skills/ruleloom/references/approved-rules.md"),
+            ".agents/skills/ruleloom/SKILL.md",
+            ".agents/skills/ruleloom/references/approved-rules.md",
         ),
         "claude": (
-            project_path(root, ".claude/skills/ruleloom/SKILL.md"),
-            project_path(root, ".claude/skills/ruleloom/references/approved-rules.md"),
+            ".claude/skills/ruleloom/SKILL.md",
+            ".claude/skills/ruleloom/references/approved-rules.md",
         ),
     }
     for agent in agents:
-        skill_path, rules_path = destinations[agent]
+        skill_relative, rules_relative = relative_destinations[agent]
+        skill_path = project_path(root, skill_relative)
+        rules_path = project_path(root, rules_relative)
         results.append(_safe_sync(skill_path, _skill_text(), check=check))
         results.append(
             _safe_sync(

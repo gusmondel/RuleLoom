@@ -120,6 +120,28 @@ review references, and evidence excerpts. Before committing or sharing them:
 RuleLoom should not make network requests or upload telemetry without an
 explicit, documented feature and user action.
 
+Evidence packs are selected from a versioned built-in registry; this release
+does not discover or execute third-party pack code. For configuration schema v2
+with the current `generic_changes@1` or `flutter_testing@2` packs, a pack may
+inspect only the scoped Git evidence supplied by the collector. Aggregate diff
+metadata is bounded, and a pack that requires file content must fail closed when
+the content budget is exceeded rather than treat incomplete parsing as absence
+of a fact. Scope, thresholds, pack version, and extractor identity are bound
+into the evidence protocol hash so observations from different protocols
+cannot be silently pooled. Persisted facts are checked against the pack's
+declared vocabulary and must have matching deterministic provenance before
+validation, learning, or prediction. Mixed inside/outside scope units fail
+closed, and Git text/path output that is not valid UTF-8 is rejected rather
+than decoded with replacement characters. Content extraction has global
+wall-time, subprocess, output, and argument-size budgets.
+
+Those scope, bounding, manifest-hash, and fail-closed guarantees do not extend
+to the frozen `flutter_testing@1` configuration-schema-v1 compatibility path.
+It exists only to read structurally and reproduce historical hashes and
+semantics. Do not collect new evidence with it or run it over large or
+untrusted diffs; create a schema-v2 experiment and re-extract the complete
+history with a current pack.
+
 ## Safe use of generated policies
 
 An approved rule is still untrusted guidance, not authorization. Generated
@@ -139,7 +161,7 @@ or observer output visible to the agent or people who determine outcome labels.
 
 ## Dependency and release hygiene
 
-Version 0.1 supports macOS and Linux and relies on POSIX `fcntl` locking; Windows
+Version 0.2 supports macOS and Linux and relies on POSIX `fcntl` locking; Windows
 is not supported. The core intentionally has no runtime Python dependencies.
 Optional Popper and solver integrations expand the trusted computing base and
 must be pinned, recorded, and tested. RuleLoom does not download or install

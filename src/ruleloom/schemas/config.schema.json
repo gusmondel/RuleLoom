@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ruleloom:schema:config:v1",
-  "title": "RuleLoom configuration v1",
+  "$id": "urn:ruleloom:schema:config:v1-v2",
+  "title": "RuleLoom configuration v1/v2",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -21,7 +21,7 @@
     "promotion"
   ],
   "properties": {
-    "schema_version": {"const": 1},
+    "schema_version": {"enum": [1, 2]},
     "project": {
       "type": "string",
       "minLength": 1,
@@ -29,7 +29,8 @@
       "pattern": "^[A-Za-z0-9][^\\u0000-\\u001f\\u007f]{0,79}$"
     },
     "target": {"$ref": "#/$defs/predicate"},
-    "pack": {"const": "flutter_testing"},
+    "pack": {"$ref": "#/$defs/subject"},
+    "pack_version": {"type": "integer", "minimum": 1},
     "dataset": {"$ref": "#/$defs/path"},
     "candidates_dir": {"$ref": "#/$defs/path"},
     "shadow_dir": {"$ref": "#/$defs/path"},
@@ -54,6 +55,47 @@
           "minLength": 1,
           "maxLength": 500,
           "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "include_paths",
+        "exclude_paths",
+        "large_change_churn",
+        "multi_file_count",
+        "metadata_file_limit"
+      ],
+      "properties": {
+        "include_paths": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/scope"}
+        },
+        "exclude_paths": {
+          "type": "array",
+          "maxItems": 128,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/scope"}
+        },
+        "large_change_churn": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000000
+        },
+        "multi_file_count": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100000
+        },
+        "metadata_file_limit": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10000
         }
       }
     },
@@ -162,9 +204,33 @@
       }
     }
   },
+  "allOf": [
+    {
+      "if": {"properties": {"schema_version": {"const": 1}}},
+      "then": {
+        "properties": {"pack": {"const": "flutter_testing"}},
+        "not": {
+          "anyOf": [
+            {"required": ["pack_version"]},
+            {"required": ["evidence"]}
+          ]
+        }
+      }
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": 2}}},
+      "then": {"required": ["pack_version", "evidence"]}
+    }
+  ],
   "$defs": {
     "predicate": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
     "subject": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]*$"},
+    "scope": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^(?!/|:)(?!.*(?:^|/)\\.\\.(?:/|$))[^\\\\\u0000-\u001f\u007f]+$"
+    },
     "path": {
       "type": "string",
       "minLength": 1,
