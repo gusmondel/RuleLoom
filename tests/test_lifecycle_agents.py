@@ -1072,6 +1072,14 @@ def test_evidence_cannot_be_reinterpreted_under_a_changed_protocol() -> None:
         learn_candidate([observation], changed)
 
 
+def test_learning_reports_zero_mature_labels_before_unit_diagnostics() -> None:
+    config = RuleLoomConfig(project="ExampleProject")
+    observation = _observation(1, LabelValue.UNKNOWN, config=config)
+
+    with pytest.raises(ModelError, match="no mature labels are available for learning"):
+        learn_candidate([observation], config)
+
+
 def test_learning_rejects_unknown_observation_from_another_repository() -> None:
     config = RuleLoomConfig(project="ExampleProject")
     observation = _observation(1, LabelValue.UNKNOWN, config=config)

@@ -359,6 +359,12 @@ def learn_candidate(
             subject=f"learning observation {item.id!r}",
         )
     mature_examples = labeled(observations, target, as_of=cutoff)
+    if not mature_examples:
+        raise ModelError(
+            "no mature labels are available for learning at the requested cutoff; "
+            "record independently evidenced outcomes whose available_at is not later "
+            "than the cutoff"
+        )
     units: set[str] = set()
     repositories: set[str] = set()
     for item in mature_examples:

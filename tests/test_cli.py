@@ -346,6 +346,15 @@ def test_cli_runs_evidence_to_reviewed_policy_workflow(
         ],
     }
 
+    exit_code, stdout, stderr = _run_cli(
+        ["learn", "--root", str(repo), "--engine", "horn", "--json"],
+        capsys,
+    )
+    assert exit_code == 2
+    assert stdout == ""
+    assert "no mature labels are available for learning" in stderr
+    assert list((repo / ".ruleloom/candidates").glob("*.json")) == []
+
     _label_history(repo, commits, capsys)
     config = RuleLoomConfig.load(repo)
     observations = load_observations(dataset_path(repo, config))
