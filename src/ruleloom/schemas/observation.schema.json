@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ruleloom:schema:observation:v1",
+  "title": "RuleLoom observation v1",
+  "$ref": "#/$defs/observation",
+  "$defs": {
+    "predicate": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+    "subject": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]*$"},
+    "factEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "extractor", "evidence"],
+      "properties": {
+        "kind": {"enum": ["deterministic", "agent", "human", "imported"]},
+        "extractor": {"type": "string", "minLength": 1},
+        "evidence": {"type": "array", "items": {"type": "string"}},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "labelEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "available_at", "source", "reason"],
+      "properties": {
+        "kind": {"enum": ["ci", "review", "incident", "human", "imported", "synthetic"]},
+        "available_at": {"type": "string", "format": "date-time"},
+        "source": {"type": "string", "minLength": 1},
+        "reason": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "id",
+        "observed_at",
+        "protocol_hash",
+        "facts",
+        "labels",
+        "fact_evidence",
+        "label_evidence",
+        "source",
+        "metadata"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "id": {"$ref": "#/$defs/subject"},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "protocol_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "facts": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/predicate"}
+        },
+        "labels": {
+          "type": "object",
+          "propertyNames": {"$ref": "#/$defs/predicate"},
+          "additionalProperties": {"enum": ["positive", "negative", "unknown"]}
+        },
+        "fact_evidence": {
+          "type": "object",
+          "propertyNames": {"$ref": "#/$defs/predicate"},
+          "additionalProperties": {"$ref": "#/$defs/factEvidence"}
+        },
+        "label_evidence": {
+          "type": "object",
+          "propertyNames": {"$ref": "#/$defs/predicate"},
+          "additionalProperties": {"$ref": "#/$defs/labelEvidence"}
+        },
+        "source": {"type": "object"},
+        "metadata": {"type": "object"}
+      }
+    }
+  }
+}

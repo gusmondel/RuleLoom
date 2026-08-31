@@ -1,0 +1,179 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ruleloom:schema:config:v1",
+  "title": "RuleLoom configuration v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "project",
+    "target",
+    "pack",
+    "dataset",
+    "candidates_dir",
+    "shadow_dir",
+    "approved_dir",
+    "deprecated_dir",
+    "predictions",
+    "protocol",
+    "learner",
+    "evaluation",
+    "promotion"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "project": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 80,
+      "pattern": "^[A-Za-z0-9][^\\u0000-\\u001f\\u007f]{0,79}$"
+    },
+    "target": {"$ref": "#/$defs/predicate"},
+    "pack": {"const": "flutter_testing"},
+    "dataset": {"$ref": "#/$defs/path"},
+    "candidates_dir": {"$ref": "#/$defs/path"},
+    "shadow_dir": {"$ref": "#/$defs/path"},
+    "approved_dir": {"$ref": "#/$defs/path"},
+    "deprecated_dir": {"$ref": "#/$defs/path"},
+    "predictions": {"$ref": "#/$defs/path"},
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "experiment_id",
+        "repository_id",
+        "prediction_unit",
+        "outcome_definition"
+      ],
+      "properties": {
+        "experiment_id": {"$ref": "#/$defs/subject"},
+        "repository_id": {"$ref": "#/$defs/subject"},
+        "prediction_unit": {"enum": ["git_commit", "git_range", "git_worktree"]},
+        "outcome_definition": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 500,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        }
+      }
+    },
+    "learner": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "engine",
+        "max_body",
+        "max_rules",
+        "allow_negation",
+        "min_precision",
+        "min_support",
+        "false_positive_cost",
+        "bootstrap_runs",
+        "max_predicates",
+        "popper_dir",
+        "popper_timeout_seconds"
+      ],
+      "properties": {
+        "engine": {"enum": ["horn", "popper"]},
+        "max_body": {"type": "integer", "minimum": 1, "maximum": 4},
+        "max_rules": {"type": "integer", "minimum": 1, "maximum": 10},
+        "allow_negation": {"type": "boolean"},
+        "min_precision": {"type": "number", "minimum": 0, "maximum": 1},
+        "min_support": {"type": "integer", "minimum": 1},
+        "false_positive_cost": {"type": "number", "minimum": 0},
+        "bootstrap_runs": {"type": "integer", "minimum": 0, "maximum": 100},
+        "max_predicates": {"type": "integer", "minimum": 1, "maximum": 32},
+        "popper_dir": {"type": ["string", "null"]},
+        "popper_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"engine": {"const": "popper"}}, "required": ["engine"]},
+          "then": {
+            "properties": {
+              "max_rules": {"const": 1},
+              "bootstrap_runs": {"const": 0},
+              "min_precision": {"const": 0.7},
+              "min_support": {"const": 2},
+              "false_positive_cost": {"const": 1.5}
+            }
+          }
+        }
+      ]
+    },
+    "evaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "test_fraction",
+        "min_train_examples",
+        "min_test_examples",
+        "seed"
+      ],
+      "properties": {
+        "test_fraction": {
+          "type": "number",
+          "exclusiveMinimum": 0,
+          "exclusiveMaximum": 1
+        },
+        "min_train_examples": {"type": "integer", "minimum": 2},
+        "min_test_examples": {"type": "integer", "minimum": 1},
+        "seed": {"type": "integer", "minimum": 0}
+      }
+    },
+    "promotion": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "min_test_precision",
+        "min_test_recall",
+        "min_stability",
+        "require_test_set",
+        "min_positive_for_shadow",
+        "min_positive_for_approval",
+        "require_baseline_improvement",
+        "min_shadow_predictions_for_approval",
+        "min_shadow_mature_outcomes_for_approval",
+        "min_shadow_days_for_approval",
+        "min_shadow_precision",
+        "min_shadow_recall",
+        "min_shadow_mcc",
+        "min_shadow_positive_outcomes_for_approval",
+        "min_shadow_negative_outcomes_for_approval",
+        "min_shadow_matches_per_rule_for_approval"
+      ],
+      "properties": {
+        "min_test_precision": {"type": "number", "minimum": 0, "maximum": 1},
+        "min_test_recall": {"type": "number", "minimum": 0, "maximum": 1},
+        "min_stability": {"type": "number", "minimum": 0, "maximum": 1},
+        "require_test_set": {"type": "boolean"},
+        "min_positive_for_shadow": {"type": "integer", "minimum": 1},
+        "min_positive_for_approval": {"type": "integer", "minimum": 1},
+        "require_baseline_improvement": {"type": "boolean"},
+        "min_shadow_predictions_for_approval": {"type": "integer", "minimum": 1},
+        "min_shadow_mature_outcomes_for_approval": {"type": "integer", "minimum": 1},
+        "min_shadow_days_for_approval": {"type": "integer", "minimum": 0},
+        "min_shadow_precision": {"type": "number", "minimum": 0, "maximum": 1},
+        "min_shadow_recall": {"type": "number", "minimum": 0, "maximum": 1},
+        "min_shadow_mcc": {"type": "number", "minimum": -1, "maximum": 1},
+        "min_shadow_positive_outcomes_for_approval": {"type": "integer", "minimum": 1},
+        "min_shadow_negative_outcomes_for_approval": {"type": "integer", "minimum": 1},
+        "min_shadow_matches_per_rule_for_approval": {"type": "integer", "minimum": 1}
+      }
+    }
+  },
+  "$defs": {
+    "predicate": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+    "subject": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]*$"},
+    "path": {
+      "type": "string",
+      "minLength": 1,
+      "pattern": "^\\.ruleloom[\\\\/].+$",
+      "allOf": [
+        {"not": {"const": "."}},
+        {"not": {"pattern": "^(?:/|[A-Za-z]:[\\\\/])"}},
+        {"not": {"pattern": "(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)"}}
+      ]
+    }
+  }
+}

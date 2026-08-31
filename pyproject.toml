@@ -1,0 +1,94 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ruleloom"
+version = "0.1.0"
+description = "Inductive logic programming for evidence-backed coding-agent policies."
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+authors = [{ name = "Gustavo" }]
+keywords = [
+  "coding-agents",
+  "inductive-logic-programming",
+  "interpretable-ai",
+  "software-analytics",
+]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "License :: OSI Approved :: Apache Software License",
+  "Operating System :: MacOS",
+  "Operating System :: POSIX",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Software Development :: Quality Assurance",
+  "Typing :: Typed",
+]
+dependencies = []
+
+[project.scripts]
+ruleloom = "ruleloom.cli:main"
+
+[dependency-groups]
+dev = [
+  "build>=1.3.0",
+  "jsonschema>=4.23",
+  "mypy>=1.17.0",
+  "pytest>=8.4.0",
+  "pytest-cov>=6.2.0",
+  "ruff>=0.12.0",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ruleloom"]
+
+[tool.hatch.build.targets.sdist]
+include = [
+  "/src",
+  "/tests",
+  "/docs",
+  "/README.md",
+  "/LICENSE",
+  "/NOTICE",
+  "/CONTRIBUTING.md",
+  "/CODE_OF_CONDUCT.md",
+  "/SECURITY.md",
+  "/Makefile",
+  "/uv.lock",
+]
+
+[tool.pytest.ini_options]
+addopts = "-ra --strict-config --strict-markers"
+testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["ruleloom"]
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 85
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["ruleloom"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "RUF"]
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

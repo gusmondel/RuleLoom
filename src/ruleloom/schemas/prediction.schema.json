@@ -1,0 +1,182 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ruleloom:schema:prediction:v1",
+  "title": "RuleLoom prediction v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "predicted_at",
+    "observation",
+    "target",
+    "unit_id",
+    "protocol_hash",
+    "protocol",
+    "policy_set_hash",
+    "policies",
+    "matches",
+    "abstained"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "pattern": "^prediction\\.[0-9a-f]{20}$"},
+    "predicted_at": {"type": "string", "format": "date-time"},
+    "observation": {"$ref": "#/$defs/observation"},
+    "target": {"$ref": "#/$defs/predicate"},
+    "unit_id": {"$ref": "#/$defs/subject"},
+    "protocol_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "protocol": {"$ref": "#/$defs/protocol"},
+    "policy_set_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "policies": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/policy"}},
+    "matches": {"type": "array", "items": {"$ref": "#/$defs/match"}},
+    "abstained": {"type": "boolean"}
+  },
+  "$defs": {
+    "predicate": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
+    "subject": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]*$"},
+    "protocol": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "experiment_id",
+        "repository_id",
+        "observation_unit",
+        "outcome_definition",
+        "target",
+        "pack",
+        "extractor",
+        "config_hash",
+        "evidence_protocol_hash"
+      ],
+      "properties": {
+        "experiment_id": {"$ref": "#/$defs/subject"},
+        "repository_id": {"$ref": "#/$defs/subject"},
+        "observation_unit": {"enum": ["git_commit", "git_range", "git_worktree"]},
+        "outcome_definition": {"type": "string", "minLength": 1},
+        "target": {"$ref": "#/$defs/predicate"},
+        "pack": {"type": "string", "minLength": 1},
+        "extractor": {"type": "string", "minLength": 1},
+        "config_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "evidence_protocol_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "factEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "extractor", "evidence"],
+      "properties": {
+        "kind": {"enum": ["deterministic", "agent", "human", "imported"]},
+        "extractor": {"type": "string", "minLength": 1},
+        "evidence": {"type": "array", "items": {"type": "string"}},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "labelEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "available_at", "source", "reason"],
+      "properties": {
+        "kind": {"enum": ["ci", "review", "incident", "human", "imported", "synthetic"]},
+        "available_at": {"type": "string", "format": "date-time"},
+        "source": {"type": "string", "minLength": 1},
+        "reason": {"type": "string"},
+        "confidence": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "observation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "id",
+        "observed_at",
+        "protocol_hash",
+        "facts",
+        "labels",
+        "fact_evidence",
+        "label_evidence",
+        "source",
+        "metadata"
+      ],
+      "properties": {
+        "schema_version": {"const": 1},
+        "id": {"$ref": "#/$defs/subject"},
+        "observed_at": {"type": "string", "format": "date-time"},
+        "protocol_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "facts": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/predicate"}
+        },
+        "labels": {
+          "type": "object",
+          "propertyNames": {"$ref": "#/$defs/predicate"},
+          "additionalProperties": {"enum": ["positive", "negative", "unknown"]}
+        },
+        "fact_evidence": {
+          "type": "object",
+          "propertyNames": {"$ref": "#/$defs/predicate"},
+          "additionalProperties": {"$ref": "#/$defs/factEvidence"}
+        },
+        "label_evidence": {
+          "type": "object",
+          "propertyNames": {"$ref": "#/$defs/predicate"},
+          "additionalProperties": {"$ref": "#/$defs/labelEvidence"}
+        },
+        "source": {"type": "object"},
+        "metadata": {"type": "object"}
+      }
+    },
+    "literal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["predicate", "negated"],
+      "properties": {
+        "predicate": {"$ref": "#/$defs/predicate"},
+        "negated": {"type": "boolean"}
+      }
+    },
+    "clause": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "body"],
+      "properties": {
+        "target": {"$ref": "#/$defs/predicate"},
+        "body": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/literal"}
+        }
+      }
+    },
+    "match": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_id", "status", "rule", "prolog"],
+      "properties": {
+        "candidate_id": {"$ref": "#/$defs/subject"},
+        "status": {"enum": ["shadow", "approved"]},
+        "rule": {"$ref": "#/$defs/clause"},
+        "prolog": {"type": "string", "minLength": 1}
+      }
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["candidate_id", "status", "target", "manifest_hash", "rule_signatures"],
+      "properties": {
+        "candidate_id": {"type": "string", "pattern": "^cand-[0-9a-f]{16}$"},
+        "status": {"enum": ["shadow", "approved"]},
+        "target": {"$ref": "#/$defs/predicate"},
+        "manifest_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "rule_signatures": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    }
+  }
+}
