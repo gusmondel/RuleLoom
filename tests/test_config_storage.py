@@ -36,6 +36,7 @@ from ruleloom.models import (
     canonical_json,
     content_hash,
 )
+from ruleloom.packs import ConfiguredPathsConfig, PathPredicateConfig
 from ruleloom.storage import (
     append_prediction,
     load_candidate,
@@ -208,6 +209,30 @@ def test_config_round_trip_load_and_hash(tmp_path: Path) -> None:
     assert RuleLoomConfig.from_dict(config.to_dict()) == config
 
 
+def test_pack_config_addition_preserves_pre_v3_positional_constructor_order() -> None:
+    config = RuleLoomConfig(
+        "ExampleProject",
+        "needs_extra_validation",
+        "generic_changes",
+        1,
+        ".ruleloom/observations.jsonl",
+        ".ruleloom/candidates",
+        ".ruleloom/shadow",
+        ".ruleloom/approved",
+        ".ruleloom/deprecated",
+        ".ruleloom/predictions.jsonl",
+        ProtocolConfig(),
+        EvidenceConfig(),
+        LearnerConfig(),
+        EvaluationConfig(),
+        PromotionConfig(),
+        2,
+    )
+
+    assert config.schema_version == 2
+    assert config.pack_config is None
+
+
 def test_schema_v1_config_identity_remains_stable() -> None:
     config = RuleLoomConfig(project="ExampleProject")
 
@@ -241,6 +266,143 @@ def test_schema_v2_binds_pack_version_scope_and_thresholds_to_protocol() -> None
     assert baseline.evidence_protocol_hash != flutter.evidence_protocol_hash
     assert baseline.evidence_protocol["extractor"] == "ruleloom.generic_changes.git.v1"
     assert flutter.evidence_protocol["extractor"] == "ruleloom.flutter_testing.git.v2"
+    assert baseline.hash == "d7b8484827c0e74856263ba95b6d436637f27bdff9fc7687e0cba4f621d14c60"
+    assert (
+        baseline.evidence_protocol_hash
+        == "7dbeeeb7220d885bbbb86617915e436712ebb29af24fc8aa65ee79b5850c02f7"
+    )
+
+
+def test_schema_v3_pack_config_is_canonical_hash_bound_and_round_trips() -> None:
+    first_pack_config = ConfiguredPathsConfig(
+        (
+            PathPredicateConfig(
+                "touches_surface_web",
+                ("apps/web/**", "packages/ui/**"),
+                ("apps/web/generated/**",),
+            ),
+            PathPredicateConfig("touches_shared_contract", ("packages/contracts/**",)),
+        )
+    )
+    reordered_pack_config = ConfiguredPathsConfig(
+        (
+            PathPredicateConfig("touches_shared_contract", ("packages/contracts/**",)),
+            PathPredicateConfig(
+                "touches_surface_web",
+                ("packages/ui/**", "apps/web/**"),
+                ("apps/web/generated/**",),
+            ),
+        )
+    )
+    first = RuleLoomConfig(
+        schema_version=3,
+        project="ExampleProject",
+        pack="configured_paths",
+        pack_version=1,
+        pack_config=first_pack_config,
+    )
+    reordered = replace(first, pack_config=reordered_pack_config)
+    changed = replace(
+        first,
+        pack_config=ConfiguredPathsConfig(
+            (
+                PathPredicateConfig("touches_shared_contract", ("contracts/**",)),
+                PathPredicateConfig("touches_surface_web", ("apps/web/**",)),
+            )
+        ),
+    )
+
+    assert first == reordered
+    assert first.hash == reordered.hash
+    assert first.evidence_protocol_hash == reordered.evidence_protocol_hash
+    assert first.hash != changed.hash
+    assert first.evidence_protocol_hash != changed.evidence_protocol_hash
+    assert first.pack_config_hash == first_pack_config.hash
+    assert first.evidence_protocol["pack_config"] == first_pack_config.to_dict()
+    assert RuleLoomConfig.from_dict(first.to_dict()) == first
+
+
+def test_schema_v3_static_pack_uses_explicit_empty_pack_config() -> None:
+    config = RuleLoomConfig(
+        schema_version=3,
+        project="ExampleProject",
+        pack="generic_changes",
+        pack_version=1,
+    )
+
+    assert config.to_dict()["pack_config"] == {}
+    assert config.evidence_protocol["pack_config"] == {}
+    assert RuleLoomConfig.from_dict(config.to_dict()) == config
+
+
+def test_pack_config_is_required_only_for_configurable_schema_v3_packs() -> None:
+    pack_config = ConfiguredPathsConfig(
+        (PathPredicateConfig("touches_surface_web", ("apps/web/**",)),)
+    )
+    with pytest.raises(ModelError, match="schema-v2 configs cannot define pack_config"):
+        RuleLoomConfig(
+            schema_version=2,
+            project="ExampleProject",
+            pack="configured_paths",
+            pack_version=1,
+            pack_config=pack_config,
+        )
+    with pytest.raises(ModelError, match="requires a valid pack_config"):
+        RuleLoomConfig(
+            schema_version=3,
+            project="ExampleProject",
+            pack="configured_paths",
+            pack_version=1,
+        )
+    with pytest.raises(ModelError, match="collides"):
+        RuleLoomConfig(
+            schema_version=3,
+            project="ExampleProject",
+            target="touches_surface_web",
+            pack="configured_paths",
+            pack_version=1,
+            pack_config=pack_config,
+        )
+
+    static = RuleLoomConfig(
+        schema_version=3,
+        project="ExampleProject",
+        pack="generic_changes",
+        pack_version=1,
+    ).to_dict()
+    static["pack_config"] = {"path_predicates": []}
+    with pytest.raises(ModelError, match="does not accept pack_config fields"):
+        RuleLoomConfig.from_dict(static)
+
+    configured = RuleLoomConfig(
+        schema_version=3,
+        project="ExampleProject",
+        pack="configured_paths",
+        pack_version=1,
+        pack_config=pack_config,
+    ).to_dict()
+    configured.pop("pack_config")
+    with pytest.raises(ModelError, match="schema-v3 config is missing required fields"):
+        RuleLoomConfig.from_dict(configured)
+
+
+def test_config_loader_rejects_isolated_unicode_surrogate_in_pack_glob(tmp_path: Path) -> None:
+    config = RuleLoomConfig(
+        schema_version=3,
+        project="ExampleProject",
+        pack="configured_paths",
+        pack_version=1,
+        pack_config=ConfiguredPathsConfig(
+            (PathPredicateConfig("touches_surface_web", ("apps/web/**",)),)
+        ),
+    )
+    config_path = tmp_path / CONFIG_PATH
+    config_path.parent.mkdir(parents=True)
+    content = canonical_json(config.to_dict()).replace("apps/web/**", r"apps/\ud800/**")
+    config_path.write_text(content + "\n", encoding="utf-8")
+
+    with pytest.raises(ModelError, match="surrogate"):
+        RuleLoomConfig.load(tmp_path)
 
 
 def test_schema_v2_deserialization_requires_the_complete_persisted_profile() -> None:
@@ -863,6 +1025,30 @@ def test_storage_uses_strict_json_decoding(
     jsonl_path.write_text(content, encoding="utf-8")
     with pytest.raises(ModelError, match=message):
         load_observations(jsonl_path)
+
+
+@pytest.mark.parametrize("separator", ["\u0085", "\u2028", "\u2029"])
+def test_jsonl_round_trip_preserves_unicode_non_record_separators(
+    tmp_path: Path,
+    separator: str,
+) -> None:
+    observation = replace(
+        _observation("obs.unicode", 1, LabelValue.UNKNOWN, {"risk"}),
+        metadata={"path": f"apps{separator}web/file.ts"},
+    )
+    observation_path = tmp_path / "observations.jsonl"
+    save_observations(observation_path, [observation])
+
+    assert load_observations(observation_path) == [observation]
+
+    prediction = _prediction(observation, matched=True)
+    prediction_path = tmp_path / "predictions.jsonl"
+    prediction_path.write_text(
+        canonical_json(prediction.to_dict()) + "\n",
+        encoding="utf-8",
+    )
+
+    assert load_predictions(prediction_path) == [prediction]
 
 
 def test_live_lock_owner_is_not_evicted_when_lock_file_looks_stale(tmp_path: Path) -> None:

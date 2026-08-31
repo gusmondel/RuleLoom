@@ -467,5 +467,10 @@ def test_strict_json_rejects_duplicate_keys_nonfinite_values_and_bad_python_type
         validate_json_value({1: "bad"})
     with pytest.raises(ModelError, match="unsupported value type"):
         validate_json_value({"bad": object()})
+    with pytest.raises(ModelError, match="surrogate"):
+        strict_json_loads(r'{"value": "\ud800"}', "fixture")
+    with pytest.raises(ModelError, match="surrogate"):
+        validate_json_value({"\udfff": "bad"})
+    assert strict_json_loads(r'{"value": "\ud83d\ude00"}') == {"value": "😀"}
     with pytest.raises(ValueError):
         canonical_json({"bad": float("inf")})

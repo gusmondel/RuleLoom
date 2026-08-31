@@ -132,7 +132,13 @@ def canonical_json(value: JsonValue) -> str:
 
 def validate_json_value(value: object, field_name: str = "JSON value") -> None:
     """Reject non-JSON Python objects and non-finite numbers recursively."""
-    if value is None or isinstance(value, str | bool | int):
+    if isinstance(value, str):
+        if any(0xD800 <= ord(character) <= 0xDFFF for character in value):
+            raise ModelError(
+                f"{field_name} must not contain isolated Unicode surrogate code points"
+            )
+        return
+    if value is None or isinstance(value, bool | int):
         return
     if isinstance(value, float):
         if not math.isfinite(value):
@@ -146,6 +152,11 @@ def validate_json_value(value: object, field_name: str = "JSON value") -> None:
         for key, item in value.items():
             if not isinstance(key, str):
                 raise ModelError(f"{field_name} object keys must be strings")
+            if any(0xD800 <= ord(character) <= 0xDFFF for character in key):
+                raise ModelError(
+                    f"{field_name} object keys must not contain isolated Unicode "
+                    "surrogate code points"
+                )
             validate_json_value(item, f"{field_name}.{key}")
         return
     raise ModelError(f"{field_name} contains unsupported value type {type(value).__name__}")

@@ -31,19 +31,24 @@ record with the pilot artifacts if the repository owner's data policy permits it
 |---|---|
 | Experiment ID | One stable ID for this pre-registered protocol; change it when the contract changes |
 | Repository ID | The identity derived by `init`; never pool another repository |
-| Unit of observation | Canonical `git_commit` for retrospective learning; configured `git_worktree` snapshots keyed by one stable PR/task/change ID for prospective assessment; never pool unit kinds in one cohort |
-| Prediction time | Exact point at which all feature facts are available |
+| Unit of observation | Retrospective `learn` accepts only `git_commit`, whose contents and timestamp must predate the outcome. `git_range`/`git_worktree` are prospective collection/prediction snapshots, never retrospective training input; do not pool unit kinds |
+| Independent-unit/group key | External stable PR/task/change identity used to audit independence. Version 0.3.0 does not group retrospective commits by this key; grouped change/range training is future work |
+| Prediction time | Exact workflow point and immutable commit SHA for retrospective training, or base/head/worktree snapshot for prospective prediction |
 | Target | One outcome with a single operational definition |
-| Evidence profile | Schema version plus one exact `pack@version`; use `generic_changes@1` unless the experiment has pre-registered a supported technology-specific pack |
+| Evidence profile | Schema version plus one exact `pack@version`; use schema-v2 `generic_changes@1` unless the experiment has pre-registered a supported specialized or schema-v3 configurable pack |
 | Included paths | Repository-relative `evidence.include_paths` globs defining the eligible component(s) |
 | Excluded paths | Repository-relative `evidence.exclude_paths` globs defining generated, vendored, or otherwise ineligible material |
+| Configured feature library | For `configured_paths@1`, the complete canonical `pack_config`, resolved predicate list, `pack_config_hash`, outcome-blind design source/revision, author, and rationale |
+| Feature-library lock | Timestamp and independent witness that the vocabulary was frozen before access to outcomes, candidate rules, metrics, or holdout errors |
+| Configuration attempts | Every vocabulary/scope/threshold tried, including abandoned attempts |
 | Change thresholds | Exact `large_change_churn`, `multi_file_count`, and `metadata_file_limit` values |
 | Positive label | Independent event that counts as positive |
 | Negative label | Maturity condition plus absence of a positive event |
 | Unknown label | Every case not yet mature or not adjudicable |
 | Maturation window | Time or workflow event after which negative is allowed |
 | Retrospective window | Oldest and newest eligible historical change |
-| Holdout rule | Latest chronological fraction, never a random sample |
+| Holdout rule | Latest chronological `git_commit` fraction, never random. Because splitting is not group-aware, admit only one demonstrably independent commit per real-world change or classify the result as exploratory |
+| Confirmation window | Untouched future interval reserved for any design selected after exploratory analysis |
 | Primary predictive metric | Suggested: MCC for the promotion comparison; precision may be the operational priority when false prompts dominate cost |
 | Secondary metrics | Precision, recall, F1, balanced accuracy, prevalence, predicted-positive rate, coverage, confusion counts |
 | Baselines | Never alert, always alert, train-majority, and best train-selected single literal |
@@ -52,14 +57,41 @@ record with the pilot artifacts if the repository owner's data policy permits it
 | Cost guardrails | Latency, tokens, reviewer time, extra validations, false alarms |
 | Stop conditions | Conditions listed below, customized before data inspection |
 
-Choose and record the pack version, path scope, and change thresholds before
-inspecting outcomes or collecting the experiment dataset. Do not redefine the
-target, window, primary metric, pack version, scope, or thresholds after seeing
-which choice produces a better rule. If any of those definitions must change,
-start a new experiment ID and dataset, recollect the observations under the new
-profile, and preserve the previous result. Never append observations from two
-evidence profiles to one dataset or pool their candidates, predictions, or
-metrics.
+Choose and record the pack version, canonical pack configuration, path scope,
+and change thresholds before inspecting outcomes or collecting the experiment
+dataset. “Inspecting outcomes” includes raw CI/review/incident sources, outcome
+proxies, learned rules, confusion tables, and individual holdout errors. Do not
+redefine the target, window, primary metric, pack version, configured vocabulary,
+scope, or thresholds after seeing which choice produces a better rule. If any
+definition must change, preserve the previous attempt, start a new experiment ID
+and dataset, and recollect under the new profile. If the change was informed by
+labels or metrics, the old holdout is now design data: confirmation requires an
+untouched later window, not merely a renamed experiment over the same sample.
+Never append observations from two evidence profiles to one dataset or pool
+their candidates, predictions, or metrics.
+
+## Feature-design anti-leakage lock
+
+For a static pack, audit the versioned built-in vocabulary. For
+`configured_paths@1`, a label-blind feature designer must derive component and
+contract globs only from architecture/ownership documentation and the repository
+tree at a recorded revision. The outcome adjudicator must not edit that library,
+and the evaluator must not disclose holdout errors before the lock. If role
+separation is impossible, record the conflict and treat retrospective results as
+exploratory rather than confirmatory.
+
+Configured predicates must describe path contact with stable repository
+surfaces, use the required `touches_*` naming, and depend only on files visible
+at prediction time. Do not encode outcome/result concepts, reviewer or developer
+identity, incident/release labels, PR status, or paths selected because they
+occurred in positives. RuleLoom files, prediction ledgers, generated agent
+skills, and files added only after review are not eligible features.
+
+Sign or otherwise preserve the canonical config hash, design revision, lock
+time, roles, rationale, and complete attempt log before labels are opened. A
+post-lock semantic change—predicate, glob, scope, threshold, target, extraction
+meaning, or grouping rule—starts a different protocol. Order-only canonical
+reformatting may retain identity only when the resulting hash is unchanged.
 
 ## Recommended first target
 
@@ -79,6 +111,16 @@ narrow and tied to the normal review process:
 at prediction time is a feature, not proof of a later positive outcome. Do not
 label from the same diff pattern used to generate the facts.
 
+Conversely, a test or validation path added in response to the review request is
+part of the outcome process and must not appear in the predictor snapshot. For
+this target, a final merge/squash diff is usually too late unless evidence proves
+that no target event preceded or changed it. A confirmatory retrospective
+observation must itself be a pre-event `git_commit`; version 0.3.0 cannot train
+on a reconstructed `git_range` or `git_worktree`. If such a commit or reliable
+event ordering is unavailable, label the retrospective case `unknown` or exclude
+it from confirmatory evaluation and collect prospectively; never rewrite its
+timestamps.
+
 Post-merge regressions should be a separate target with a longer maturity
 window, such as `linked_regression`. Combining review requests and production
 defects in one label makes the learned rule difficult to interpret.
@@ -90,11 +132,20 @@ Before initializing the target repository:
 - confirm that local processing of commit paths, metadata, and labels is allowed;
 - identify how commits map to pull requests, CI outcomes, review requests, and
   later incidents;
-- choose the observation unit and target contract above;
-- run `ruleloom packs list`, choose one exact `pack@version`, list its generated
-  predicates, and verify that each uses only decision-time data;
+- choose the observation unit, stable group key, pre-outcome snapshot source,
+  and target contract above;
+- run `ruleloom packs list` and choose one exact `pack@version`; for a static
+  pack, audit its listed vocabulary, while a configurable pack requires loading
+  and independently locking the exact project `pack_config` and resolved
+  vocabulary;
 - pre-register included/excluded path globs and the large-change, multi-file,
   and metadata-sampling thresholds before inspecting outcome labels;
+- for `configured_paths@1`, preserve the canonical config/hash, outcome-blind
+  design revision and rationale, roles, lock time, and all configuration
+  attempts before opening outcome sources;
+- verify that every historical predictor snapshot predates its prospective
+  review/CI outcome; admit one independent commit per real-world change because
+  the retrospective splitter cannot enforce PR/change grouping;
 - decide which retrospective `.ruleloom` artifacts data policy permits; keep
   shadow and prediction material out of any checkout visible to the agent or
   outcome adjudicator;
@@ -138,11 +189,13 @@ documentation, CI, and dependency-file facts. Passing no `--pack-version`
 selects the latest registered version, but a pre-registered pilot should always
 pin it explicitly.
 
-Inspect `.ruleloom/config.json` before collection. New pilots use
-`schema_version: 2`. Freeze its `experiment_id`, derived `repository_id`,
+Inspect `.ruleloom/config.json` before collection. Static-pack pilots use
+`schema_version: 2` by default; `configured_paths@1` uses schema v3. Freeze its
+`experiment_id`, derived `repository_id`,
 `prediction_unit`, `outcome_definition`, target, `pack`, `pack_version`, and the
-entire `evidence` object. RuleLoom includes the resolved extractor and all these
-fields in the evidence-protocol hash recorded on every observation. A typical
+entire `evidence` object plus `pack_config` when schema v3 applies. RuleLoom
+includes the resolved extractor and all these fields in the evidence-protocol
+hash recorded on every observation. A typical
 language-neutral evidence profile is:
 
 ```json
@@ -169,7 +222,7 @@ observation. Validation rejects observations whose protocol hash, pack version,
 or extractor does not match the configured profile; do not work around that by
 rewriting hashes or records.
 
-The include scope defines eligible outcome units. Schema-v2 direct collection
+The include scope defines eligible outcome units. Schema-v2/v3 direct collection
 fails closed for a unit that mixes included and outside-include files; backfill
 skips mixed units and units with no included files. Widen the pre-registered
 include set when an outcome legitimately covers several components, or use a
@@ -179,6 +232,38 @@ Archive each backfill's JSON audit fields: `examined`, `eligible`, `skipped`,
 `skipped_by_reason`, the bounded `skipped_preview`, its truncation count, and
 `skipped_manifest_hash`. These preserve the sampling denominator and distinguish
 mixed units from wholly out-of-scope units without emitting an unbounded list.
+
+The pack-specific feature filters are not another outcome scope. When a
+heterogeneous repository needs stable component facts, initialize a separate
+schema-v3 configured-path experiment, for example:
+
+```bash
+ruleloom init . --project example-configured-pilot \
+  --pack configured_paths --pack-version 1 --agents none \
+  --path-predicate 'touches_client_ui=components/client_ui/**' \
+  --path-exclude 'touches_client_ui=components/client_ui/generated/**' \
+  --path-predicate 'touches_shared_contract=interfaces/contracts/**'
+```
+
+The generated `pack_config.path_predicates` is canonical. Each predicate is true
+when at least one visible, already in-scope changed path matches one of its
+include globs and none of its predicate-local excludes; overlapping predicates
+may co-occur. These globs create features only. The separate
+`evidence.include_paths`/`exclude_paths` still decide whether the entire change
+and outcome are eligible. `configured_paths@1` also emits the shared generic
+facts and does not read source content. Its path matching is language-neutral,
+but the chosen taxonomy is repository-specific background knowledge, not a
+portable result.
+
+Before labeling, audit at least one match and non-match for every configured
+predicate, every predicate-local exclusion, one file matching multiple
+predicates, a file matched by none, and representative added/deleted/binary
+paths. Check the configured match counts, unmatched/overlap counts, match
+manifest hash, `pack_config_hash`, and the common generic facts. A pattern-limit
+or comparison/work-budget failure is extraction failure, never evidence that a
+fact is false. Do not alter a glob to make these audits agree with an outcome; repair
+mechanical misunderstanding before labels are opened, record the attempt, and
+re-lock the full library.
 
 The initial deterministic learner is the appropriate smoke-test engine because
 it has no external solver.
@@ -195,6 +280,10 @@ Collect a small known range first:
 ```bash
 ruleloom collect git --base <old-ref> --head <new-ref>
 ```
+
+This `git_range` mode is an extraction/prospective-instrumentation smoke test. It
+is not accepted by retrospective `learn`; use `collect git --last` to create
+eligible `git_commit` training observations.
 
 For a recent-history smoke test, use:
 
@@ -215,6 +304,8 @@ change with no pack-specific signal, a multi-file or large change, and both
 sides of every include/exclude boundary. For every audited observation check:
 
 - ID and timestamp identify the intended change;
+- base/head identify the immutable pre-outcome snapshot, not a final diff that
+  already contains the response to review;
 - fact evidence points to the correct path, changed-line marker, or threshold
   calculation, as applicable to the selected pack;
 - no predicate uses information created after prediction time;
@@ -223,6 +314,10 @@ sides of every include/exclude boundary. For every audited observation check:
 - `scope_outside_files` is zero; mixed and wholly out-of-scope units were not
   admitted to the dataset;
 - labels remain `unknown` until the registered maturity event;
+- the retrospective cohort contains at most one independently auditable commit
+  per real-world change; the current learner cannot enforce grouping itself;
+- a configurable-pack source's `pack_config_hash` and extraction metadata's
+  `configured_paths_config_hash` both equal the exact locked hash;
 - rerunning collection produces the same facts and no duplicate ID.
 
 For a large or multi-file change, audit `files_changed`, churn totals,
@@ -254,8 +349,9 @@ language-neutral facts. In that profile, additionally audit a Dart change that
 should match a Flutter-specific predicate, one that should not, and an
 out-of-scope Dart change. `flutter_testing@1` is frozen compatibility behavior
 for reproducing schema-v1 work, not the default for a new pilot. Do not mix the
-generic and Flutter profiles; compare them only as separately pre-registered
-experiments.
+generic, configured-path, and Flutter profiles. Compare packs only as separately
+pre-registered experiments on an untouched common future window; choosing a
+winner on a reused holdout is model selection, not confirmation.
 
 Record extraction coverage as:
 
@@ -310,11 +406,24 @@ record and leave the RuleLoom value `unknown` until the registered adjudication
 contract resolves it. The current schema stores the resolved evidence, not a
 multi-reviewer event history.
 
-Historical reconstruction is useful but vulnerable to survivorship bias and
-incomplete linkage. Report its results separately from prospectively collected
-labels. After importing labels, audit at least one positive and one negative
-against their independent sources; this is an outcome audit, separate from the
-pre-label extraction audit in Phase 1.
+Historical reconstruction is useful but vulnerable to survivorship bias,
+outcome-caused features, and incomplete linkage. `collect git --last` observes
+first-parent commit states; it does not reconstruct the initial PR head or prove
+that a review request happened later. A commit is eligible for a review-time
+target only when its exact diff and `observed_at` predate the independent event
+and any validation added in response. A final merge/squash commit containing
+that response is not a predictor observation. Version 0.3.0 retrospective
+`learn` accepts only `git_commit`; a reconstructed range/worktree cannot replace
+the missing training observation. If provider history cannot supply a genuine
+pre-event commit and reliable event order, exclude the case or use the
+historical cohort only as exploratory instrumentation.
+
+Audit at least one positive and one negative against their independent sources,
+including the predictor SHA, event timestamp, response commit, maturity event,
+and stable PR/change identity. Ensure `available_at` is when the outcome first
+became knowable, never a later import time chosen to pass validation. Report
+historical results separately from prospectively collected labels. This outcome
+audit is separate from the pre-label extraction audit in Phase 1.
 
 ## Phase 3 — retrospective temporal evaluation
 
@@ -337,7 +446,15 @@ truth or predictive value.
 When all eligible observations carry compatible repository topology, the latest
 first-parent positions form the holdout; otherwise RuleLoom falls back to
 timestamps. Commit timestamps remain audit evidence, and backdated/tied values
-produce warnings. The current default mechanical
+produce warnings. Retrospective `learn` rejects non-`git_commit` observations,
+and neither ordering method is group-aware. Version 0.3.0 therefore requires a
+confirmatory cohort with one demonstrably independent commit per real-world
+change; if several commits belong to one PR/task/change or reliable linkage is
+unavailable, do not call the holdout confirmatory. Training grouped by
+`change_id` or over `git_range` snapshots remains backlog work. Chronology also
+cannot repair a commit created after its label-generating event.
+
+The current default mechanical
 minimum is eight training and four test examples. That minimum allows the
 pipeline to run; it is not enough by itself for a reliable business conclusion.
 Always show raw confusion counts. Candidate/report metrics are point estimates;
@@ -358,6 +475,13 @@ Review the candidate against all of the following:
 - any split, extraction, timeout, or sample-size warning;
 - whether the rule is useful beyond restating an obvious predicate;
 - whether the rule could encode a developer, release, or time-period confounder.
+
+For `configured_paths@1`, confirm that `best_single_literal` considered every
+configured fact and separately report each predicate's train/test prevalence,
+zero- or always-true status, pairwise/observed overlap, and path-rename drift. A
+rule that merely restates one component flag has not demonstrated value from ILP
+complexity. Never edit the path library after seeing this audit and continue to
+call the same holdout a test.
 
 The default `shadow` gate requires at least 20 positive outcomes and a non-empty
 learned rule set. Before this first reviewed transition, RuleLoom requires the
@@ -384,8 +508,8 @@ the following attributable prospective evidence:
   prospective matches, temporal point precision at least 0.75, and a
   prospective Wilson 95% precision lower bound of at least 0.70.
 
-Dataset/config/pack-version/scope/threshold/target identity, candidate
-reproduction, the recorded shadow transition, temporal sample/metrics
+Dataset, configuration, pack version/configuration, scope, threshold, and target
+identity; candidate reproduction; the recorded shadow transition; temporal sample/metrics
 completeness, and the prospective/per-clause requirements are non-overridable.
 The positive-count, aggregate retrospective
 performance, baseline, and stability thresholds can be overridden only where
@@ -426,11 +550,14 @@ For each eligible new change:
    agent, developer, reviewer, and outcome adjudicator;
 5. preserve the immutable prediction record: embedded decision-time
    observation with unknown target and `protocol_hash`, stable `unit_id`, exact
-   protocol snapshot, target, exact policy snapshots
+   hash-bound protocol object, target, exact policy snapshots
    (candidate/status/target/manifest hash/rule signatures), policy-set hash,
    matches, abstention, and timestamp;
-6. let the normal repository process continue unchanged;
-7. attach the outcome only when it matures.
+6. preserve the canonical config/pre-registration separately because the
+   Prediction object binds but does not embed every evidence or pack-config
+   field;
+7. let the normal repository process continue unchanged;
+8. attach the outcome only when it matures.
 
 Example assessment:
 
@@ -458,8 +585,8 @@ Repeated assessments remain in the immutable log, but `report` groups by exact
 `source.change_id` is that unit, requires the outcome to mature later, and never
 pools different experiments, repositories, observation units, outcome
 definitions, targets, pack versions, extractors, include/exclude scopes,
-thresholds, configurations, or policy sets. Shadow elapsed days are likewise
-calculated from earliest retained unit predictions.
+pack configurations, thresholds, configurations, or policy sets. Shadow elapsed
+days are likewise calculated from earliest retained unit predictions.
 
 `assess` also writes a non-versioned, hash-bound recording attestation in
 Git-private metadata for this checkout/worktree, within five minutes of
@@ -570,7 +697,9 @@ policies is also recorded: it forms an empty-policy set and correctly abstains.
 ```text
 date:
 experiment_id / evidence_protocol_hash:
-pack@version / include-exclude scope / thresholds:
+pack@version / pack_config_hash / resolved predicates:
+feature-design revision / lock time / configuration attempt:
+include-exclude outcome scope / thresholds:
 policy_set_hash:
 eligible changes:
 observations collected / failures:
@@ -607,11 +736,17 @@ Pause and repair instrumentation when:
 
 - extraction coverage falls below the pre-registered gate;
 - any feature uses post-outcome information;
+- a merge/final diff contains files added because of the target event;
 - absence is being confused with extractor failure;
 - content required by the selected pack cannot be collected completely;
 - mixed or out-of-scope units cannot be linked to a component-specific outcome;
-- observations were collected under different pack versions, scopes, or
-  thresholds;
+- observations were collected under different pack versions, pack
+  configurations, scopes, or thresholds;
+- configured predicates, globs, or scopes were chosen or edited after labels,
+  learned rules, metrics, or holdout errors were inspected;
+- the retrospective cohort contains multiple commits from one real-world change
+  or commit independence cannot be audited;
+- a tuned protocol reuses its already inspected holdout as confirmatory evidence;
 - commit/PR/outcome linkage is unreliable;
 - duplicate observations or non-deterministic facts appear;
 - labels cannot be applied consistently;

@@ -40,7 +40,7 @@ from ruleloom.models import (
     validate_prediction_cohort,
 )
 from ruleloom.packs import (
-    get_pack,
+    EvidencePack,
     matches_pack_version,
     validate_persisted_extraction,
     validate_policy_pack_contract,
@@ -308,6 +308,54 @@ def _run_horn(
     return learn_horn(observations, target, _horn_settings(config), budget=budget)
 
 
+def _validate_observation_pack_contract(
+    item: Observation,
+    config: RuleLoomConfig,
+    descriptor: EvidencePack,
+    expected_protocol_hash: str,
+    *,
+    subject: str,
+) -> None:
+    if item.protocol_hash != expected_protocol_hash:
+        raise ModelError(f"{subject} {item.id!r} belongs to a different evidence protocol")
+    kind = item.source.get("kind")
+    if not isinstance(kind, str) or kind not in {
+        "git_commit",
+        "git_range",
+        "git_worktree",
+    }:
+        raise ModelError(f"{subject} {item.id!r} lacks a supported observation unit")
+    repository = item.source.get("repository")
+    if not isinstance(repository, str) or not repository:
+        raise ModelError(f"{subject} {item.id!r} lacks repository provenance")
+    if repository != config.protocol.repository_id:
+        raise ModelError(f"{subject} {item.id!r} belongs to a different configured repository")
+    if item.source.get("pack") != config.pack:
+        raise ModelError(f"{subject} {item.id!r} uses a different fact pack")
+    source_pack_version = item.source.get("pack_version")
+    if (config.schema_version >= 2 or source_pack_version is not None) and not matches_pack_version(
+        source_pack_version, config.pack_version
+    ):
+        raise ModelError(f"{subject} {item.id!r} uses a different fact pack version")
+    if item.source.get("extractor") != descriptor.extractor:
+        raise ModelError(f"{subject} {item.id!r} has incompatible extractor provenance")
+    source_configuration = item.source.get("pack_config_hash")
+    if (
+        descriptor.configuration_hash is not None
+        and source_configuration != descriptor.configuration_hash
+    ):
+        raise ModelError(f"{subject} {item.id!r} uses a different pack configuration")
+    if descriptor.configuration_hash is None and source_configuration is not None:
+        raise ModelError(f"{subject} {item.id!r} has unexpected pack configuration")
+    validate_persisted_extraction(
+        descriptor,
+        item.facts,
+        item.fact_evidence,
+        subject=f"{subject} {item.id!r}",
+        metadata=item.metadata,
+    )
+
+
 def learn_candidate(
     observations: Sequence[Observation],
     config: RuleLoomConfig,
@@ -317,46 +365,23 @@ def learn_candidate(
     """Fit on the past, evaluate on the future, and return an immutable candidate."""
     cutoff = _as_of(as_of)
     target = config.target
+    expected_protocol_hash = config.evidence_protocol_hash
     mismatched_protocol = [
-        item.id for item in observations if item.protocol_hash != config.evidence_protocol_hash
+        item.id for item in observations if item.protocol_hash != expected_protocol_hash
     ]
     if mismatched_protocol:
         raise ModelError(
             "learning data contains observations from a different evidence protocol: "
             + ", ".join(sorted(mismatched_protocol)[:10])
         )
-    descriptor = get_pack(config.pack, config.pack_version)
+    descriptor = config.resolved_pack
     for item in observations:
-        kind = item.source.get("kind")
-        if not isinstance(kind, str) or kind not in {
-            "git_commit",
-            "git_range",
-            "git_worktree",
-        }:
-            raise ModelError(f"learning observation {item.id!r} lacks a supported observation unit")
-        repository = item.source.get("repository")
-        if not isinstance(repository, str) or not repository:
-            raise ModelError(f"learning observation {item.id!r} lacks repository provenance")
-        if repository != config.protocol.repository_id:
-            raise ModelError(
-                f"learning observation {item.id!r} belongs to a different configured repository"
-            )
-        if item.source.get("pack") != config.pack:
-            raise ModelError(f"learning observation {item.id!r} uses a different fact pack")
-        source_pack_version = item.source.get("pack_version")
-        if (
-            config.schema_version >= 2 or source_pack_version is not None
-        ) and not matches_pack_version(source_pack_version, config.pack_version):
-            raise ModelError(f"learning observation {item.id!r} uses a different fact pack version")
-        if item.source.get("extractor") != descriptor.extractor:
-            raise ModelError(
-                f"learning observation {item.id!r} has incompatible extractor provenance"
-            )
-        validate_persisted_extraction(
+        _validate_observation_pack_contract(
+            item,
+            config,
             descriptor,
-            item.facts,
-            item.fact_evidence,
-            subject=f"learning observation {item.id!r}",
+            expected_protocol_hash,
+            subject="learning observation",
         )
     mature_examples = labeled(observations, target, as_of=cutoff)
     if not mature_examples:
@@ -489,7 +514,7 @@ def learn_candidate(
         "pack": config.pack,
         "pack_version": config.pack_version,
         "repository_id": config.protocol.repository_id,
-        "evidence_protocol_hash": config.evidence_protocol_hash,
+        "evidence_protocol_hash": expected_protocol_hash,
         "historical_observation_unit": "git_commit",
         "extractors": cast(JsonValue, _extractors(observations)),
         "readiness": status.to_dict(),
@@ -512,6 +537,8 @@ def learn_candidate(
             "label_availability_enforced": True,
         },
     }
+    if descriptor.configuration_hash is not None:
+        metadata["pack_config_hash"] = descriptor.configuration_hash
     candidate = Candidate(
         id="cand-pending",
         created_at=utc_now(cutoff),
@@ -630,6 +657,23 @@ def prospective_unit_outcome(
             raise ModelError(f"prediction unit {prediction.unit_id!r} mixes fact packs")
         if item.source.get("extractor") != prediction.protocol.get("extractor"):
             raise ModelError(f"prediction unit {prediction.unit_id!r} mixes extractors")
+        expected_pack_version = prediction.observation.source.get("pack_version")
+        actual_pack_version = item.source.get("pack_version")
+        if expected_pack_version is None:
+            if actual_pack_version is not None:
+                raise ModelError(f"prediction unit {prediction.unit_id!r} mixes fact pack versions")
+        elif (
+            isinstance(expected_pack_version, bool)
+            or not isinstance(expected_pack_version, int)
+            or not matches_pack_version(actual_pack_version, expected_pack_version)
+        ):
+            raise ModelError(f"prediction unit {prediction.unit_id!r} mixes fact pack versions")
+        if item.source.get("pack_config_hash") != prediction.observation.source.get(
+            "pack_config_hash"
+        ):
+            raise ModelError(
+                f"prediction unit {prediction.unit_id!r} mixes fact pack configurations"
+            )
         if target not in item.labels:
             raise ModelError(
                 f"prediction unit {prediction.unit_id!r} contains an observation without target "
@@ -666,6 +710,8 @@ def shadow_evidence(
         raise ModelError("shadow candidate is missing its reviewed_at transition timestamp")
     shadow_started_at = max(parse_timestamp(candidate.created_at), parse_timestamp(raw_reviewed_at))
     manifest_hash = content_hash(candidate.to_dict())
+    expected_config_hash = config.hash
+    expected_protocol_hash = config.evidence_protocol_hash
     predictions = [
         prediction
         for prediction in load_trusted_predictions(root, config)
@@ -687,8 +733,8 @@ def shadow_evidence(
             or prediction.protocol.get("outcome_definition") != config.protocol.outcome_definition
             or prediction.protocol.get("target") != config.target
             or prediction.protocol.get("pack") != config.pack
-            or prediction.protocol.get("config_hash") != config.hash
-            or prediction.protocol.get("evidence_protocol_hash") != config.evidence_protocol_hash
+            or prediction.protocol.get("config_hash") != expected_config_hash
+            or prediction.protocol.get("evidence_protocol_hash") != expected_protocol_hash
         ):
             raise ModelError(
                 f"shadow prediction {prediction.id} does not match the configured protocol"
@@ -706,6 +752,15 @@ def shadow_evidence(
         earliest.setdefault(prediction.unit_id, prediction)
 
     observations = load_observations(dataset_path(root, config))
+    descriptor = config.resolved_pack
+    for item in observations:
+        _validate_observation_pack_contract(
+            item,
+            config,
+            descriptor,
+            expected_protocol_hash,
+            subject="shadow outcome observation",
+        )
     tp = fp = tn = fn = mature = 0
     rule_counts = {signature: [0, 0, 0, 0] for signature in candidate.rules.signatures}
     for prediction in earliest.values():
@@ -1157,7 +1212,9 @@ def make_prediction(
     if len(identifiers) != len(set(identifiers)):
         raise ModelError("active policy set contains duplicate candidate ids")
     target = config.target
-    if observation.protocol_hash != config.evidence_protocol_hash:
+    expected_protocol_hash = config.evidence_protocol_hash
+    expected_config_hash = config.hash
+    if observation.protocol_hash != expected_protocol_hash:
         raise ModelError("observation belongs to a different evidence protocol")
     if target not in observation.labels:
         raise ModelError(f"observation lacks configured prediction target {target!r}")
@@ -1167,7 +1224,7 @@ def make_prediction(
     observation_pack = observation.source.get("pack")
     observation_pack_version = observation.source.get("pack_version")
     source_extractor = observation.source.get("extractor")
-    descriptor = get_pack(config.pack, config.pack_version)
+    descriptor = config.resolved_pack
     if source_kind != config.protocol.prediction_unit:
         raise ModelError(
             f"observation unit {source_kind!r} does not match configured prospective unit "
@@ -1200,11 +1257,20 @@ def make_prediction(
             f"observation extractor provenance {source_extractor!r} does not match configured "
             f"extractor {descriptor.extractor!r}"
         )
+    source_configuration = observation.source.get("pack_config_hash")
+    if (
+        descriptor.configuration_hash is not None
+        and source_configuration != descriptor.configuration_hash
+    ):
+        raise ModelError("observation uses a different pack configuration")
+    if descriptor.configuration_hash is None and source_configuration is not None:
+        raise ModelError("observation has unexpected pack configuration")
     validate_persisted_extraction(
         descriptor,
         observation.facts,
         observation.fact_evidence,
         subject=f"prediction observation {observation.id!r}",
+        metadata=observation.metadata,
     )
     targets = {candidate.rules.target for candidate in candidates}
     if len(targets) > 1:
@@ -1215,7 +1281,7 @@ def make_prediction(
         candidate.validate_identity()
         if candidate.status not in {"shadow", "approved"}:
             raise ModelError(f"candidate {candidate.id} is not an active reviewed policy")
-        if candidate.config_hash != config.hash:
+        if candidate.config_hash != expected_config_hash:
             raise ModelError(f"candidate {candidate.id} does not match the current configuration")
         if candidate.metadata.get("repository_id") != config.protocol.repository_id:
             raise ModelError(f"candidate {candidate.id} belongs to a different repository")
@@ -1234,7 +1300,7 @@ def make_prediction(
             candidate.metadata,
             {literal.predicate for clause in candidate.rules.clauses for literal in clause.body},
             schema_version=config.schema_version,
-            evidence_protocol_hash=config.evidence_protocol_hash,
+            evidence_protocol_hash=expected_protocol_hash,
             subject=f"candidate {candidate.id}",
         )
     matches = match_rules(observation.facts, candidates)
@@ -1256,8 +1322,8 @@ def make_prediction(
         "target": target,
         "pack": config.pack,
         "extractor": source_extractor,
-        "config_hash": config.hash,
-        "evidence_protocol_hash": config.evidence_protocol_hash,
+        "config_hash": expected_config_hash,
+        "evidence_protocol_hash": expected_protocol_hash,
     }
     protocol_hash = content_hash(protocol)
     policy_set_hash = content_hash(

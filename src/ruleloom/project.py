@@ -12,7 +12,11 @@ from ruleloom.config import CONFIG_PATH, RuleLoomConfig, default_config
 from ruleloom.gitfacts import GitFactsError, repository_identity
 from ruleloom.lifecycle import Readiness, readiness
 from ruleloom.models import ModelError, Observation, parse_timestamp
-from ruleloom.packs import get_pack, matches_pack_version, validate_persisted_extraction
+from ruleloom.packs import (
+    ConfiguredPathsConfig,
+    matches_pack_version,
+    validate_persisted_extraction,
+)
 from ruleloom.storage import (
     dataset_path,
     load_approved,
@@ -41,6 +45,7 @@ def initialize_project(
     *,
     pack: str | None = None,
     pack_version: int | None = None,
+    pack_config: ConfiguredPathsConfig | None = None,
     schema_version: int = 2,
     agents: Sequence[str] = (),
 ) -> InitResult:
@@ -56,6 +61,7 @@ def initialize_project(
         repository_id=repository_id,
         pack=pack,
         pack_version=pack_version,
+        pack_config=pack_config,
         schema_version=schema_version,
     )
     managed_paths = [
@@ -130,9 +136,10 @@ def validate_observations(
     identifiers = [item.id for item in observations]
     if len(identifiers) != len(set(identifiers)):
         raise ModelError("observation ids must be unique")
-    descriptor = get_pack(config.pack, config.pack_version)
+    descriptor = config.resolved_pack
+    expected_protocol_hash = config.evidence_protocol_hash
     for item in observations:
-        if item.protocol_hash != config.evidence_protocol_hash:
+        if item.protocol_hash != expected_protocol_hash:
             raise ModelError(
                 f"observation {item.id!r} belongs to a different evidence protocol; "
                 "start a new experiment dataset instead of reinterpreting its labels"
@@ -155,11 +162,22 @@ def validate_observations(
                 f"observation {item.id!r} extractor provenance {extractor!r} does not match "
                 f"configured extractor {descriptor.extractor!r}"
             )
+        source_configuration = item.source.get("pack_config_hash")
+        if (
+            descriptor.configuration_hash is not None
+            and source_configuration != descriptor.configuration_hash
+        ):
+            raise ModelError(f"observation {item.id!r} uses a different pack configuration")
+        if descriptor.configuration_hash is None and source_configuration is not None:
+            raise ModelError(
+                f"observation {item.id!r} has unexpected pack-configuration provenance"
+            )
         validate_persisted_extraction(
             descriptor,
             item.facts,
             item.fact_evidence,
             subject=f"observation {item.id!r}",
+            metadata=item.metadata,
         )
         evidence = item.label_evidence.get(config.target)
         if evidence is not None and parse_timestamp(evidence.available_at) <= parse_timestamp(

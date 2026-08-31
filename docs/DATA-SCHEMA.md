@@ -2,8 +2,8 @@
 
 ## Principles
 
-RuleLoom configuration schema version 2 and artifact schema version 1 use local,
-provider-neutral JSON/JSONL. Their persisted
+RuleLoom configuration schema versions 1–3 and artifact schema version 1 use
+local, provider-neutral JSON/JSONL. Their persisted
 artifacts are designed to answer:
 
 - what was known at prediction time;
@@ -125,14 +125,17 @@ OS user.
 }
 ```
 
-Version 0.2 defaults to the language-neutral `generic_changes@1` pack and also
-ships `flutter_testing@2`. The frozen `flutter_testing@1` implementation exists
+Version 0.3.0 defaults to configuration schema v2 and the language-neutral
+`generic_changes@1` pack. It also ships schema-v3 `configured_paths@1` and
+`flutter_testing@2`. The frozen `flutter_testing@1` implementation exists
 only to read structurally and reproduce the hashes of historical configuration
 schema-v1 experiments. That compatibility path does not inherit the collection
 and validation guarantees of schema v2 and is not a current ingestion profile;
-re-extract the complete history into a fresh schema-v2 experiment before making
-new comparisons or policy decisions. `ruleloom packs list` reports the exact
-extractor and declared predicates for each built-in version. External
+re-extract the complete history into a fresh supported schema-v2 or schema-v3
+experiment before making new comparisons or policy decisions. `ruleloom packs
+list` reports the exact extractor and static/shared predicates for each built-in
+version and marks configurable packs; the resolved configured-path vocabulary
+exists only after loading one project's canonical `pack_config`. External
 executable plugins are not loaded in this release: adding a built-in language
 pack uses the same explicit contract and registry without changing learning,
 evaluation, or policy lifecycle code.
@@ -141,25 +144,113 @@ evaluation, or policy lifecycle code.
 scope per experiment. Change-size thresholds and the metadata preview limit are
 also explicit. Configure these from a pre-outcome design sample and freeze them
 before collection; changing any of them creates a different evidence protocol.
-For schema-v2 collection, the include set is an outcome-eligibility boundary:
+For schema-v2/v3 collection, the include set is an outcome-eligibility boundary:
 direct collection rejects mixed inside/outside units, and backfill omits mixed
 or wholly out-of-scope commits. Excludes within the include set may remove
 generated or vendored paths without making the unit mixed.
 
-All six configurable managed paths
-must be repository-relative, remain below `.ruleloom/`, contain no `..` or
+### Schema-v3 configured path predicates
+
+Configuration schema v3 adds required `pack_config`. Static packs accept only
+the explicit empty object `{}`. `configured_paths@1` requires the following
+fields; this is an excerpt, so retain the remaining top-level fields from the
+complete configuration above:
+
+```json
+{
+  "schema_version": 3,
+  "pack": "configured_paths",
+  "pack_version": 1,
+  "pack_config": {
+    "path_predicates": [
+      {
+        "predicate": "touches_client_ui",
+        "include_paths": ["components/client_ui/**"],
+        "exclude_paths": ["components/client_ui/generated/**"]
+      },
+      {
+        "predicate": "touches_shared_contract",
+        "include_paths": ["interfaces/contracts/**"],
+        "exclude_paths": []
+      }
+    ]
+  },
+  "evidence": {
+    "include_paths": ["components/**", "interfaces/**"],
+    "exclude_paths": ["**/vendor/**"],
+    "large_change_churn": 200,
+    "multi_file_count": 3,
+    "metadata_file_limit": 512
+  }
+}
+```
+
+The two path layers are deliberately different. `evidence.include_paths` and
+`evidence.exclude_paths` define whether the complete change and its eventual
+outcome belong to the experiment. Each `pack_config.path_predicates` entry is a
+feature definition applied only to the visible files already admitted by that
+scope. A configured feature never widens eligibility and cannot make an
+out-of-scope file part of the observation.
+
+For one configured predicate and one normalized in-scope path, matching means
+“matches at least one `include_paths` glob and no `exclude_paths` glob.” The
+predicate is true if any visible changed path satisfies that condition. A path
+may activate several predicates. Added, modified, deleted, renamed, and binary
+paths participate through normalized Git path evidence; source contents do not.
+RuleLoom-managed paths and generated RuleLoom agent adapters are internal and do
+not activate predicates.
+
+Configured names must be unique lowercase predicates beginning with
+`touches_`, at most 64 characters, distinct from the target and shared pack
+facts. Every entry must include a non-empty `include_paths` array and an explicit
+`exclude_paths` array, which may be empty. Globs are repository-root-anchored and
+support literals, `*`, `?`, and `**` only as a complete segment. They are not
+Git pathspecs or `.gitignore` syntax. Absolute paths, empty or `.`/`..` segments,
+backslashes, Git pathspec magic, bracket/brace classes, control characters,
+duplicates, and non-portable `**` placement are rejected.
+
+The fail-closed bounds are 32 predicates, 32 include and 32 exclude globs per
+predicate, 256 include/exclude globs in total, 256 characters per glob, and
+5,000,000 potential path/glob comparisons per extraction. A second complexity
+gate permits at most 200,000,000 estimated matcher work units; each evidence path
+is limited to 4,096 characters and 256 components. Predicate entries and their
+glob arrays are sorted canonically before hashing, so order alone does not change
+identity. `pack_config_hash` is the SHA-256 content hash of that canonical object.
+`configured_paths@1` layers these dynamic facts on the shared generic
+facts `large_change`, `multi_file_change`, `touches_ci`,
+`touches_dependencies`, `touches_docs`, and `touches_test`.
+
+The bundled JSON Schema validates local structure and per-field bounds, but it
+is not the complete semantic authority. Cross-field and aggregate invariants—
+including at most 256 globs across all predicates, unique predicate names,
+collision with the target/shared facts, canonical ordering, and the weighted
+matcher budget—are enforced by the Python configuration/pack loader and
+extractor runtime. Passing `config.schema.json` alone does not make a
+configuration executable or valid; load it through RuleLoom and run `validate`.
+
+The configured vocabulary is hand-authored feature selection, not a learned or
+portable ontology. Freeze its full list from outcome-blind architecture evidence
+before inspecting labels, learned rules, metrics, or holdout errors. Record its
+author, design revision, rationale, lock time, and hash in the external
+pre-registration because those audit fields are not accepted inside strict
+`pack_config`. Changing a glob or predicate after outcome inspection creates a
+new experiment and requires an untouched future confirmation window; the
+already inspected holdout is no longer a test set.
+
+All six configurable managed paths must be repository-relative, remain below
+`.ruleloom/`, contain no `..` or
 control characters, and be pairwise non-overlapping after portable Unicode/case
 normalization. Managed symlink components are rejected at access time.
 Predicate-like fields start with a lowercase letter and contain lowercase ASCII
 letters, numbers, and underscores. `init` derives `repository_id` from
 `remote.origin.url`, or from root commits when no origin exists; initialization
 therefore requires an origin or at least one commit. The storage lock uses POSIX
-`fcntl`: version 0.2 supports macOS and Linux, not Windows.
+`fcntl`: version 0.3.0 supports macOS and Linux, not Windows.
 
 The built-in search also enforces finite operational bounds:
 `max_body` 1–4, `max_rules` 1–10, `max_predicates` 1–32,
 `bootstrap_runs` 0–100, and Popper timeout 1–3600 seconds, plus a combined
-hypothesis/work budget. For `engine="popper"`, version 0.2 requires
+hypothesis/work budget. For `engine="popper"`, version 0.3.0 requires
 `max_rules=1`, `bootstrap_runs=0`, and the Horn-specific support/precision/cost
 settings at their defaults. Popper is an offline adapter to an explicitly
 configured, already provisioned checkout; RuleLoom does not install it.
@@ -168,10 +259,12 @@ Changing configuration changes `config_hash`. A candidate must retain the hash
 of the configuration used to generate it. Separately, `evidence_protocol_hash`
 hashes `schema_version`, `experiment_id`, `repository_id`, `prediction_unit`,
 `outcome_definition`, `target`, `pack`, `pack_version`, the exact extractor, and
-the complete evidence scope/threshold profile. Every observation records that
-hash, preventing evidence from different experiments, repositories, units,
-outcome definitions, pack versions, scopes, or thresholds from being pooled
-accidentally. The positive-count gates are readiness heuristics, not a
+the complete evidence scope/threshold profile. In schema v3 it additionally
+hashes the complete canonical `pack_config`, including `{}` for a static pack.
+Every observation records that hash, preventing evidence from different
+experiments, repositories, units, outcome definitions, pack versions, pack
+configurations, scopes, or thresholds from being pooled accidentally. The
+positive-count gates are readiness heuristics, not a
 statistical power calculation. With
 `require_baseline_improvement`, approval also requires test MCC to be strictly
 greater than the best recorded baseline MCC. Approval additionally requires
@@ -238,7 +331,7 @@ Each non-empty line in `.ruleloom/observations.jsonl` is one object:
 
 | Field | Type | Contract |
 |---|---|---|
-| `schema_version` | integer | Must be artifact schema `1` in version 0.2. |
+| `schema_version` | integer | Must be artifact schema `1` in version 0.3.0. |
 | `id` | string | Unique within the dataset; lowercase letters/numbers plus `.`, `_`, or `-`. |
 | `observed_at` | string | Decision-time timestamp with timezone; used for chronological splitting. |
 | `protocol_hash` | string | Lowercase SHA-256 of the configured evidence protocol; evidence with a different hash must not be pooled. |
@@ -249,12 +342,15 @@ Each non-empty line in `.ruleloom/observations.jsonl` is one object:
 | `source` | object | Provider-neutral source identity, references, and collection context. |
 | `metadata` | object | JSON audit information not consumed as facts unless an extractor explicitly emits it. |
 
-Every schema-v2 collected source records `kind`, the derived stable `repository`,
-`pack_version`, `pack`, and versioned `extractor`; frozen schema-v1 records retain
-their original shape without `pack_version`. Prospective sources additionally record
-`change_id`, which must match the Prediction `unit_id`. Git sources also retain
-the relevant `base` and `head`; these identify the snapshot, while `change_id`
-identifies the independent real-world change across snapshots.
+Every schema-v2/v3 collected source records `kind`, the derived stable
+`repository`, `pack_version`, `pack`, and versioned `extractor`; frozen schema-v1
+records retain their original shape without `pack_version`. A configured-path
+source additionally records `pack_config_hash`, which must match both the
+canonical project configuration and the resolved pack descriptor. Prospective
+sources record `change_id`, which must match the Prediction `unit_id`. Git
+sources also retain the relevant `base` and `head`; these identify the immutable
+snapshot, while `change_id` identifies the independent real-world change across
+snapshots.
 
 Change metadata keeps exact aggregate counts and a SHA-256 manifest of every
 scoped path/churn tuple, but bounds path previews by count and byte budget.
@@ -267,6 +363,12 @@ have one `fact_evidence` entry per fact, and name that pack's deterministic
 extractor in every entry. Scope metadata records total, included, outside, and
 explicitly excluded file counts. New collection never persists mixed or empty
 scope units. Git text/path output must be UTF-8; lossy replacement is forbidden.
+For `configured_paths@1`, metadata additionally records
+`configured_paths_config_hash`, per-predicate
+`configured_path_match_counts`, `configured_unmatched_files`,
+`configured_overlapping_files`, and the full
+`configured_match_manifest_hash`. These audit fields do not alter the fact
+vocabulary.
 
 Observation IDs identify immutable snapshots and cannot repeat. For prospective
 assessment, `source.change_id` is the stable independent-unit key: repeated
@@ -278,6 +380,17 @@ corrected observation with a new identity and preserve the correction in the
 authorized audit system. Persisted Git history is ordered by first-parent
 topological position when that provenance is available, otherwise by timestamp
 then ID.
+
+First-parent order establishes an ordering, not a valid decision point. For a
+review-time target, a merge or squash commit may already contain validation
+added because of CI or review. That final diff is post-outcome evidence and must
+not be used as the predictor snapshot, even if its commit timestamp is later and
+the split is chronological. Version 0.3.0 retrospective `learn` accepts only
+`git_commit`, so the historical observation itself must be a genuine pre-event
+commit. A reconstructed `git_range` or `git_worktree` is usable for prospective
+collection/prediction, not retrospective training. If no pre-event commit
+exists, keep the historical case out of confirmatory evaluation; never alter
+`observed_at` or `available_at` to force eligibility.
 
 ### Labels
 
@@ -314,6 +427,14 @@ snapshots sharing the prediction's `unit_id`; it contributes to confusion counts
 only when `available_at` is strictly later than that unit's earliest
 `predicted_at` within the policy set.
 
+The same independent change must not appear on both sides of a retrospective
+split through multiple commits. Current topological/timestamp ordering does not
+infer PR membership or group by `change_id`, and `learn` does not accept range or
+worktree observations. A confirmatory v0.3.0 cohort must therefore contain at
+most one independently auditable `git_commit` per real-world change; otherwise
+classify the analysis as exploratory. Group-aware training by change ID or range
+is future work.
+
 ### Fact evidence
 
 Each `fact_evidence` entry contains:
@@ -326,7 +447,7 @@ Each `fact_evidence` entry contains:
 | `confidence` | number or absent | Optional value from 0 through 1, mainly for non-deterministic facts. |
 
 `agent`, `human`, and `imported` are reserved wire-format values for future
-extractors and migration tooling. In version 0.2, current built-in-pack
+extractors and migration tooling. In version 0.3.0, current built-in-pack
 observations are accepted for validation, learning, and prediction only when
 every fact has `kind: "deterministic"` and names the exact configured extractor.
 A record using a reserved non-deterministic kind may be read structurally, but
@@ -352,9 +473,14 @@ observations should be rejected or marked out of scope, not silently saved with
 an empty fact set. Changing predicate semantics requires a pack version change
 and a new experiment.
 
+For `configured_paths@1`, absence is verified only after complete enumeration of
+all normalized, visible, in-scope changed paths against the locked canonical
+glob library. A comparison-budget failure, invalid path, mixed-scope unit, or
+missing diff is extraction failure or ineligibility, never logical falsehood.
+
 ## Rule representation
 
-Version 0.2 is propositionalized ILP over one change at a time. Each fact is a
+Version 0.3.0 is propositionalized ILP over one change at a time. Each fact is a
 Boolean unary predicate of the same observation variable `A`; there are no
 multiple entity variables, relations between files/types/people, relational
 joins, recursion, predicate invention, or arbitrary Prolog programs. A rule set
@@ -448,10 +574,17 @@ Candidate {
 
 All baseline metrics use the same chronological test IDs as the learned rule.
 `train_majority` and `best_single_literal` are selected using training data
-only. Current metadata records readiness, the selected single literal, rule
-cards with support/counterexamples, and an evaluation object whose method is
+only; for a configured-path experiment, the single-literal search includes the
+dynamic configured predicates. Current metadata records readiness, the selected
+single literal, rule cards with support/counterexamples, and an evaluation object whose method is
 `temporal_holdout`, whose `test_start` is explicit, and whose
 `label_availability_enforced` flag is true.
+
+Candidate metadata binds the exact pack name/version, extractor,
+`evidence_protocol_hash`, and, for a configurable pack, `pack_config_hash`.
+That digest protects identity but does not explain a dynamic predicate by
+itself; preserve the canonical config and its outcome-blind pre-registration
+with every candidate/report intended for independent audit.
 
 `promote` copies the immutable candidate into `shadow/` or `approved/` with its
 review record: reviewer, review time, note, whether an override was used, and
@@ -575,11 +708,16 @@ the observation dataset, never this prediction. The declared `target` must be
 present and `unknown` in the snapshot, with no target label evidence.
 `unit_id` must equal `observation.source.change_id`; it is the stable key for
 deduplication, outcome resolution, temporal joining, and elapsed-day counting.
-The exact `protocol` snapshot contains only `experiment_id`, `repository_id`,
+The Prediction `protocol` object contains only `experiment_id`, `repository_id`,
 `observation_unit`, `outcome_definition`, `target`, `pack`, `extractor`,
 `config_hash`, and `evidence_protocol_hash`. The last value must equal the
 embedded observation's `protocol_hash`, and top-level `protocol_hash` is the
-canonical content hash of the full snapshot.
+canonical content hash of this protocol object. Pack version, `EvidenceConfig`,
+and schema-v3 `pack_config` are transitively bound through the two configuration
+hashes but are not embedded as a self-contained reconstruction. Preserve the
+canonical `.ruleloom/config.json` and pre-registration alongside an exported
+prediction; otherwise describe the record as hash-bound to an external protocol,
+not as a complete standalone protocol snapshot.
 Each `policies` item freezes the candidate ID, lifecycle status, target, hash of
 the exact reviewed manifest, and its rule signatures. `policy_set_hash` is the
 canonical hash of `{protocol_hash, target, policies}`; every match must name one
@@ -588,7 +726,7 @@ the snapshot, and reproduce its Prolog rendering. `abstained` must equal
 `(matches.length == 0)`.
 
 The prediction ID content-addresses the complete identity payload: timestamp,
-observation snapshot, target, `unit_id`, protocol snapshot/hash, policy
+observation snapshot, target, `unit_id`, protocol object/hash, policy
 snapshot/hash, matches, and abstention.
 Duplicate IDs are rejected, and existing JSONL records are never updated in
 place. The illustrative record above is structurally complete and its protocol,
@@ -640,7 +778,7 @@ eligible for prospective confusion metrics. `excluded_preexisting_outcome`
 prevents a retrospectively known answer from masquerading as a prediction. Use
 `report --policy-set <hash>` for the unwrapped single-policy report. The report
 describes aggregate prospective association, never a causal estimate; causal
-impact needs a randomized or pre-specified staged advisory rollout. Version 0.2
+impact needs a randomized or pre-specified staged advisory rollout. Version 0.3.0
 does not emit confidence intervals or per-clause prospective tables in this
 report. Promotion separately evaluates the registered Wilson lower-bound and
 per-clause gates described above.
@@ -683,11 +821,21 @@ Adding an optional metadata key is not automatically a fact-semantic change.
 Changing how a predicate is detected is semantic and must invalidate direct
 comparisons unless the historical data is re-extracted consistently.
 
-Configuration schema 1 remains structurally readable with its exact historical
-`flutter_testing@1` semantics and hashes; that is the full compatibility claim,
-not an endorsement for new collection or policy decisions. New projects use
-configuration schema 2, an explicit `pack_version`, and a complete evidence
-profile. There is no implicit upgrade that reinterprets old observations:
-moving to a newer pack or changing scope or thresholds creates a new experiment
-and requires complete, consistent re-extraction under the new evidence
-protocol.
+The supported configuration compatibility contract is:
+
+| Configuration schema | Pack contract | Intended use |
+|---|---|---|
+| v1 | Frozen `flutter_testing@1`, no explicit evidence profile | Structural reading and historical hash reproduction only |
+| v2 | One static pack/version plus complete `evidence` profile | Default new `generic_changes@1` and current `flutter_testing@2` experiments |
+| v3 | v2 fields plus required canonical `pack_config` | Required for `configured_paths@1`; static packs accept only `{}` |
+
+Artifact records remain schema v1; configuration schema and artifact schema are
+independent version axes. Configuration schema v1 remains structurally readable
+with its exact historical semantics and hashes, but is not endorsed for new
+collection or policy decisions. There is no implicit upgrade that reinterprets
+old observations. Moving to schema v3, a newer pack, a different dynamic
+vocabulary, scope, threshold, target, or outcome contract creates a new
+experiment and requires complete, consistent re-extraction. A holdout already
+inspected while choosing a configured vocabulary cannot become the new
+experiment's confirmatory test; use a later untouched window and retain every
+attempt in the audit record.

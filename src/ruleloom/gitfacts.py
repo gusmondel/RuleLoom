@@ -21,7 +21,7 @@ from ruleloom.models import (
     validate_predicate,
     validate_subject,
 )
-from ruleloom.packs import DiffEvidence, EvidencePack, FileChange, get_pack
+from ruleloom.packs import ConfiguredPathsConfig, DiffEvidence, EvidencePack, FileChange, get_pack
 from ruleloom.packs.base import INTERNAL_PREFIXES, PackExtraction, is_internal_path
 from ruleloom.packs.flutter_testing import (
     extract_flutter_testing_facts as _extract_flutter_testing_facts,
@@ -460,9 +460,13 @@ def _content_path_batches(paths: list[str]) -> tuple[tuple[str, ...], ...]:
     return tuple(batches)
 
 
-def _pack(name: str, version: int) -> EvidencePack:
+def _pack(
+    name: str,
+    version: int,
+    pack_config: ConfiguredPathsConfig | None = None,
+) -> EvidencePack:
     try:
-        return get_pack(name, version)
+        return get_pack(name, version, pack_config)
     except ModelError as exc:
         raise GitFactsError(str(exc)) from exc
 
@@ -488,6 +492,7 @@ def _read_diff(
     *,
     pack: str,
     pack_version: int,
+    pack_config: ConfiguredPathsConfig | None,
     evidence_config: EvidenceConfig,
 ) -> DiffEvidence:
     common = ("--no-ext-diff", "--no-textconv", "--no-renames", base, head)
@@ -498,7 +503,7 @@ def _read_diff(
     )
     if len(raw_changes) > _MAX_CHANGED_FILES:
         raise GitFactsError(f"Git diff exceeds {_MAX_CHANGED_FILES} changed files")
-    descriptor = _pack(pack, pack_version)
+    descriptor = _pack(pack, pack_version, pack_config)
     content_paths = [change.path for change in raw_changes if descriptor.content_path(change.path)]
     changes = (
         tuple(
@@ -539,6 +544,7 @@ def _read_worktree_diff(
     *,
     pack: str,
     pack_version: int,
+    pack_config: ConfiguredPathsConfig | None,
     evidence_config: EvidenceConfig,
 ) -> tuple[DiffEvidence, str]:
     common = ("--no-ext-diff", "--no-textconv", "--no-renames", base)
@@ -549,7 +555,7 @@ def _read_worktree_diff(
         evidence_config,
     )
     changes = list(tracked)
-    descriptor = _pack(pack, pack_version)
+    descriptor = _pack(pack, pack_version, pack_config)
     legacy_v1 = pack == SUPPORTED_PACK and pack_version == 1
     content_paths = [change.path for change in changes if descriptor.content_path(change.path)]
     content_parts = [_content_patch(repo, common, content_paths)]
@@ -690,10 +696,11 @@ def _extract(
     *,
     pack: str,
     pack_version: int,
+    pack_config: ConfiguredPathsConfig | None,
     evidence_config: EvidenceConfig,
 ) -> PackExtraction:
     try:
-        return _pack(pack, pack_version).run(evidence, evidence_config.pack_options)
+        return _pack(pack, pack_version, pack_config).run(evidence, evidence_config.pack_options)
     except ValueError as exc:
         raise GitFactsError(str(exc)) from exc
 
@@ -760,13 +767,14 @@ def _observation(
     protocol_hash: str,
     pack: str,
     pack_version: int,
+    pack_config: ConfiguredPathsConfig | None,
     evidence_config: EvidenceConfig,
     observation_id: str,
     source_kind: str,
     topological_index: int | None = None,
 ) -> Observation:
     validate_predicate(target, field_name="target")
-    descriptor = _pack(pack, pack_version)
+    descriptor = _pack(pack, pack_version, pack_config)
     legacy_v1 = pack == SUPPORTED_PACK and pack_version == 1
     evidence = _read_diff(
         repo,
@@ -774,6 +782,7 @@ def _observation(
         head,
         pack=pack,
         pack_version=pack_version,
+        pack_config=pack_config,
         evidence_config=evidence_config,
     )
     if not legacy_v1:
@@ -782,6 +791,7 @@ def _observation(
         evidence,
         pack=pack,
         pack_version=pack_version,
+        pack_config=pack_config,
         evidence_config=evidence_config,
     )
     timestamp, message, message_hash, message_truncated = _commit_metadata(
@@ -812,6 +822,8 @@ def _observation(
     }
     if not legacy_v1:
         source["pack_version"] = pack_version
+    if descriptor.configuration_hash is not None:
+        source["pack_config_hash"] = descriptor.configuration_hash
     return Observation(
         id=observation_id,
         observed_at=timestamp,
@@ -833,12 +845,13 @@ def collect_snapshot(
     target: str = "needs_extra_validation",
     pack: str = DEFAULT_PACK,
     pack_version: int = 1,
+    pack_config: ConfiguredPathsConfig | None = None,
     evidence_config: EvidenceConfig | None = None,
     repository_id: str | None = None,
 ) -> Observation:
     """Collect one immutable observation for a committed ``base``/``head`` range."""
 
-    _pack(pack, pack_version)
+    _pack(pack, pack_version, pack_config)
     extraction = _evidence_profile(pack, pack_version, evidence_config)
     root, repository_name = _repository(repo, repository_id)
     base_commit = _resolve_commit(root, base)
@@ -853,6 +866,7 @@ def collect_snapshot(
         protocol_hash=protocol_hash,
         pack=pack,
         pack_version=pack_version,
+        pack_config=pack_config,
         evidence_config=extraction,
         observation_id=f"range.{digest}",
         source_kind="git_range",
@@ -868,11 +882,12 @@ def collect_worktree(
     target: str = "needs_extra_validation",
     pack: str = DEFAULT_PACK,
     pack_version: int = 1,
+    pack_config: ConfiguredPathsConfig | None = None,
     evidence_config: EvidenceConfig | None = None,
     repository_id: str | None = None,
 ) -> Observation:
     """Collect staged, unstaged, and untracked changes against a committed base."""
-    descriptor = _pack(pack, pack_version)
+    descriptor = _pack(pack, pack_version, pack_config)
     legacy_v1 = pack == SUPPORTED_PACK and pack_version == 1
     extraction = _evidence_profile(pack, pack_version, evidence_config)
     validate_predicate(target, field_name="target")
@@ -883,6 +898,7 @@ def collect_worktree(
         base_commit,
         pack=pack,
         pack_version=pack_version,
+        pack_config=pack_config,
         evidence_config=extraction,
     )
     if not legacy_v1:
@@ -892,6 +908,7 @@ def collect_worktree(
         diff,
         pack=pack,
         pack_version=pack_version,
+        pack_config=pack_config,
         evidence_config=extraction,
     )
     metadata = result.metadata
@@ -921,6 +938,8 @@ def collect_worktree(
     }
     if not legacy_v1:
         source["pack_version"] = pack_version
+    if descriptor.configuration_hash is not None:
+        source["pack_config_hash"] = descriptor.configuration_hash
     return Observation(
         id=f"worktree.{digest}",
         observed_at=observed_at,
@@ -964,6 +983,7 @@ def backfill_commits_detailed(
     ref: str = "HEAD",
     pack: str = DEFAULT_PACK,
     pack_version: int = 1,
+    pack_config: ConfiguredPathsConfig | None = None,
     evidence_config: EvidenceConfig | None = None,
     repository_id: str | None = None,
 ) -> BackfillReport:
@@ -971,7 +991,7 @@ def backfill_commits_detailed(
 
     if isinstance(limit, bool) or not isinstance(limit, int) or limit < 1:
         raise GitFactsError("backfill limit must be an integer >= 1")
-    _pack(pack, pack_version)
+    _pack(pack, pack_version, pack_config)
     extraction = _evidence_profile(pack, pack_version, evidence_config)
     root, repository_name = _repository(repo, repository_id)
     resolved_ref = _resolve_commit(root, ref)
@@ -997,6 +1017,7 @@ def backfill_commits_detailed(
                 protocol_hash=protocol_hash,
                 pack=pack,
                 pack_version=pack_version,
+                pack_config=pack_config,
                 evidence_config=extraction,
                 observation_id=f"commit.{commit}",
                 source_kind="git_commit",
@@ -1031,6 +1052,7 @@ def backfill_commits(
     ref: str = "HEAD",
     pack: str = DEFAULT_PACK,
     pack_version: int = 1,
+    pack_config: ConfiguredPathsConfig | None = None,
     evidence_config: EvidenceConfig | None = None,
     repository_id: str | None = None,
 ) -> list[Observation]:
@@ -1044,6 +1066,7 @@ def backfill_commits(
         ref=ref,
         pack=pack,
         pack_version=pack_version,
+        pack_config=pack_config,
         evidence_config=evidence_config,
         repository_id=repository_id,
     )

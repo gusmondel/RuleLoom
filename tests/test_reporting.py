@@ -284,6 +284,36 @@ def test_report_joins_later_snapshot_outcome_to_first_prediction_of_unit() -> No
     assert report.metrics.true_positive == 1
 
 
+def test_report_rejects_bool_as_later_snapshot_pack_version() -> None:
+    unit_id = "pr-versioned"
+    original = _prediction(
+        "obs.versioned.first",
+        predicted_at="2026-01-01T10:00:00Z",
+        matched=True,
+        unit_id=unit_id,
+    )
+    first_snapshot = replace(
+        original.observation,
+        source={**original.observation.source, "pack_version": 1},
+    )
+    prediction = replace(original, observation=first_snapshot).with_identity()
+    later = replace(
+        _outcome(
+            "obs.versioned.final",
+            LabelValue.POSITIVE,
+            available_at="2026-01-01T12:00:00Z",
+        ),
+        source={
+            **_snapshot("obs.versioned.final").source,
+            "change_id": unit_id,
+            "pack_version": True,
+        },
+    )
+
+    with pytest.raises(ModelError, match="mixes fact pack versions"):
+        build_pilot_report([first_snapshot, later], [prediction], TARGET)
+
+
 def test_reports_never_pool_different_policy_sets() -> None:
     first = _prediction("obs.first", predicted_at="2026-01-01T10:00:00Z", matched=True)
     second = _prediction(

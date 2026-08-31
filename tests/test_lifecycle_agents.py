@@ -40,7 +40,7 @@ from ruleloom.models import (
     RuleLiteral,
     RuleSet,
 )
-from ruleloom.packs import get_pack
+from ruleloom.packs import ConfiguredPathsConfig, PathPredicateConfig, get_pack
 from ruleloom.project import initialize_project, validate_observations, validate_project
 from ruleloom.storage import (
     append_prediction,
@@ -103,7 +103,7 @@ def _observation(
         project="Tests",
         protocol=ProtocolConfig(repository_id=repository_id),
     )
-    descriptor = get_pack(effective_config.pack, effective_config.pack_version)
+    descriptor = effective_config.resolved_pack
     provenance_facts = facts if evidence_facts is None else evidence_facts
     source = {
         "kind": kind,
@@ -114,6 +114,11 @@ def _observation(
     }
     if effective_config.schema_version >= 2:
         source["pack_version"] = effective_config.pack_version
+    if descriptor.configuration_hash is not None:
+        source["pack_config_hash"] = descriptor.configuration_hash
+    metadata = {}
+    if descriptor.configuration_hash is not None:
+        metadata["configured_paths_config_hash"] = descriptor.configuration_hash
     return Observation(
         id=f"outcome-{index}",
         observed_at=observed.isoformat(),
@@ -140,6 +145,7 @@ def _observation(
             for fact in provenance_facts
         },
         source=source,
+        metadata=metadata,
     )
 
 
@@ -159,6 +165,27 @@ def _candidate(
     clauses = (HornClause(TARGET, (RuleLiteral("large_change"),)),) if with_rules else ()
     test = test_metrics or Metrics.from_counts(8, 2, 8, 2)
     baseline = baseline_metrics or Metrics.from_counts(0, 0, 10, 10)
+    descriptor = effective_config.resolved_pack
+    metadata = {
+        "pack": effective_config.pack,
+        "pack_version": effective_config.pack_version,
+        "repository_id": effective_config.protocol.repository_id,
+        "evidence_protocol_hash": effective_config.evidence_protocol_hash,
+        "historical_observation_unit": "git_commit",
+        "extractors": [descriptor.extractor],
+        "readiness": {"positive": positive},
+        "rule_evaluation": [
+            {
+                "signature": f"{TARGET}:-large_change",
+                "train": test.to_dict(),
+                "test": test.to_dict(),
+            }
+        ]
+        if with_rules
+        else [],
+    }
+    if descriptor.configuration_hash is not None:
+        metadata["pack_config_hash"] = descriptor.configuration_hash
     return Candidate(
         id=candidate_id,
         created_at="2026-08-31T12:00:00Z",
@@ -177,26 +204,7 @@ def _candidate(
         stability=stability,
         train_ids=tuple(f"train-{index}" for index in range(1, 9)),
         test_ids=("test-1", "test-2", "test-3", "test-4"),
-        metadata={
-            "pack": effective_config.pack,
-            "pack_version": effective_config.pack_version,
-            "repository_id": effective_config.protocol.repository_id,
-            "evidence_protocol_hash": effective_config.evidence_protocol_hash,
-            "historical_observation_unit": "git_commit",
-            "extractors": [
-                get_pack(effective_config.pack, effective_config.pack_version).extractor
-            ],
-            "readiness": {"positive": positive},
-            "rule_evaluation": [
-                {
-                    "signature": f"{TARGET}:-large_change",
-                    "train": test.to_dict(),
-                    "test": test.to_dict(),
-                }
-            ]
-            if with_rules
-            else [],
-        },
+        metadata=metadata,
         review=(
             {"reviewer": "Test Reviewer", "note": "approved for test"}
             if status == "approved"
@@ -1078,6 +1086,186 @@ def test_learning_reports_zero_mature_labels_before_unit_diagnostics() -> None:
 
     with pytest.raises(ModelError, match="no mature labels are available for learning"):
         learn_candidate([observation], config)
+
+
+def test_configured_paths_contract_survives_learning_candidate_and_prediction() -> None:
+    config = RuleLoomConfig(
+        schema_version=3,
+        project="ConfiguredLifecycle",
+        pack="configured_paths",
+        pack_version=1,
+        pack_config=ConfiguredPathsConfig(
+            (PathPredicateConfig("touches_shared_contract", ("packages/shared/**",)),)
+        ),
+        learner=LearnerConfig(
+            max_body=1,
+            max_rules=1,
+            min_precision=1,
+            min_support=2,
+            bootstrap_runs=0,
+            max_predicates=4,
+        ),
+        evaluation=EvaluationConfig(
+            test_fraction=0.25,
+            min_train_examples=6,
+            min_test_examples=2,
+        ),
+    )
+    observations = [
+        _observation(
+            index,
+            LabelValue.POSITIVE if index % 2 == 0 else LabelValue.NEGATIVE,
+            {"touches_shared_contract"} if index % 2 == 0 else set(),
+            config=config,
+        )
+        for index in range(12)
+    ]
+
+    candidate = learn_candidate(
+        observations,
+        config,
+        as_of=datetime(2027, 1, 1, tzinfo=UTC),
+    )
+
+    assert candidate.metadata["pack_config_hash"] == config.pack_config_hash
+    assert candidate.rules.clauses
+    reviewed = replace(
+        candidate,
+        status="approved",
+        review={
+            "reviewer": "Test Reviewer",
+            "reviewed_at": "2027-01-01T01:00:00Z",
+            "note": "configured pack reviewed",
+            "override": False,
+            "unmet_gates": [],
+        },
+    ).with_identity()
+    prospective = _observation(
+        100,
+        LabelValue.UNKNOWN,
+        {"touches_shared_contract"},
+        kind="git_worktree",
+        config=config,
+    )
+    prediction = make_prediction(
+        prospective,
+        [reviewed],
+        config,
+        predicted_at=datetime(2027, 1, 1, tzinfo=UTC),
+    )
+
+    assert prediction.abstained is False
+    assert prediction.matches
+
+    missing_configuration = replace(
+        reviewed,
+        metadata={
+            key: value for key, value in reviewed.metadata.items() if key != "pack_config_hash"
+        },
+    ).with_identity()
+    with pytest.raises(ModelError, match="pack-configuration provenance"):
+        make_prediction(prospective, [missing_configuration], config)
+
+
+def test_configured_paths_rejects_tampered_extraction_metadata() -> None:
+    config = RuleLoomConfig(
+        schema_version=3,
+        project="ConfiguredMetadata",
+        pack="configured_paths",
+        pack_version=1,
+        pack_config=ConfiguredPathsConfig(
+            (PathPredicateConfig("touches_shared_contract", ("packages/shared/**",)),)
+        ),
+    )
+    observation = _observation(
+        1,
+        LabelValue.POSITIVE,
+        {"touches_shared_contract"},
+        config=config,
+    )
+
+    for metadata in ({}, {"configured_paths_config_hash": "0" * 64}):
+        tampered = replace(observation, metadata=metadata)
+        with pytest.raises(ModelError, match="inconsistent configured-path metadata"):
+            validate_observations([tampered], config)
+        with pytest.raises(ModelError, match="inconsistent configured-path metadata"):
+            learn_candidate([tampered], config, as_of=datetime(2027, 1, 1, tzinfo=UTC))
+
+
+@pytest.mark.parametrize(
+    ("tamper", "message"),
+    [
+        ("pack_version", "fact pack version"),
+        ("pack_config", "different pack configuration"),
+        ("metadata", "inconsistent configured-path metadata"),
+    ],
+)
+def test_shadow_outcomes_must_preserve_configured_pack_provenance(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tamper: str,
+    message: str,
+) -> None:
+    config = replace(
+        _promotion_config(),
+        schema_version=3,
+        pack="configured_paths",
+        pack_version=1,
+        pack_config=ConfiguredPathsConfig(
+            (PathPredicateConfig("touches_shared_contract", ("packages/shared/**",)),)
+        ),
+    )
+    shadow = replace(
+        _candidate(status="shadow", config=config),
+        review={
+            "reviewer": "Test Reviewer",
+            "reviewed_at": "2026-08-31T13:00:00Z",
+            "note": "shadow test",
+            "override": False,
+            "unmet_gates": [],
+        },
+    ).with_identity()
+    snapshot = _observation(
+        100,
+        LabelValue.UNKNOWN,
+        {"large_change"},
+        kind="git_worktree",
+        config=config,
+    )
+    predicted_at = datetime(2026, 9, 1, tzinfo=UTC)
+    prediction = make_prediction(snapshot, [shadow], config, predicted_at=predicted_at)
+    outcome = snapshot.with_label(
+        TARGET,
+        LabelValue.POSITIVE,
+        LabelEvidence(
+            "synthetic",
+            "2026-09-02T00:00:00Z",
+            "tests",
+        ),
+    )
+    if tamper == "pack_version":
+        outcome = replace(outcome, source={**outcome.source, "pack_version": True})
+    elif tamper == "pack_config":
+        outcome = replace(outcome, source={**outcome.source, "pack_config_hash": "0" * 64})
+    else:
+        outcome = replace(
+            outcome,
+            metadata={"configured_paths_config_hash": "0" * 64},
+        )
+    monkeypatch.setattr(lifecycle_module, "load_trusted_predictions", lambda *_args: [prediction])
+    monkeypatch.setattr(
+        lifecycle_module,
+        "load_observations",
+        lambda *_args: [snapshot, outcome],
+    )
+
+    with pytest.raises(ModelError, match=message):
+        lifecycle_module.shadow_evidence(
+            tmp_path,
+            config,
+            shadow,
+            as_of=datetime(2026, 9, 3, tzinfo=UTC),
+        )
 
 
 def test_learning_rejects_unknown_observation_from_another_repository() -> None:

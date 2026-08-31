@@ -158,16 +158,105 @@ def test_cli_defaults_to_generic_pack_and_lists_versioned_packs(
     assert stderr == ""
     packs = json.loads(stdout)
     assert {(item["name"], item["version"]) for item in packs} == {
+        ("configured_paths", 1),
         ("generic_changes", 1),
         ("flutter_testing", 1),
         ("flutter_testing", 2),
     }
+    assert (
+        next(item for item in packs if item["name"] == "configured_paths")["configurable"] is True
+    )
     assert (
         next(item for item in packs if item["name"] == "flutter_testing" and item["latest"])[
             "version"
         ]
         == 2
     )
+
+
+def test_cli_initializes_and_collects_with_configured_paths(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = tmp_path / "configured_monorepo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "ruleloom@example.test")
+    _git(repo, "config", "user.name", "RuleLoom Test")
+    web = repo / "apps/web/main.ts"
+    contract = repo / "packages/shared/schema.json"
+    web.parent.mkdir(parents=True)
+    contract.parent.mkdir(parents=True)
+    web.write_text("export const ready = true;\n", encoding="utf-8")
+    contract.write_text('{"version": 1}\n', encoding="utf-8")
+    commit = _commit(repo, "Initial surfaces", "2026-01-01T10:00:00Z")
+
+    exit_code, stdout, stderr = _run_cli(
+        [
+            "init",
+            str(repo),
+            "--pack",
+            "configured_paths",
+            "--path-predicate",
+            "touches_surface_web=apps/web/**",
+            "--path-predicate",
+            "touches_shared_contract=packages/shared/**",
+            "--path-exclude",
+            "touches_surface_web=apps/web/generated/**",
+        ],
+        capsys,
+    )
+    assert exit_code == 0
+    assert "Initialized RuleLoom" in stdout
+    assert stderr == ""
+    config = RuleLoomConfig.load(repo)
+    assert config.schema_version == 3
+    assert config.pack_config is not None
+    assert config.pack_config.predicates == (
+        "touches_shared_contract",
+        "touches_surface_web",
+    )
+
+    exit_code, stdout, stderr = _run_cli(
+        ["collect", "--root", str(repo), "git", "--last", "1"],
+        capsys,
+    )
+    assert exit_code == 0
+    assert stderr == ""
+    assert json.loads(stdout)["ids"] == [f"commit.{commit}"]
+    observations = load_observations(dataset_path(repo, config))
+    assert len(observations) == 1
+    assert {
+        "touches_surface_web",
+        "touches_shared_contract",
+    } <= observations[0].facts
+    assert observations[0].source["pack_config_hash"] == config.pack_config_hash
+
+
+def test_cli_rejects_configured_path_flags_for_static_packs(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = tmp_path / "static_pack"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "ruleloom@example.test")
+    _git(repo, "config", "user.name", "RuleLoom Test")
+    (repo / "README.md").write_text("# Static\n", encoding="utf-8")
+    _commit(repo, "Initial", "2026-01-01T10:00:00Z")
+
+    exit_code, stdout, stderr = _run_cli(
+        [
+            "init",
+            str(repo),
+            "--path-predicate",
+            "touches_surface_web=apps/web/**",
+        ],
+        capsys,
+    )
+    assert exit_code == 2
+    assert stdout == ""
+    assert "require --pack configured_paths" in stderr
 
 
 def test_cli_rejects_an_explicit_empty_init_path(

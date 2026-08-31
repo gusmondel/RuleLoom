@@ -23,7 +23,8 @@ from ruleloom.gitfacts import (
     extract_generic_change_facts,
     repository_identity,
 )
-from ruleloom.models import LabelValue, Observation, canonical_json
+from ruleloom.models import LabelValue, ModelError, Observation, canonical_json
+from ruleloom.packs import ConfiguredPathsConfig, PathPredicateConfig
 from ruleloom.packs.flutter_testing import EXTRACTOR as FLUTTER_EXTRACTOR
 from ruleloom.project import validate_observations
 
@@ -844,6 +845,173 @@ def test_collection_rejects_non_utf8_git_output_without_lossy_decoding(
 
     with pytest.raises(GitFactsError, match="non-UTF-8"):
         gitfacts_module._git(Path("/unused"), "status")
+
+
+def test_configured_paths_has_commit_range_worktree_and_backfill_parity(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "configured-parity"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "ruleloom@example.test")
+    _git(repo, "config", "user.name", "RuleLoom Test")
+    _write(repo / "README.md", "# Example\n")
+    base = _commit(repo, "Initial", "2026-01-01T10:00:00Z")
+    _write(repo / "apps/web/main.ts", "export const ready = true;\n")
+    _write(repo / "packages/shared/schema.json", '{"version": 1}\n')
+    _write(repo / "apps/web/tests/main.test.ts", "test('ready', () => {});\n")
+    pack_config = ConfiguredPathsConfig(
+        (
+            PathPredicateConfig("touches_surface_web", ("apps/web/**",)),
+            PathPredicateConfig("touches_shared_contract", ("packages/shared/**",)),
+            PathPredicateConfig("touches_web_tests", ("apps/web/**/tests/**",)),
+        )
+    )
+    profile = EvidenceConfig(large_change_churn=10_000, multi_file_count=100)
+
+    worktree = collect_worktree(
+        repo,
+        base,
+        protocol_hash=PROTOCOL_HASH,
+        pack="configured_paths",
+        pack_version=1,
+        pack_config=pack_config,
+        evidence_config=profile,
+    )
+    head = _commit(repo, "Cross-surface change", "2026-01-02T10:00:00Z")
+    snapshot = collect_snapshot(
+        repo,
+        base,
+        head,
+        protocol_hash=PROTOCOL_HASH,
+        pack="configured_paths",
+        pack_version=1,
+        pack_config=pack_config,
+        evidence_config=profile,
+    )
+    backfilled = backfill_commits(
+        repo,
+        1,
+        protocol_hash=PROTOCOL_HASH,
+        pack="configured_paths",
+        pack_version=1,
+        pack_config=pack_config,
+        evidence_config=profile,
+    )[0]
+
+    expected = {
+        "touches_surface_web",
+        "touches_shared_contract",
+        "touches_web_tests",
+        "touches_test",
+    }
+    assert worktree.facts == snapshot.facts == backfilled.facts == expected
+    assert worktree.fact_evidence == snapshot.fact_evidence == backfilled.fact_evidence
+    assert (
+        worktree.metadata["configured_match_manifest_hash"]
+        == snapshot.metadata["configured_match_manifest_hash"]
+        == backfilled.metadata["configured_match_manifest_hash"]
+    )
+    assert worktree.source["pack_config_hash"] == pack_config.hash
+    assert snapshot.source["pack_config_hash"] == pack_config.hash
+
+
+def test_configured_paths_counts_deleted_and_binary_paths_without_content_patches(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "configured-binary"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "ruleloom@example.test")
+    _git(repo, "config", "user.name", "RuleLoom Test")
+    _write(repo / "apps/native/obsolete.txt", "remove me\n")
+    base = _commit(repo, "Initial", "2026-01-01T10:00:00Z")
+    (repo / "apps/native/obsolete.txt").unlink()
+    binary = repo / "apps/native/image.bin"
+    binary.write_bytes(bytes(range(256)))
+    head = _commit(repo, "Native assets", "2026-01-02T10:00:00Z")
+    pack_config = ConfiguredPathsConfig(
+        (PathPredicateConfig("touches_native_host", ("apps/native/**",)),)
+    )
+    original_content_patch = gitfacts_module._content_patch
+
+    def assert_no_content_paths(
+        path: Path,
+        common: tuple[str, ...],
+        paths: list[str],
+    ) -> str:
+        assert paths == []
+        return original_content_patch(path, common, paths)
+
+    monkeypatch.setattr(gitfacts_module, "_content_patch", assert_no_content_paths)
+    observation = collect_snapshot(
+        repo,
+        base,
+        head,
+        protocol_hash=PROTOCOL_HASH,
+        pack="configured_paths",
+        pack_version=1,
+        pack_config=pack_config,
+    )
+
+    assert "touches_native_host" in observation.facts
+    assert observation.metadata["files_changed"] == 2
+    assert observation.metadata["configured_path_match_counts"] == {"touches_native_host": 2}
+
+
+def test_configured_observation_rejects_same_pack_with_different_configuration(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "configured-provenance"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "ruleloom@example.test")
+    _git(repo, "config", "user.name", "RuleLoom Test")
+    _write(repo / "README.md", "# Example\n")
+    base = _commit(repo, "Initial", "2026-01-01T10:00:00Z")
+    _write(repo / "apps/web/main.ts", "export const ready = true;\n")
+    head = _commit(repo, "Web change", "2026-01-02T10:00:00Z")
+    repository_id = repository_identity(repo)
+    first_pack_config = ConfiguredPathsConfig(
+        (PathPredicateConfig("touches_surface_web", ("apps/web/**",)),)
+    )
+    first_config = RuleLoomConfig(
+        schema_version=3,
+        project="ConfiguredProvenance",
+        pack="configured_paths",
+        pack_version=1,
+        pack_config=first_pack_config,
+        protocol=ProtocolConfig(repository_id=repository_id, prediction_unit="git_range"),
+    )
+    observation = collect_snapshot(
+        repo,
+        base,
+        head,
+        protocol_hash=first_config.evidence_protocol_hash,
+        pack=first_config.pack,
+        pack_version=first_config.pack_version,
+        pack_config=first_config.pack_config,
+        evidence_config=first_config.evidence,
+        repository_id=repository_id,
+    )
+    validate_observations([observation], first_config)
+
+    second_config = RuleLoomConfig(
+        schema_version=3,
+        project="ConfiguredProvenance",
+        pack="configured_paths",
+        pack_version=1,
+        pack_config=ConfiguredPathsConfig(
+            (PathPredicateConfig("touches_surface_web", ("web/**",)),)
+        ),
+        protocol=ProtocolConfig(repository_id=repository_id, prediction_unit="git_range"),
+    )
+    forged_protocol = Observation.from_dict(
+        {**observation.to_dict(), "protocol_hash": second_config.evidence_protocol_hash}
+    )
+    with pytest.raises(ModelError, match="different pack configuration"):
+        validate_observations([forged_protocol], second_config)
 
 
 def test_rejects_invalid_requests(tmp_path: Path) -> None:

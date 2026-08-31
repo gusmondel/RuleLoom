@@ -8,9 +8,28 @@ here; it does not require changing ILP, evaluation, promotion, or agent code.
 from __future__ import annotations
 
 from collections.abc import Collection, Mapping
+from dataclasses import replace
+from functools import partial
 
 from ruleloom.models import FactEvidence, ModelError
 from ruleloom.packs.base import DiffEvidence, EvidencePack, FileChange, PackExtraction, PackOptions
+from ruleloom.packs.configured_paths import (
+    EXTRACTOR as CONFIGURED_PATHS_EXTRACTOR,
+)
+from ruleloom.packs.configured_paths import (
+    NAME as CONFIGURED_PATHS_NAME,
+)
+from ruleloom.packs.configured_paths import (
+    VERSION as CONFIGURED_PATHS_VERSION,
+)
+from ruleloom.packs.configured_paths import (
+    ConfiguredPathsConfig,
+    PathPredicateConfig,
+    extract_configured_path_facts,
+)
+from ruleloom.packs.configured_paths import (
+    ignores_content as configured_paths_ignores_content,
+)
 from ruleloom.packs.flutter_testing import (
     EXTRACTOR as FLUTTER_EXTRACTOR,
 )
@@ -90,6 +109,18 @@ _PACKS = {
         content_path=wants_dart_content,
         extract=extract_flutter_testing_facts,
     ),
+    (CONFIGURED_PATHS_NAME, CONFIGURED_PATHS_VERSION): EvidencePack(
+        name=CONFIGURED_PATHS_NAME,
+        version=CONFIGURED_PATHS_VERSION,
+        extractor=CONFIGURED_PATHS_EXTRACTOR,
+        description=(
+            "Configured repository surfaces and contracts plus language-neutral change facts."
+        ),
+        predicates=_COMMON_PREDICATES,
+        content_path=configured_paths_ignores_content,
+        extract=extract_generic_change_facts,
+        configurable=True,
+    ),
 }
 
 if len(_PACKS) != len({(item.name, item.version) for item in _PACKS.values()}):
@@ -108,14 +139,18 @@ def latest_pack_version(name: str) -> int:
     return max(versions)
 
 
-def get_pack(name: str, version: int | None = None) -> EvidencePack:
+def get_pack(
+    name: str,
+    version: int | None = None,
+    pack_config: ConfiguredPathsConfig | None = None,
+) -> EvidencePack:
     if version is not None and (
         isinstance(version, bool) or not isinstance(version, int) or version < 1
     ):
         raise ModelError("evidence pack version must be an integer >= 1")
     selected_version = latest_pack_version(name) if version is None else version
     try:
-        return _PACKS[(name, selected_version)]
+        descriptor = _PACKS[(name, selected_version)]
     except KeyError as exc:
         available = ", ".join(
             f"{pack_name}@{pack_version}" for pack_name, pack_version in sorted(_PACKS)
@@ -124,6 +159,26 @@ def get_pack(name: str, version: int | None = None) -> EvidencePack:
             f"unsupported evidence pack {name!r} version {selected_version}; "
             f"available packs: {available}"
         ) from exc
+    if descriptor.configurable:
+        if not isinstance(pack_config, ConfiguredPathsConfig):
+            raise ModelError(
+                f"evidence pack {name}@{selected_version} requires a valid pack_config"
+            )
+        collisions = set(pack_config.predicates).intersection(_COMMON_PREDICATES)
+        if collisions:
+            raise ModelError(
+                "configured path predicates collide with built-in predicates: "
+                + ", ".join(sorted(collisions))
+            )
+        return replace(
+            descriptor,
+            predicates=tuple(sorted({*_COMMON_PREDICATES, *pack_config.predicates})),
+            extract=partial(extract_configured_path_facts, config=pack_config),
+            configuration_hash=pack_config.hash,
+        )
+    if pack_config is not None:
+        raise ModelError(f"evidence pack {name}@{selected_version} does not accept pack_config")
+    return descriptor
 
 
 def matches_pack_version(value: object, expected: int) -> bool:
@@ -159,6 +214,12 @@ def validate_policy_pack_contract(
         raise ModelError(f"{subject} has invalid extractor provenance")
     if extractors != [pack.extractor]:
         raise ModelError(f"{subject} extractor provenance is incompatible with {pack.extractor!r}")
+    persisted_configuration = metadata.get("pack_config_hash")
+    if pack.configuration_hash is not None:
+        if persisted_configuration != pack.configuration_hash:
+            raise ModelError(f"{subject} lacks matching pack-configuration provenance")
+    elif persisted_configuration is not None:
+        raise ModelError(f"{subject} has unexpected pack-configuration provenance")
     persisted_protocol = metadata.get("evidence_protocol_hash")
     if schema_version >= 2 and persisted_protocol != evidence_protocol_hash:
         raise ModelError(f"{subject} lacks matching evidence-protocol provenance")
@@ -182,6 +243,7 @@ def validate_persisted_extraction(
     provenance: Mapping[str, FactEvidence],
     *,
     subject: str,
+    metadata: Mapping[str, object] | None = None,
 ) -> None:
     """Fail closed when persisted facts do not match a built-in pack contract."""
 
@@ -205,14 +267,24 @@ def validate_persisted_extraction(
                 f"{subject} fact {fact!r} must have deterministic provenance from "
                 f"{pack.extractor!r}"
             )
+    persisted_configuration = (
+        None if metadata is None else metadata.get("configured_paths_config_hash")
+    )
+    if pack.configuration_hash is not None:
+        if persisted_configuration != pack.configuration_hash:
+            raise ModelError(f"{subject} has inconsistent configured-path metadata")
+    elif persisted_configuration is not None:
+        raise ModelError(f"{subject} has unexpected configured-path metadata")
 
 
 __all__ = [
+    "ConfiguredPathsConfig",
     "DiffEvidence",
     "EvidencePack",
     "FileChange",
     "PackExtraction",
     "PackOptions",
+    "PathPredicateConfig",
     "available_packs",
     "get_pack",
     "latest_pack_version",

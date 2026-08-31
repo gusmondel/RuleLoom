@@ -43,7 +43,12 @@ from ruleloom.models import (
     parse_timestamp,
     validate_subject,
 )
-from ruleloom.packs import available_packs, latest_pack_version
+from ruleloom.packs import (
+    ConfiguredPathsConfig,
+    PathPredicateConfig,
+    available_packs,
+    latest_pack_version,
+)
 from ruleloom.project import initialize_project, validate_observations, validate_project
 from ruleloom.reporting import build_pilot_report, build_pilot_reports
 from ruleloom.storage import (
@@ -120,12 +125,14 @@ def _cmd_init(args: argparse.Namespace) -> int:
         "codex": ("codex",),
         "claude": ("claude",),
     }[args.agents]
+    pack_config = _init_pack_config(args)
     result = initialize_project(
         Path(args.path if args.path is not None else "."),
         args.project,
         pack=args.pack,
         pack_version=args.pack_version,
-        schema_version=2,
+        pack_config=pack_config,
+        schema_version=3 if pack_config is not None else 2,
         agents=selected,
     )
     print(f"Initialized RuleLoom in {result.root}")
@@ -139,6 +146,44 @@ def _cmd_init(args: argparse.Namespace) -> int:
     else:
         print("Agent skills: not installed (shadow-safe default)")
     return 0
+
+
+def _init_pack_config(args: argparse.Namespace) -> ConfiguredPathsConfig | None:
+    raw_includes: list[str] = args.path_predicate
+    raw_excludes: list[str] = args.path_exclude
+    if args.pack != "configured_paths":
+        if raw_includes or raw_excludes:
+            raise ModelError("--path-predicate and --path-exclude require --pack configured_paths")
+        return None
+    if not raw_includes:
+        raise ModelError("configured_paths requires at least one --path-predicate PREDICATE=GLOB")
+
+    def split(value: str, option: str) -> tuple[str, str]:
+        predicate, separator, pattern = value.partition("=")
+        if not separator or not predicate or not pattern:
+            raise ModelError(f"{option} must use PREDICATE=GLOB")
+        return predicate, pattern
+
+    includes: dict[str, list[str]] = {}
+    excludes: dict[str, list[str]] = {}
+    for value in raw_includes:
+        predicate, pattern = split(value, "--path-predicate")
+        includes.setdefault(predicate, []).append(pattern)
+    for value in raw_excludes:
+        predicate, pattern = split(value, "--path-exclude")
+        if predicate not in includes:
+            raise ModelError(f"--path-exclude references undefined predicate {predicate!r}")
+        excludes.setdefault(predicate, []).append(pattern)
+    return ConfiguredPathsConfig(
+        tuple(
+            PathPredicateConfig(
+                predicate=predicate,
+                include_paths=tuple(patterns),
+                exclude_paths=tuple(excludes.get(predicate, ())),
+            )
+            for predicate, patterns in includes.items()
+        )
+    )
 
 
 def _cmd_collect_git(args: argparse.Namespace) -> int:
@@ -155,6 +200,7 @@ def _cmd_collect_git(args: argparse.Namespace) -> int:
             ref=args.ref if args.ref is not None else "HEAD",
             pack=config.pack,
             pack_version=config.pack_version,
+            pack_config=config.pack_config,
             evidence_config=config.evidence,
             repository_id=config.protocol.repository_id,
         )
@@ -170,6 +216,7 @@ def _cmd_collect_git(args: argparse.Namespace) -> int:
                 target=config.target,
                 pack=config.pack,
                 pack_version=config.pack_version,
+                pack_config=config.pack_config,
                 evidence_config=config.evidence,
                 repository_id=config.protocol.repository_id,
             )
@@ -188,6 +235,7 @@ def _cmd_collect_git(args: argparse.Namespace) -> int:
                 target=config.target,
                 pack=config.pack,
                 pack_version=config.pack_version,
+                pack_config=config.pack_config,
                 evidence_config=config.evidence,
                 repository_id=config.protocol.repository_id,
             )
@@ -457,6 +505,7 @@ def _merge_collected_observation(
         "head",
         "pack",
         "pack_version",
+        "pack_config_hash",
         "extractor",
     }
     if any(prior.source.get(key) != collected.source.get(key) for key in source_keys):
@@ -509,6 +558,7 @@ def _cmd_assess(args: argparse.Namespace) -> int:
             target=config.target,
             pack=config.pack,
             pack_version=config.pack_version,
+            pack_config=config.pack_config,
             evidence_config=config.evidence,
             repository_id=config.protocol.repository_id,
         )
@@ -521,6 +571,7 @@ def _cmd_assess(args: argparse.Namespace) -> int:
             target=config.target,
             pack=config.pack,
             pack_version=config.pack_version,
+            pack_config=config.pack_config,
             evidence_config=config.evidence,
             repository_id=config.protocol.repository_id,
         )
@@ -660,6 +711,8 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
             "config": str(root / CONFIG_PATH),
             "pack": loaded_config.pack,
             "pack_version": loaded_config.pack_version,
+            "pack_config_hash": loaded_config.pack_config_hash,
+            "predicates": list(loaded_config.resolved_pack.predicates),
         }
     from ruleloom.learners.popper import doctor_popper
 
@@ -701,6 +754,7 @@ def _cmd_packs_list(args: argparse.Namespace) -> int:
             "extractor": item.extractor,
             "description": item.description,
             "predicates": list(item.predicates),
+            "configurable": item.configurable,
             "latest": item.version == latest_pack_version(item.name),
         }
         for item in available_packs()
@@ -710,6 +764,8 @@ def _cmd_packs_list(args: argparse.Namespace) -> int:
     else:
         for item in packs:
             suffix = " (latest)" if item["latest"] else " (frozen compatibility)"
+            if item["configurable"]:
+                suffix += " (configuration adds predicates)"
             print(f"{item['name']}@{item['version']}{suffix}: {item['description']}")
     return 0
 
@@ -738,6 +794,20 @@ def build_parser() -> argparse.ArgumentParser:
         choices=pack_names,
         default="generic_changes",
         help="evidence pack for this experiment (default: generic_changes)",
+    )
+    init.add_argument(
+        "--path-predicate",
+        action="append",
+        default=[],
+        metavar="PREDICATE=GLOB",
+        help="configured_paths include glob; repeat for predicates or additional includes",
+    )
+    init.add_argument(
+        "--path-exclude",
+        action="append",
+        default=[],
+        metavar="PREDICATE=GLOB",
+        help="configured_paths exclusion glob for an already defined predicate",
     )
     init.add_argument(
         "--pack-version",

@@ -72,8 +72,15 @@ class EvidencePack:
     predicates: tuple[str, ...]
     content_path: Callable[[str], bool]
     extract: Callable[[DiffEvidence, PackOptions], PackExtraction]
+    configurable: bool = False
+    configuration_hash: str | None = None
 
     def run(self, evidence: DiffEvidence, options: PackOptions) -> PackExtraction:
+        if self.configurable and self.configuration_hash is None:
+            raise ValueError(
+                f"evidence pack {self.name}@{self.version} must be resolved with pack_config "
+                "before extraction"
+            )
         result = self.extract(evidence, options)
         if set(result.facts) != set(result.provenance):
             raise ValueError(

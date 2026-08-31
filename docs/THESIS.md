@@ -14,11 +14,14 @@ Codex/Claude skills solves it is not. RuleLoom is therefore worth building as a
 falsifiable instrument, but not yet worth trusting as an enforcement mechanism.
 
 The evidence is strong enough to justify a disciplined experiment, not strong
-enough to justify automatic deployment. Research shows that selected,
-repository-aware experience can improve coding-agent performance. It also shows
-that noisy or overly broad memory can reduce performance and increase token
-usage. Rex reports real deployment of learned correlated-change rules, and the
-2026 AutoSpec preprint is direct evidence that ILP-guided evolution of
+enough to justify automatic deployment. Several benchmark studies report that
+selected, repository-aware experience can improve coding-agent performance;
+other evaluated systems report that noisy or overly broad memory can reduce
+performance and increase token usage. Rex reports real deployment of learned
+correlated-change suggestions, but its 4,926 operational true positives were
+defined by engineers adding the suggested related change, not by an independent
+measure of defects prevented. The 2026 AutoSpec preprint is direct evidence
+that ILP-guided evolution of
 interpretable LLM-agent safety rules can work in two evaluated domains. Neither
 establishes that ILP-generated repository-quality policies improve real
 repository delivery outcomes or Codex/Claude behavior.
@@ -49,7 +52,7 @@ Software repositories offer structured, repeated decisions. Some signals are
 language-neutral—change size, file distribution, tests, documentation, CI, and
 dependency manifests—while specialized packs can add facts about syntax and
 framework behavior such as state mutation, asynchronous code, or navigation.
-RuleLoom 0.2 encodes each change as Boolean unary predicates and represents
+RuleLoom 0.3.0 encodes each change as Boolean unary predicates and represents
 conjunctions of those properties as rules rather than opaque scores. It does not
 learn relations among multiple entities.
 
@@ -94,7 +97,10 @@ reporting, and agent adapters consume the persisted facts without pack-specific
 branches. Each experiment uses one pack, not a union of vocabularies. Schema-v2
 configuration binds the pack name/version and pack-neutral `EvidenceConfig`
 scopes and thresholds into `evidence_protocol_hash`, preventing observations
-with different extraction semantics from being silently pooled.
+with different extraction semantics from being silently pooled. Schema v3 adds
+canonical `pack_config` to that identity for configurable packs. Path matching
+can be language-neutral while the configured component taxonomy remains
+repository-specific background knowledge.
 
 ## Why ILP rather than a larger prompt
 
@@ -130,6 +136,10 @@ so class imbalance cannot hide failure. The default approval gate uses strict
 MCC improvement over the best baseline; this is a product gate, not proof of
 statistical significance.
 
+For a configured-path experiment, the registered single-literal baseline must
+include every dynamic predicate; otherwise a component flag could be credited
+as value from ILP complexity.
+
 H1 fails when RuleLoom does not beat the registered baselines, uncertainty is
 too wide for a decision, or performance collapses on later periods.
 
@@ -140,8 +150,11 @@ the target with acceptable false-positive rate and useful lead time. Abstention
 is expected and measured. The decision-time observation and exact reviewed
 policy set are captured before the outcome becomes knowable. Its protocol binds
 experiment, repository, unit, outcome definition, target, pack name/version,
-extractor, and `EvidenceConfig` scopes and thresholds so incompatible evidence
-cannot be pooled.
+extractor, canonical pack configuration when present, and `EvidenceConfig`
+scopes and thresholds so incompatible evidence cannot be pooled. Historical H1
+training uses only a genuine pre-event `git_commit`; prospective H2 assessment
+may use a range/worktree snapshot. Neither may use a final diff containing the
+validation added because of review.
 
 H2 fails when rules fire too often, rarely fire, become stale, generate mostly
 false positives, or require information that was not available at assessment
@@ -168,16 +181,17 @@ rule systematically produces incompatible behavior across agents.
 
 ### H5 — language-boundary portability
 
-The same ILP and lifecycle can operate on facts emitted by either the generic
-pack or a specialized language pack without changing learning, evaluation,
-promotion, reporting, or agent integration. This is an architectural claim, not
-a claim that a learned rule or its predictive performance transfers between
-languages, repositories, pack families, or pack versions.
+The same ILP and lifecycle can operate on facts emitted by the generic pack, a
+repository-configured path pack, or a specialized language pack without
+changing learning, evaluation, promotion, reporting, or agent integration. This
+is an architectural claim, not a claim that a configured taxonomy, learned
+rule, or predictive performance transfers between languages, repositories,
+pack families, pack configurations, or pack versions.
 
 H5 fails if adding a built-in language pack requires language-specific behavior
 inside the core lifecycle, or if pack identity and extraction settings are not
 sufficiently isolated to prevent incompatible evidence from being pooled. The
-current implementation exercises only two built-in pack families and does not
+current implementation exercises only three built-in pack families and does not
 yet support third-party pack plugins, so broader extensibility remains unproven.
 
 ## Safety invariants
@@ -185,18 +199,31 @@ yet support third-party pack plugins, so broader extensibility remains unproven.
 - Collection does not alter application code.
 - The default evidence path is deterministic and the selected pack must attach
   provenance to every emitted fact. Although the artifact schema reserves
-  `agent`, `human`, and `imported` provenance kinds, version 0.2 accepts only
+  `agent`, `human`, and `imported` provenance kinds, version 0.3.0 accepts only
   exact deterministic built-in-pack provenance for validation, learning, and
   prediction; non-deterministic facts are future work.
-- Each experiment selects exactly one pack name/version. Schema-v2 pack
-  identity, extractor identity, include/exclude scopes, change-shape thresholds,
-  and metadata limit are bound into `evidence_protocol_hash`.
+- Each experiment selects exactly one pack name/version. Pack identity,
+  extractor identity, include/exclude scopes, change-shape thresholds, and
+  metadata limit are bound into `evidence_protocol_hash`; schema v3 additionally
+  binds canonical `pack_config`.
+- `evidence` path globs define experiment/outcome eligibility; configured
+  predicate globs create features only over already in-scope files and never
+  widen that cohort.
+- A configured vocabulary is frozen outcome-blind with its design revision,
+  roles, rationale, attempt log, and hash. Any outcome-informed revision needs a
+  new experiment and untouched future confirmation window.
 - Large changes retain exact aggregate counts and a full change-manifest hash;
   sampled path and per-file metadata remain bounded and disclose truncation.
 - Unknown is distinct from negative.
 - Every mature label has evidence and an explicit `available_at`; a nominal
   training label unavailable when the holdout begins is excluded.
+- A predictor snapshot must precede its outcome-generating event. A final diff
+  containing validation added because of review is not a valid review-time
+  predictor, regardless of chronological ordering.
 - Training never uses observations newer than the holdout.
+- Version 0.3.0 retrospective `learn` accepts only `git_commit` and is not
+  group-aware. A confirmatory cohort admits one independently auditable commit
+  per real-world change; grouped change-ID/range training is future work.
 - Rule selection is compared with four simple baselines on the same later set.
 - A candidate is immutable and content-addressed by its inputs.
 - Candidate, shadow, and approved are distinct reviewed states; learning,
@@ -217,11 +244,12 @@ yet support third-party pack plugins, so broader extensibility remains unproven.
   set. Repeated snapshots share `source.change_id`; outcome joining and elapsed
   time use that same independent-unit key.
 - Every prediction binds its target, decision-time snapshot, exact reviewed
-  policy manifests/rule signatures, protocol snapshot/hash, policy-set hash,
+  policy manifests/rule signatures, protocol object/hash, policy-set hash,
   matches, and abstention into content identities. Its embedded observation's
   `protocol_hash` must equal `protocol.evidence_protocol_hash`. Changing the
-  configured experiment, repository, outcome, target, pack name/version, scope,
-  or extraction threshold cannot reinterpret an old record.
+  configured experiment, repository, outcome, target, pack name/version,
+  `pack_config`, scope, or extraction threshold cannot reinterpret an old
+  record.
 - Reviewed transitions and timely predictions require local, non-versioned
   attestations tied to the current Git checkout/worktree. Version-controlled
   status fields alone confer no trust, and the supported CLI rejects ordinary
@@ -244,6 +272,9 @@ true after a representative pilot:
 
 - labels are subjective, circular, or too delayed to maintain;
 - deterministic facts miss the distinctions reviewers actually use;
+- configured predicates were selected from outcomes or holdout errors rather
+  than locked from outcome-blind architecture evidence;
+- historical predictor diffs already contain changes caused by the target event;
 - the learned rules restate obvious single predicates;
 - baselines perform equally well or better;
 - rules change substantially with small sample perturbations;
@@ -256,15 +287,18 @@ true after a representative pilot:
 Failure is an acceptable result. The pilot is designed to distinguish a useful
 repository-learning loop from a polished demonstration.
 
-## Scope of version 0.2
+## Scope of version 0.3.0
 
 Included:
 
 - propositionalized unary Boolean facts over one repository change variable;
 - `positive`, `negative`, and `unknown` labels;
-- a schema-v2, single-pack experiment protocol with pack version and
-  pack-neutral collection settings included in its evidence identity;
+- schema-v2/v3 single-pack experiment protocols with pack version,
+  pack-neutral collection settings, and schema-v3 canonical `pack_config`
+  included in their evidence identity;
 - `generic_changes@1` for language-neutral Git path and change-shape facts;
+- schema-v3 `configured_paths@1` for bounded, canonical, repository-defined
+  `touches_*` path facts plus the common generic facts;
 - frozen `flutter_testing@1` compatibility plus the current
   `flutter_testing@2` extractor, which recognizes both `.state =` and bare
   Riverpod `state =` mutations;
@@ -273,7 +307,7 @@ Included:
 - a pack-agnostic ILP, evaluation, reporting, and policy lifecycle;
 - bounded Horn clauses with optional closed-world negation;
 - optional, externally provisioned Popper/MDL integration for noisy labels,
-  restricted in version 0.2 to one non-recursive rule and no bootstrap reruns;
+  restricted in version 0.3.0 to one non-recursive rule and no bootstrap reruns;
 - chronological holdout, baselines, confusion metrics, and bootstrap stability;
 - label-availability filtering at the holdout boundary;
 - candidate, shadow, approval, deprecation, local-trust, and agent-sync
@@ -292,6 +326,8 @@ Not included:
 - enforcement of security or merge policy;
 - guarantees that learned correlations remain valid after repository drift;
 - a universal predicate vocabulary for all languages and teams;
+- evidence that a user-configured path taxonomy transfers semantically or
+  predictively across repositories;
 - built-in language-specific extraction beyond Flutter/Dart;
 - loading third-party evidence packs through an external plugin API;
 - combining multiple packs within one experiment.
@@ -302,8 +338,11 @@ The cited literature supports the plausibility of repository experience,
 selective abstraction, interpretable ILP, noisy-label handling, and temporal
 evaluation. It does not validate RuleLoom as a combined system, show that the
 generic facts are predictive in every language, or establish transfer between
-pack families. Separating versioned extraction from a pack-agnostic core is an
-implemented software boundary, not empirical evidence of portability or value.
+pack families or configured vocabularies. Separating versioned extraction from
+a pack-agnostic core is an implemented software boundary, not empirical
+evidence of portability or value. Canonical schema-v3 globs make a
+repository-specific hypothesis reproducible; they do not make it
+outcome-independent or scientifically validated.
 The evidence matrix in [RESEARCH.md](RESEARCH.md) records this distinction
 explicitly; the [repository pilot protocol](PILOT-PROTOCOL.md) defines the first
 local test. Passing the default

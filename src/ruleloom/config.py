@@ -18,7 +18,13 @@ from ruleloom.models import (
     validate_predicate,
     validate_subject,
 )
-from ruleloom.packs import PackOptions, get_pack, latest_pack_version
+from ruleloom.packs import (
+    ConfiguredPathsConfig,
+    EvidencePack,
+    PackOptions,
+    get_pack,
+    latest_pack_version,
+)
 
 CONFIG_PATH = Path(".ruleloom/config.json")
 _MAX_CONFIG_BYTES = 1024 * 1024
@@ -668,12 +674,13 @@ class RuleLoomConfig:
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     promotion: PromotionConfig = field(default_factory=PromotionConfig)
     schema_version: int = 1
+    pack_config: ConfiguredPathsConfig | None = None
 
     def __post_init__(self) -> None:
         if (
             isinstance(self.schema_version, bool)
             or not isinstance(self.schema_version, int)
-            or self.schema_version not in {1, 2}
+            or self.schema_version not in {1, 2, 3}
         ):
             raise ModelError("unsupported config schema_version")
         if not self.project.strip():
@@ -699,12 +706,24 @@ class RuleLoomConfig:
                 raise ModelError("schema-v1 configs support only flutter_testing version 1")
             if self.evidence != EvidenceConfig():
                 raise ModelError("schema-v1 configs cannot customize evidence collection")
+            if self.pack_config is not None:
+                raise ModelError("schema-v1 configs cannot define pack_config")
         elif self.pack == "flutter_testing" and self.pack_version == 1:
             raise ModelError(
                 "flutter_testing version 1 is frozen for schema-v1 compatibility; "
-                "schema-v2 experiments must use flutter_testing version 2"
+                "schema-v2+ experiments must use flutter_testing version 2"
             )
-        get_pack(self.pack, self.pack_version)
+        if self.schema_version == 2 and self.pack_config is not None:
+            raise ModelError("schema-v2 configs cannot define pack_config")
+        if self.schema_version < 3 and self.pack == "configured_paths":
+            raise ModelError("configured_paths requires config schema_version 3")
+        descriptor = get_pack(
+            self.pack,
+            self.pack_version,
+            self.pack_config if self.schema_version >= 3 else None,
+        )
+        if self.pack_config is not None and self.target in descriptor.predicates:
+            raise ModelError(f"target {self.target!r} collides with an evidence-pack predicate")
         managed = {
             "dataset": self.dataset,
             "candidates_dir": self.candidates_dir,
@@ -756,6 +775,22 @@ class RuleLoomConfig:
         return content_hash(self.to_dict())
 
     @property
+    def resolved_pack(self) -> EvidencePack:
+        return get_pack(
+            self.pack,
+            self.pack_version,
+            self.pack_config if self.schema_version >= 3 else None,
+        )
+
+    @property
+    def pack_config_dict(self) -> JsonObject:
+        return self.pack_config.to_dict() if self.pack_config is not None else {}
+
+    @property
+    def pack_config_hash(self) -> str | None:
+        return self.resolved_pack.configuration_hash
+
+    @property
     def evidence_protocol(self) -> JsonObject:
         """Fields that decide whether observations and outcomes may be pooled."""
         protocol: JsonObject = {
@@ -769,8 +804,10 @@ class RuleLoomConfig:
         }
         if self.schema_version >= 2:
             protocol["pack_version"] = self.pack_version
-            protocol["extractor"] = get_pack(self.pack, self.pack_version).extractor
+            protocol["extractor"] = self.resolved_pack.extractor
             protocol["evidence"] = self.evidence.to_dict()
+        if self.schema_version >= 3:
+            protocol["pack_config"] = self.pack_config_dict
         return protocol
 
     @property
@@ -797,6 +834,8 @@ class RuleLoomConfig:
         if self.schema_version >= 2:
             value["pack_version"] = self.pack_version
             value["evidence"] = self.evidence.to_dict()
+        if self.schema_version >= 3:
+            value["pack_config"] = self.pack_config_dict
         return value
 
     @classmethod
@@ -805,6 +844,8 @@ class RuleLoomConfig:
         if isinstance(raw_version, bool) or not isinstance(raw_version, int):
             raise ModelError("config.schema_version must be an integer")
         version_fields = {"pack_version", "evidence"} if raw_version >= 2 else set()
+        if raw_version >= 3:
+            version_fields.add("pack_config")
         _reject_unknown(
             value,
             {
@@ -828,6 +869,7 @@ class RuleLoomConfig:
         )
         raw_protocol = _object(value.get("protocol", {}), "protocol")
         raw_evidence = _object(value.get("evidence", {}), "evidence")
+        raw_pack_config = _object(value.get("pack_config", {}), "pack_config")
         raw_learner = _object(value.get("learner", {}), "learner")
         raw_evaluation = _object(value.get("evaluation", {}), "evaluation")
         raw_promotion = _object(value.get("promotion", {}), "promotion")
@@ -851,8 +893,9 @@ class RuleLoomConfig:
                     "learner",
                     "evaluation",
                     "promotion",
+                    *({"pack_config"} if raw_version >= 3 else set()),
                 },
-                "schema-v2 config",
+                f"schema-v{raw_version} config",
             )
             _require_fields(
                 raw_protocol,
@@ -915,6 +958,9 @@ class RuleLoomConfig:
                 "schema-v2 promotion",
             )
         default_pack = "flutter_testing" if raw_version == 1 else "generic_changes"
+        raw_pack = _string(value.get("pack", default_pack), "pack")
+        if raw_version >= 3 and raw_pack != "configured_paths" and raw_pack_config:
+            raise ModelError(f"evidence pack {raw_pack!r} does not accept pack_config fields")
         raw_pack_version = value.get("pack_version", 1)
         if isinstance(raw_pack_version, bool) or not isinstance(raw_pack_version, int):
             raise ModelError("pack_version must be an integer")
@@ -922,7 +968,7 @@ class RuleLoomConfig:
             schema_version=raw_version,
             project=_string(value.get("project"), "project"),
             target=_string(value.get("target", "needs_extra_validation"), "target"),
-            pack=_string(value.get("pack", default_pack), "pack"),
+            pack=raw_pack,
             pack_version=raw_pack_version,
             dataset=_string(value.get("dataset", ".ruleloom/observations.jsonl"), "dataset"),
             candidates_dir=_string(
@@ -939,6 +985,11 @@ class RuleLoomConfig:
             protocol=ProtocolConfig.from_dict(raw_protocol),
             evidence=(
                 EvidenceConfig.from_dict(raw_evidence) if raw_version >= 2 else EvidenceConfig()
+            ),
+            pack_config=(
+                ConfiguredPathsConfig.from_dict(raw_pack_config)
+                if raw_version >= 3 and raw_pack == "configured_paths"
+                else None
             ),
             learner=LearnerConfig.from_dict(raw_learner),
             evaluation=EvaluationConfig.from_dict(raw_evaluation),
@@ -976,6 +1027,7 @@ def default_config(
     repository_id: str = "repository.unspecified",
     pack: str | None = None,
     pack_version: int | None = None,
+    pack_config: ConfiguredPathsConfig | None = None,
     schema_version: int = 2,
 ) -> RuleLoomConfig:
     selected_pack = (
@@ -995,5 +1047,6 @@ def default_config(
         project=project,
         pack=selected_pack,
         pack_version=selected_version,
+        pack_config=pack_config,
         protocol=ProtocolConfig(repository_id=repository_id),
     )

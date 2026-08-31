@@ -29,7 +29,7 @@ from ruleloom.models import (
     validate_json_value,
     validate_subject,
 )
-from ruleloom.packs import get_pack, validate_policy_pack_contract
+from ruleloom.packs import validate_policy_pack_contract
 
 _MAX_JSON_BYTES = 8 * 1024 * 1024
 _MAX_JSONL_BYTES = 64 * 1024 * 1024
@@ -141,12 +141,25 @@ def write_text(path: Path, content: str) -> None:
 def _validate_jsonl_content(path: Path, content: str, kind: str) -> None:
     if len(content.encode("utf-8")) > _MAX_JSONL_BYTES:
         raise ModelError(f"{kind} log exceeds {_MAX_JSONL_BYTES} bytes: {path}")
-    lines = content.splitlines()
+    lines = _jsonl_lines(content)
     if len(lines) > _MAX_JSONL_RECORDS:
         raise ModelError(f"{kind} log exceeds {_MAX_JSONL_RECORDS} records: {path}")
     for line_number, line in enumerate(lines, 1):
         if len(line.encode("utf-8")) > _MAX_JSONL_LINE_BYTES:
             raise ModelError(f"{kind} record is too large at {path}:{line_number}")
+
+
+def _jsonl_lines(content: str) -> list[str]:
+    """Split JSON Lines only on its ASCII record delimiter.
+
+    ``str.splitlines`` also treats valid JSON characters such as U+0085, U+2028,
+    and U+2029 as separators, which can corrupt otherwise canonical records.
+    """
+
+    lines = content.split("\n")
+    if lines and lines[-1] == "":
+        lines.pop()
+    return lines
 
 
 def read_json(path: Path) -> JsonObject:
@@ -170,7 +183,7 @@ def load_observations(path: Path) -> list[Observation]:
         raise ModelError(f"observation log exceeds {_MAX_JSONL_BYTES} bytes: {path}")
     observations: list[Observation] = []
     seen: set[str] = set()
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for line_number, line in enumerate(_jsonl_lines(path.read_text(encoding="utf-8")), 1):
         if line_number > _MAX_JSONL_RECORDS:
             raise ModelError(f"observation log exceeds {_MAX_JSONL_RECORDS} records: {path}")
         if len(line.encode("utf-8")) > _MAX_JSONL_LINE_BYTES:
@@ -653,7 +666,7 @@ def _validate_active(
             f"active policy {candidate.id} uses engine {candidate.engine!r}, not "
             f"{config.learner.engine!r}"
         )
-    descriptor = get_pack(config.pack, config.pack_version)
+    descriptor = config.resolved_pack
     validate_policy_pack_contract(
         descriptor,
         candidate.metadata,
@@ -839,7 +852,7 @@ def load_predictions(path: Path) -> list[Prediction]:
         raise ModelError(f"prediction log exceeds {_MAX_JSONL_BYTES} bytes: {path}")
     predictions: list[Prediction] = []
     seen: set[str] = set()
-    for line_number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+    for line_number, line in enumerate(_jsonl_lines(path.read_text(encoding="utf-8")), 1):
         if line_number > _MAX_PREDICTION_RECORDS:
             raise ModelError(f"prediction log exceeds {_MAX_PREDICTION_RECORDS} records: {path}")
         if len(line.encode("utf-8")) > _MAX_JSONL_LINE_BYTES:

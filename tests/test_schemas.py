@@ -20,6 +20,7 @@ from ruleloom.models import (
     RuleSet,
     content_hash,
 )
+from ruleloom.packs import ConfiguredPathsConfig, PathPredicateConfig
 
 TARGET = "needs_extra_validation"
 EXPERIMENT_ID = "ruleloom-pilot-v1"
@@ -145,9 +146,88 @@ def test_public_schemas_accept_every_persisted_model_shape() -> None:
 
     _validate("config", RuleLoomConfig(project="ExampleProject").to_dict())
     _validate("config", default_config("ExampleProject").to_dict())
+    _validate(
+        "config",
+        RuleLoomConfig(
+            schema_version=3,
+            project="ExampleProject",
+            pack="configured_paths",
+            pack_version=1,
+            pack_config=ConfiguredPathsConfig(
+                (
+                    PathPredicateConfig(
+                        "touches_surface_web",
+                        ("apps/web/**",),
+                        ("apps/web/generated/**",),
+                    ),
+                )
+            ),
+        ).to_dict(),
+    )
     _validate("observation", observation.to_dict())
     _validate("candidate", candidate.to_dict())
     _validate("prediction", prediction.to_dict())
+
+
+def test_config_schema_enforces_v3_pack_configuration_contract() -> None:
+    configured = RuleLoomConfig(
+        schema_version=3,
+        project="ExampleProject",
+        pack="configured_paths",
+        pack_version=1,
+        pack_config=ConfiguredPathsConfig(
+            (PathPredicateConfig("touches_surface_web", ("apps/web/**",)),)
+        ),
+    ).to_dict()
+
+    missing = dict(configured)
+    missing.pop("pack_config")
+    with pytest.raises(ValidationError):
+        _validate("config", missing)
+
+    wrong_version = dict(configured)
+    wrong_version["schema_version"] = 2
+    with pytest.raises(ValidationError):
+        _validate("config", wrong_version)
+
+    static = default_config("ExampleProject").to_dict()
+    static["pack_config"] = configured["pack_config"]
+    with pytest.raises(ValidationError):
+        _validate("config", static)
+
+
+@pytest.mark.parametrize(
+    "pattern",
+    [
+        "",
+        "/absolute/**",
+        "trailing/",
+        "double//slash",
+        "../outside/**",
+        "safe/../outside",
+        "back\\slash/**",
+        ":(glob)magic/**",
+        "foo/***",
+        "foo**bar",
+        "classes/[ab].py",
+        "braces/{a,b}.py",
+        "surrogate/\ud800.py",
+    ],
+)
+def test_config_schema_rejects_unsupported_configured_globs(pattern: str) -> None:
+    payload = RuleLoomConfig(
+        schema_version=3,
+        project="ExampleProject",
+        pack="configured_paths",
+        pack_version=1,
+        pack_config=ConfiguredPathsConfig(
+            (PathPredicateConfig("touches_surface_web", ("apps/web/**",)),)
+        ),
+    ).to_dict()
+    payload["pack_config"]["path_predicates"][0]["include_paths"] = [pattern]
+
+    with pytest.raises(ValidationError):
+        _validate("config", payload)
 
 
 @pytest.mark.parametrize("name", ["config", "observation", "candidate", "prediction"])
