@@ -21,7 +21,7 @@ from ruleloom.models import (
     RuleSet,
 )
 
-HORN_ENGINE_VERSION = "ruleloom-horn/0.3"
+HORN_ENGINE_VERSION = "ruleloom-horn/0.4"
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,13 +42,18 @@ class HornBudget:
     limit: int
     consumed: int = 0
 
-    def matches(self, clause: HornClause, observation: Observation) -> bool:
-        self.consumed += len(clause.body)
+    def consume(self, work_units: int) -> None:
+        if work_units < 0:
+            raise ModelError("Horn work units cannot be negative")
+        self.consumed += work_units
         if self.consumed > self.limit:
             raise ModelError(
-                "Horn search exceeded the hard literal-check budget; reduce observations, "
+                "Horn search exceeded the hard bitset-work budget; reduce observations, "
                 "max_body, max_rules, max_predicates, or bootstrap_runs"
             )
+
+    def matches(self, clause: HornClause, observation: Observation) -> bool:
+        self.consume(len(clause.body))
         return clause.matches(observation.facts)
 
 
@@ -74,6 +79,16 @@ class PredicateSelection:
 class _ScoredClause:
     clause: HornClause
     covered_positive_ids: frozenset[str]
+    true_positive: int
+    false_positive: int
+    precision: float
+    utility: float
+
+
+@dataclass(frozen=True, slots=True)
+class _BitScoredClause:
+    clause: HornClause
+    coverage: int
     true_positive: int
     false_positive: int
     precision: float
@@ -251,37 +266,71 @@ def learn_horn(
             "fact predicates starting with 'not_' are reserved for closed-world negation: "
             + ", ".join(reserved)
         )
-    positives = [item for item in examples if item.labels[target] is LabelValue.POSITIVE]
-    negatives = [item for item in examples if item.labels[target] is LabelValue.NEGATIVE]
     predicates = rank_predicates(
         examples,
         target,
         allow_negation=options.allow_negation,
     )[: options.max_predicates]
-    uncovered = frozenset(item.id for item in positives)
+    all_mask = (1 << len(examples)) - 1
+    positive_mask = sum(
+        1 << index
+        for index, item in enumerate(examples)
+        if item.labels[target] is LabelValue.POSITIVE
+    )
+    negative_mask = all_mask ^ positive_mask
+    present_masks = {
+        predicate: sum(1 << index for index, item in enumerate(examples) if predicate in item.facts)
+        for predicate in predicates
+    }
+    uncovered = positive_mask
     selected: list[HornClause] = []
+    selected_coverage = 0
+    word_count = max(1, (len(examples) + 63) // 64)
 
     for _ in range(options.max_rules):
-        candidates: list[_ScoredClause] = []
+        candidates: list[_BitScoredClause] = []
         for body in _literal_bodies(predicates, options.max_body, options.allow_negation):
-            scored = _score_clause(
-                HornClause(target=target, body=body),
-                positives,
-                negatives,
-                uncovered,
-                options.false_positive_cost,
-                active_budget,
+            active_budget.consume(len(body) * word_count)
+            coverage = all_mask
+            for literal in body:
+                present = present_masks[literal.predicate]
+                coverage &= all_mask ^ present if literal.negated else present
+            covered_positive = coverage & positive_mask
+            true_positive = (covered_positive & uncovered).bit_count()
+            total_positive = covered_positive.bit_count()
+            false_positive = (coverage & negative_mask).bit_count()
+            precision = (
+                total_positive / (total_positive + false_positive)
+                if total_positive + false_positive
+                else 0.0
+            )
+            utility = (
+                true_positive - options.false_positive_cost * false_positive - 0.05 * len(body)
+            )
+            combined = selected_coverage | coverage
+            combined_true_positive = (combined & positive_mask).bit_count()
+            combined_false_positive = (combined & negative_mask).bit_count()
+            combined_precision = (
+                combined_true_positive / (combined_true_positive + combined_false_positive)
+                if combined_true_positive + combined_false_positive
+                else 0.0
             )
             if (
-                scored.true_positive >= options.min_support
-                and scored.precision >= options.min_precision
-                and scored.utility > 0
-                and _combined_precision(
-                    [*selected, scored.clause], positives, negatives, active_budget
-                )
-                >= options.min_precision
+                true_positive >= options.min_support
+                and precision >= options.min_precision
+                and utility > 0
+                and combined_precision >= options.min_precision
             ):
-                candidates.append(scored)
+                candidates.append(
+                    _BitScoredClause(
+                        clause=HornClause(target=target, body=body),
+                        coverage=coverage,
+                        true_positive=true_positive,
+                        false_positive=false_positive,
+                        precision=precision,
+                        utility=utility,
+                    )
+                )
         if not candidates:
             break
         best = max(
@@ -296,7 +345,8 @@ def learn_horn(
             ),
         )
         selected.append(best.clause)
-        uncovered -= best.covered_positive_ids
+        selected_coverage |= best.coverage
+        uncovered &= ~best.coverage
         if not uncovered:
             break
     return RuleSet(target=target, clauses=tuple(selected))

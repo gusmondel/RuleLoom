@@ -18,6 +18,7 @@ from ruleloom.evaluation import (
     best_literal_baseline,
     bootstrap_stability,
     evaluate,
+    fit_boolean_logistic_baseline,
     label_is_mature,
     labeled,
     majority_baseline,
@@ -75,7 +76,7 @@ from ruleloom.storage import (
     shadow_path,
 )
 
-_MAX_HORN_LITERAL_CHECKS = 50_000_000
+_MAX_HORN_BITSET_WORK_UNITS = 150_000_000
 _MAX_RANGE_COMMITS = 10_000
 _COMMIT_ID_RE = re.compile(r"^[0-9a-fA-F]{40,64}$")
 
@@ -455,6 +456,7 @@ def learn_candidate(
         test_fraction=config.evaluation.test_fraction,
         min_train=config.evaluation.min_train_examples,
         min_test=config.evaluation.min_test_examples,
+        test_start_at=config.evaluation.test_start_at,
         as_of=cutoff,
     )
     train, availability_warnings = _availability_filter(split.train, split.test, target)
@@ -471,24 +473,21 @@ def learn_candidate(
             config.learner.max_predicates,
             len(predicate_selection.ranked_predicates),
         )
-        rules_factor = config.learner.max_rules + (
-            config.learner.max_rules * (config.learner.max_rules + 1) // 2
-        )
         estimated_checks = (
             config.learner.hypothesis_count(predicate_count)
             * (config.learner.bootstrap_runs + 1)
-            * len(train)
+            * max(1, (len(train) + 63) // 64)
             * config.learner.max_body
-            * rules_factor
+            * config.learner.max_rules
         )
-        if estimated_checks > _MAX_HORN_LITERAL_CHECKS:
+        if estimated_checks > _MAX_HORN_BITSET_WORK_UNITS:
             raise ModelError(
                 "estimated Horn search work exceeds the safe budget; reduce observations, "
                 "max_body, max_predicates, or bootstrap_runs"
             )
 
     if config.learner.engine == "horn":
-        horn_budget = HornBudget(_MAX_HORN_LITERAL_CHECKS)
+        horn_budget = HornBudget(_MAX_HORN_BITSET_WORK_UNITS)
         rules = _run_horn(train, target, config, budget=horn_budget)
         engine_version = HORN_ENGINE_VERSION
     else:
@@ -513,11 +512,28 @@ def learn_candidate(
     test_metrics = evaluate(split.test, target, rules.predicts, as_of=cutoff)
     majority_value, _ = majority_baseline(train, target, as_of=cutoff)
     _, literal_metrics = best_literal_baseline(train, split.test, target, as_of=cutoff)
+    logistic_model = fit_boolean_logistic_baseline(train, target, as_of=cutoff)
+
+    def size_only_predictor(facts: frozenset[str]) -> bool:
+        return bool({"large_change", "multi_file_change"}.intersection(facts))
+
     baselines = {
         "never_alert": evaluate(split.test, target, lambda _facts: False, as_of=cutoff),
         "always_alert": evaluate(split.test, target, lambda _facts: True, as_of=cutoff),
         "train_majority": evaluate(split.test, target, lambda _facts: majority_value, as_of=cutoff),
         "best_single_literal": literal_metrics,
+        "size_only": evaluate(
+            split.test,
+            target,
+            size_only_predictor,
+            as_of=cutoff,
+        ),
+        "logistic_regression_boolean_facts": evaluate(
+            split.test,
+            target,
+            logistic_model.predicts,
+            as_of=cutoff,
+        ),
     }
 
     def bootstrap_learner(sample: Sequence[Observation], sample_target: str) -> RuleSet:
@@ -575,6 +591,13 @@ def learn_candidate(
         "extractors": cast(JsonValue, _extractors(observations)),
         "readiness": status.to_dict(),
         "best_single_literal": best_literal_name,
+        "baseline_models": {
+            "size_only": {
+                "definition": "large_change OR multi_file_change",
+                "training_selected": False,
+            },
+            "logistic_regression_boolean_facts": logistic_model.to_dict(),
+        },
         "rule_cards": cast(JsonValue, _rule_cards(rules, train, target)),
         "rule_evaluation": cast(
             JsonValue,
@@ -590,6 +613,7 @@ def learn_candidate(
         "evaluation": {
             "method": "temporal_holdout",
             "test_start": split.test[0].observed_at if split.test else None,
+            "configured_test_start_at": config.evaluation.test_start_at,
             "label_availability_enforced": True,
         },
         "predicate_selection": {

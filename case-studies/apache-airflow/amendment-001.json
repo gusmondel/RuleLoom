@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "amendment_id": "apache-airflow-independent-review-v1-operational-001",
+  "status": "registered_before_materialization_and_model_fit",
+  "original_preregistration_sha256": "8775e0f4006482af35cfaf7119409b4b42ccdc5c1df1d8a06407f768a870c349",
+  "reason": {
+    "observed_failure": "Blob-filtered materialization invoked git diff --numstat once per recoverable pull request, causing lazy blob fetches and no bounded progress output.",
+    "aborted_attempt_seconds": 470.54,
+    "last_observed_change_unit": "change.github.github.com.repo.41b366d9e39bbb72a739.pull.30559",
+    "last_observed_ordinal": 641,
+    "units_total": 6314,
+    "observations_persisted": 0
+  },
+  "protocol_change": {
+    "adapter": "ruleloom-github-event-archive/2",
+    "exporter": "ruleloom-gharchive-clickhouse/2",
+    "description": "Persist the already-declared, point-in-time opening-event additions, deletions, and changed_files fields. Extract exact path names from local Git trees with lazy fetching disabled. Use provider aggregates only when changed_files exactly equals the Git path manifest and the configured scope excludes no changed path.",
+    "unavailable_quantities": "Per-file churn and change entropy remain unknown; they are never imputed from aggregate statistics.",
+    "abstention": "Missing commits, incomplete opening statistics, path-count disagreement, excluded paths, mixed scope, and content-requiring packs retain the existing safe fallback or abstain. No later pull-request head may replace the opening SHA."
+  },
+  "frozen_items_unchanged": [
+    "repository",
+    "collection_window",
+    "prediction_point",
+    "outcome_target",
+    "label_definition",
+    "path_vocabulary",
+    "large_change_threshold",
+    "multi_file_threshold",
+    "learner",
+    "chronological_split",
+    "baselines",
+    "success_criterion"
+  ],
+  "outcome_blinding": "The added fields were named as the vocabulary design source in the original preregistration and are observed at PR opening. No feature-label association, learned rule, baseline result, or holdout metric was inspected before this amendment."
+}

@@ -1,0 +1,112 @@
+{
+  "schema_version": 1,
+  "experiment_id": "apache-airflow-independent-review-v1",
+  "result": "preregistered_success_criterion_failed_after_source_continuity_correction",
+  "policy_promotion": "prohibited",
+  "candidate": {
+    "id": "cand-deee6873eeaa2233",
+    "engine_version": "ruleloom-horn/0.4",
+    "clauses": [],
+    "abstained": true,
+    "empty_rule_stability": 1.0
+  },
+  "cohort": {
+    "event_rows": 23108,
+    "normalized_events": 23500,
+    "change_units": 6314,
+    "opening_statistics_complete": 6313,
+    "materialized": 3674,
+    "materialized_rate": 0.5818815331004118,
+    "positive": 184,
+    "negative": 2047,
+    "unknown": 1443,
+    "skipped": 2640,
+    "skipped_by_reason": {
+      "missing_commit_objects": 2450,
+      "aggregate_path_count_mismatch": 45,
+      "aggregate_scope_exclusions": 124,
+      "ineligible_evidence_scope": 21
+    }
+  },
+  "source_continuity": {
+    "expected_hours": 11664,
+    "observed_hours": 11622,
+    "missing_hours": 42,
+    "archive_negatives_before_correction": 3904,
+    "archive_negatives_after_correction": 3504,
+    "materialized_negatives_reclassified_unknown": 134
+  },
+  "retention": {
+    "positive": {"available": 388, "materialized": 184, "rate": 0.4742268041237113},
+    "negative": {"available": 3504, "materialized": 2047, "rate": 0.584189497716895},
+    "unknown": {"available": 2422, "materialized": 1443, "rate": 0.5957886044591247},
+    "positive_vs_negative_chi_square": 17.265938557199792,
+    "positive_vs_negative_p_value": 0.00003249601071244532,
+    "positive_vs_negative_odds_ratio": 0.6419916281119189,
+    "warning": "Materialization retention differs by known outcome and can bias the evaluated cohort."
+  },
+  "temporal_evaluation": {
+    "configured_test_start_at": "2024-01-01T00:00:00Z",
+    "effective_test_start_at": "2024-01-01T13:00:00Z",
+    "train": {"count": 1433, "positive": 115, "negative": 1318},
+    "holdout": {"count": 794, "positive": 68, "negative": 726},
+    "training_labels_embargoed": 4
+  },
+  "holdout": {
+    "horn": {"mcc": 0.0, "precision": 0.0, "recall": 0.0, "alert_rate": 0.0},
+    "best_single_literal": {
+      "literal": "touches_scheduler_runtime",
+      "mcc": 0.0813170751356481,
+      "precision": 0.21739130434782608,
+      "recall": 0.07352941176470588,
+      "alert_rate": 0.028967254408060455
+    },
+    "size_only": {
+      "mcc": -0.012566921198004222,
+      "precision": 0.07960199004975124,
+      "recall": 0.23529411764705882,
+      "alert_rate": 0.2531486146095718
+    },
+    "logistic_regression_boolean_facts": {
+      "mcc": 0.1364990093886142,
+      "precision": 0.1588235294117647,
+      "recall": 0.39705882352941174,
+      "alert_rate": 0.2141057934508816,
+      "status": "supplementary_non_confirmatory_baseline"
+    }
+  },
+  "predicate_audit": {
+    "observation_count": 3674,
+    "configured_coverage": 0.48911268372346217,
+    "configured_covered": 1797,
+    "configured_uncovered": 1877,
+    "warnings": [],
+    "relations": 0
+  },
+  "runtime_and_storage": {
+    "event_export_seconds": 6.017,
+    "event_import_seconds": 15.848,
+    "pull_ref_fetch_approx_seconds": 240,
+    "materialization_seconds": 263.55,
+    "horn_learning_seconds": 40.822,
+    "events_mebibytes": 11,
+    "git_objects_mebibytes": 166,
+    "ruleloom_state_mebibytes": 51
+  },
+  "hashes": {
+    "preregistration_sha256": "8775e0f4006482af35cfaf7119409b4b42ccdc5c1df1d8a06407f768a870c349",
+    "amendment_sha256": "2b0067690b20f07ae119d58ce5252bd34b7fa561702f5da8fea853a82d534d3e",
+    "correction_sha256": "b36512619b5faa82cef7637a6d979078455d3008665a73a534b28b1d9e262fb9",
+    "events_sha256": "d07180db493fcf5179a58976da75f39922efe85cdd75320d3ae9de9d2b4f522d",
+    "collection_manifest_sha256": "8465b3296ce81c39f4df4e782165ebe07bbd05f59ca36ad0f9db56f84d7d8a96",
+    "coverage_query_sha256": "f05421aeb5e3ed34b2ecf681e00d191ad56e999f86a0f6656a8fcac99e3043b4",
+    "normalized_events_sha256": "f73dedf233c2c0e73c96410cac19130bafea2928f94ebdf31629f36c9ba25ef6",
+    "query_sha256": "80193d47ab732fe7df40a2595ba9a3c3ed760df5565cd29d8adb16240f0592c7",
+    "config_sha256": "9bad563819f9928531b68db662a07c35d372941b541eb0b9a2597b71318f038d",
+    "evidence_protocol_sha256": "c4592d9f95e9a9f536c5a8847cee40c10b55bd85cf5a28ee9a4687e72acb4944",
+    "materialization_manifest_sha256": "0fc999c48d2c3aab10668c1b3bebb4b3aa8530af1e61659a5221b2699e688efe",
+    "observation_manifest_sha256": "aa7ffadf8da3bcaccf2f51ace02b69ab1f57007aa6c1f38e739afdbd98397faa",
+    "predicate_audit_sha256": "76e691cc22dc002a5f773e93e8b3d4fbb1bc423e8aa7b039f4e8737ee881920e",
+    "dataset_sha256": "4177390bd92ac9d021051820238f921740e5a4524643f99fe42c15df89af3b77"
+  }
+}

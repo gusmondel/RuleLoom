@@ -4,8 +4,9 @@ RuleLoom treats performance limits as part of the evidence contract. A faster
 collector is not acceptable if it silently skips a commit, changes Git diff
 semantics, or persists only half of an event/change-unit transaction.
 
-This document separates the improvements shipped in v0.7 from the storage
-migration that still requires its own compatibility and fault-injection work.
+This document separates the Git batching shipped in v0.7, the provider-snapshot
+path shipped in v0.8, and the storage migration that still requires its own
+compatibility and fault-injection work.
 
 ## What v0.7 changes
 
@@ -63,14 +64,45 @@ interval is idempotent. Repository identity and ancestry checks still run for
 every invocation, and persistence is not append-only: the atomic JSONL upsert
 validates and rewrites the complete retained ledger, as described below.
 
-Historical materialization is a separate full-ledger pass: it still collects a
-snapshot and file diff for every retained unit selected by the command, so an
-incremental bootstrap does not make later materialization incremental. The
-materializer no longer asks Git to count the full first-parent chain for every
-unit and then discard that position. Standalone `collect_snapshot` retains its
-indexed behavior. Other per-unit snapshot work, including repository validation
-and diff extraction, remains linear in the number and size of materialized
-units.
+Historical materialization is a separate full-ledger pass, so an incremental
+bootstrap does not make later materialization incremental. The materializer no
+longer asks Git to count the full first-parent chain for every unit and discard
+that position. In v0.8 it also resolves repository identity and verifies all
+required commit objects once per cohort instead of repeating those checks per
+unit. Diff/path extraction remains linear in selected units and changed paths.
+
+## Provider opening snapshots in v0.8
+
+The GH Archive research adapter persists complete additions, deletions, and
+changed-file count from the structured PR-opened event. Its materializer uses
+Git tree comparisons to enumerate exact path names with hidden lazy fetching
+disabled. It accepts aggregate statistics only when their file count equals the
+exact path manifest and the configured scope neither excludes nor mixes any
+path. Packs that require file contents are ineligible. Per-file churn and
+entropy stay unavailable rather than being guessed.
+
+This avoids downloading blobs merely to compute path predicates and total
+change-shape facts. `scripts/fetch_github_pull_refs.py` can fetch a bounded set
+of public PR refs into an observer clone without checkout or repository-code
+execution. Missing objects remain a materialization abstention; the helper does
+not silently replace an opening head with a later ref.
+
+The Horn engine now represents training covers as Python integer bitsets. Search
+budgeting counts bounded machine-word work instead of multiplying every
+hypothesis by every observation. Clause ordering, exhaustive body enumeration,
+support/precision constraints, and deterministic tie-breaking remain unchanged;
+engine provenance advances to `ruleloom-horn/0.4`.
+
+### Public Airflow observation
+
+In the corrected frozen public case study, export and exact hourly continuity
+audit of 23,108 event rows took about 6 seconds, import about 16 seconds, a pass
+over 6,314 units about 4.4 minutes, and learning with 100 bootstrap runs about
+41 seconds. The observer
+used roughly 166 MiB of Git objects, 51 MiB of RuleLoom state, and an 11 MiB raw
+event projection. Hardware, cache, network, repository shape, and source-table
+state affect these figures; they are a transparent run record, not a performance
+guarantee. See [the case-study result](../case-studies/apache-airflow/RESULTS.md).
 
 ### Bounded work remains explicit
 

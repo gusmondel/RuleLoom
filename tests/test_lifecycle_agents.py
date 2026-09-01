@@ -1141,8 +1141,14 @@ def test_learning_fails_closed_on_unknown_units_repositories_and_excessive_work(
         project="ExampleProject",
         pack="flutter_testing",
         pack_version=1,
+        learner=LearnerConfig(
+            max_body=4,
+            max_rules=10,
+            bootstrap_runs=30,
+            max_predicates=16,
+        ),
     )
-    large_predicates = get_pack("flutter_testing", 1).predicates[:12]
+    large_predicates = get_pack("flutter_testing", 1).predicates[:16]
     large = [
         _observation(
             index,
@@ -1154,7 +1160,7 @@ def test_learning_fails_closed_on_unknown_units_repositories_and_excessive_work(
             },
             config=legacy_config,
         )
-        for index in range(400)
+        for index in range(1200)
     ]
     with pytest.raises(ModelError, match="safe budget"):
         learn_candidate(

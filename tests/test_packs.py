@@ -91,6 +91,42 @@ def test_persisted_extraction_validator_preserves_static_pack_api_compatibility(
         )
 
 
+def test_aggregate_diff_statistics_are_complete_and_do_not_forge_file_churn() -> None:
+    evidence = DiffEvidence(
+        changes=(
+            FileChange("src/service.py", additions=0, deletions=0),
+            FileChange("tests/test_service.py", additions=0, deletions=0),
+        ),
+        aggregate_additions=300,
+        aggregate_deletions=20,
+        aggregate_files_changed=2,
+        statistics_source="provider_opened_event",
+    )
+
+    result = get_pack("generic_changes", 1).run(
+        evidence,
+        EvidenceConfig(large_change_churn=200, multi_file_count=3).pack_options,
+    )
+
+    assert {"large_change", "touches_test"} <= result.facts
+    assert result.metadata["churn"] == 320
+    assert result.metadata["file_churn"] is None
+    assert result.metadata["change_entropy"] is None
+    with pytest.raises(ValueError, match="must all be integers"):
+        DiffEvidence(
+            changes=(FileChange("src/service.py", 0, 0),),
+            aggregate_additions=1,
+        )
+    with pytest.raises(ValueError, match="exact path manifest"):
+        DiffEvidence(
+            changes=(FileChange("src/service.py", 0, 0),),
+            aggregate_additions=1,
+            aggregate_deletions=0,
+            aggregate_files_changed=2,
+            statistics_source="provider_opened_event",
+        )
+
+
 def test_configured_paths_matches_rooted_globs_exclusions_overlaps_and_internals() -> None:
     config = _configured_paths(
         PathPredicateConfig(

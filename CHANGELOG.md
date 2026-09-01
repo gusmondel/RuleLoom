@@ -7,6 +7,52 @@ always require a new explicit schema, adapter, pack, or experiment version.
 
 ## Unreleased
 
+## 0.8.0 - 2026-09-01
+
+### Added
+
+- A bounded, manifest-bound GH Archive/ClickHouse adapter for public GitHub PR
+  opening, merge, approval, and changes-requested events, with remote actor
+  hashing, exact hourly source-continuity auditing, and no prose or
+  source-content collection.
+- The atomic `independent_review_changes_requested` outcome and
+  `provider_change` prediction unit for exact opening-snapshot experiments.
+- Exact preregistered temporal boundaries through `evaluation.test_start_at`,
+  plus fixed size-only and deterministic class-balanced Boolean logistic
+  baselines.
+- A preregistered Apache Airflow case study that publishes its failed success
+  criterion, cohort attrition, selection threat, metrics, and evidence hashes.
+
+### Changed
+
+- Historical materialization validates repository identity and required Git
+  objects once per cohort, disables hidden lazy fetches, classifies every skip,
+  and supports exact tree paths with complete provider aggregate statistics.
+- Root commits accept only Git's canonical empty-tree object as their base,
+  fixing the lost-root-unit bug without weakening commit validation.
+- The Horn learner evaluates Boolean bodies with bitsets and accounts work in
+  bounded machine-word units; the engine provenance is now
+  `ruleloom-horn/0.4`.
+- Candidate evaluation records all baseline definitions and parameters, while
+  keeping threshold and predicate selection training-only.
+
+### Performance
+
+- In the public Airflow run, an idempotent 6,314-unit materialization completed
+  in about 4.4 minutes and 100 Horn bootstrap runs in about 41 seconds. These are
+  environment-local observations, not portable guarantees.
+
+### Scientific integrity
+
+- The Airflow Horn model abstained and failed the frozen criterion (holdout MCC
+  `0.000`); no policy was promoted. The supplementary logistic baseline reached
+  MCC `0.136` but only `0.159` precision.
+- A post-analysis source audit found 42 missing GH Archive hours. The original
+  result is invalidated; the disclosed corrected rerun conservatively turns
+  gap-crossing negatives into unknown outcomes and still yields a null result.
+- Materialization retention differed significantly between known positives and
+  negatives, so metrics are explicitly scoped to the retained cohort.
+
 ## 0.7.0 - 2026-09-01
 
 ### Added

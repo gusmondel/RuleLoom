@@ -51,12 +51,14 @@ from ruleloom.models import (
 )
 
 VALIDATION_REWORK_REQUIRED = "validation_rework_required"
+INDEPENDENT_REVIEW_CHANGES_REQUESTED = "independent_review_changes_requested"
 CHANGE_ATTRIBUTABLE_CI_FAILURE = "change_attributable_ci_failure"
 POST_MERGE_REVERT_OR_HOTFIX = "post_merge_revert_or_hotfix"
 POST_MERGE_DEFECT = "post_merge_defect"
 
 ATOMIC_OUTCOME_TARGETS = (
     VALIDATION_REWORK_REQUIRED,
+    INDEPENDENT_REVIEW_CHANGES_REQUESTED,
     CHANGE_ATTRIBUTABLE_CI_FAILURE,
     POST_MERGE_REVERT_OR_HOTFIX,
     POST_MERGE_DEFECT,
@@ -329,6 +331,40 @@ def _validation_rework_votes(
     return tuple(votes)
 
 
+def _independent_review_changes_requested_votes(
+    change_unit: ChangeUnit,
+    events: Sequence[HistoricalEvent],
+) -> tuple[OutcomeVote, ...]:
+    """Label the exact structured review decision without classifying prose."""
+
+    del change_unit
+    votes: list[OutcomeVote] = []
+    for event in events:
+        if (
+            event.kind != "review"
+            or event.data.get("decision") != "changes_requested"
+            or event.data.get("independent") is not True
+        ):
+            continue
+        confidence = _event_confidence(event, default=1.0, maximum=1.0)
+        if confidence is None:
+            continue
+        votes.append(
+            OutcomeVote(
+                value="positive",
+                strength="strong",
+                target=INDEPENDENT_REVIEW_CHANGES_REQUESTED,
+                available_at=event.available_at,
+                source_kind=event.kind,
+                event_ids=(event.id,),
+                independent_group=event.independent_group,
+                confidence=confidence,
+                reason="independent reviewer submitted a changes-requested decision",
+            )
+        )
+    return tuple(votes)
+
+
 def _ci_failure_votes(
     change_unit: ChangeUnit,
     events: Sequence[HistoricalEvent],
@@ -528,6 +564,7 @@ _LabelingFunction = Callable[
 
 _LABELING_FUNCTIONS: dict[str, _LabelingFunction] = {
     VALIDATION_REWORK_REQUIRED: _validation_rework_votes,
+    INDEPENDENT_REVIEW_CHANGES_REQUESTED: _independent_review_changes_requested_votes,
     CHANGE_ATTRIBUTABLE_CI_FAILURE: _ci_failure_votes,
     POST_MERGE_REVERT_OR_HOTFIX: _revert_or_hotfix_votes,
     POST_MERGE_DEFECT: _post_merge_defect_votes,

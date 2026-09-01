@@ -18,10 +18,12 @@ from ruleloom.gitfacts import (
     backfill_commits,
     backfill_commits_detailed,
     collect_snapshot,
+    collect_snapshot_with_aggregate_stats,
     collect_worktree,
     extract_flutter_testing_facts,
     extract_generic_change_facts,
     missing_commit_objects,
+    prepare_snapshot_repository,
     repository_identity,
     repository_origin_url,
 )
@@ -163,6 +165,60 @@ def test_collect_snapshot_extracts_deterministic_flutter_evidence(
     assert observation.source["base"] == base
     assert observation.source["head"] == head
     assert observation.source["kind"] == "git_range"
+
+
+def test_collect_snapshot_uses_point_in_time_aggregate_stats_without_file_churn(
+    flutter_repo: tuple[Path, str, str],
+) -> None:
+    repo, base, head = flutter_repo
+    context = prepare_snapshot_repository(repo, repository_identity(repo), [base, head])
+
+    observation = collect_snapshot_with_aggregate_stats(
+        repo,
+        base,
+        head,
+        additions=240,
+        deletions=10,
+        files_changed=2,
+        statistics_source="provider_opened_event",
+        observed_at="2026-01-02T20:00:00Z",
+        protocol_hash=PROTOCOL_HASH,
+        pack="generic_changes",
+        pack_version=1,
+        repository_id=context.repository_id,
+        context=context,
+    )
+
+    assert {"large_change", "touches_test"} <= observation.facts
+    assert observation.metadata["additions"] == 240
+    assert observation.metadata["deletions"] == 10
+    assert observation.metadata["files_changed"] == 2
+    assert observation.metadata["file_churn"] is None
+    assert observation.metadata["file_churn_available"] is False
+    assert observation.metadata["change_entropy"] is None
+    assert observation.metadata["statistics_source"] == "provider_opened_event"
+    assert observation.metadata["commit_metadata_available"] is False
+    assert "commit_message" not in observation.metadata
+    assert observation.source["provider_base"] == base
+    assert observation.source["base"] == base
+    assert observation.source["diff_base_kind"] == "merge_base"
+
+    with pytest.raises(GitFactsError, match="does not match"):
+        collect_snapshot_with_aggregate_stats(
+            repo,
+            base,
+            head,
+            additions=1,
+            deletions=0,
+            files_changed=3,
+            statistics_source="provider_opened_event",
+            observed_at="2026-01-02T20:00:00Z",
+            protocol_hash=PROTOCOL_HASH,
+            pack="generic_changes",
+            pack_version=1,
+            repository_id=context.repository_id,
+            context=context,
+        )
 
 
 def test_collect_snapshot_accepts_only_canonical_empty_tree_as_noncommit_base(
@@ -418,6 +474,19 @@ def test_repository_origin_and_commit_object_preflight(
     tree = _git(repo, "rev-parse", f"{head}^{{tree}}")
     absent = "f" * 40
     assert set(missing_commit_objects(repo, [head, tree, absent])) == {tree, absent}
+    empty_tree = (
+        subprocess.run(
+            ["git", "-C", str(repo), "hash-object", "-t", "tree", "--stdin"],
+            check=True,
+            capture_output=True,
+            input=b"",
+        )
+        .stdout.decode("ascii")
+        .strip()
+    )
+    assert missing_commit_objects(repo, [head, empty_tree], allow_empty_tree=True) == ()
+    with pytest.raises(GitFactsError, match="must be a boolean"):
+        missing_commit_objects(repo, [head], allow_empty_tree=1)  # type: ignore[arg-type]
     with pytest.raises(GitFactsError, match="full SHA"):
         missing_commit_objects(repo, ["HEAD"])
 
@@ -432,6 +501,26 @@ def test_commit_object_preflight_streams_large_valid_batches_without_pipe_deadlo
 
     assert len(result) == len(absent)
     assert set(result) == set(absent)
+
+
+def test_commit_object_preflight_disables_promisor_lazy_fetch(
+    flutter_repo: tuple[Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, _base, head = flutter_repo
+    original = gitfacts_module.subprocess.Popen
+    environments: list[dict[str, str] | None] = []
+
+    def capture_environment(*args: object, **kwargs: object):
+        raw_environment = kwargs.get("env")
+        environments.append(raw_environment if isinstance(raw_environment, dict) else None)
+        return original(*args, **kwargs)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(gitfacts_module.subprocess, "Popen", capture_environment)
+
+    assert missing_commit_objects(repo, [head]) == ()
+    assert environments[-1] is not None
+    assert environments[-1]["GIT_NO_LAZY_FETCH"] == "1"
 
 
 def test_collect_worktree_includes_tracked_and_untracked_flutter_changes(

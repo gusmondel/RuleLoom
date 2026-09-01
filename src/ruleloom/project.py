@@ -12,7 +12,7 @@ from ruleloom.agents import SyncResult, sync_agents
 from ruleloom.config import CONFIG_PATH, RuleLoomConfig, default_config
 from ruleloom.gitfacts import GitFactsError, repository_identity
 from ruleloom.history.materialize import validate_materialized_outcome
-from ruleloom.history.models import HistoricalEvent
+from ruleloom.history.models import HistoricalEvent, validate_git_sha
 from ruleloom.history.storage import (
     change_units_path,
     events_path,
@@ -258,10 +258,28 @@ def validate_project(root: Path, config: RuleLoomConfig) -> Readiness:
                 f"historical observation {observation.id!r} lacks a persisted change unit"
             )
         unit = units_by_id[change_id]
+        source_base = observation.source.get("base")
+        provider_base = observation.source.get("provider_base")
+        diff_base_kind = observation.source.get("diff_base_kind")
+        merge_base_matches = False
+        if (
+            diff_base_kind == "merge_base"
+            and provider_base == unit.base_sha
+            and isinstance(source_base, str)
+        ):
+            try:
+                validate_git_sha(source_base, field_name="historical observation merge base")
+            except ModelError:
+                pass
+            else:
+                merge_base_matches = True
+        direct_base_matches = (
+            source_base == unit.base_sha and provider_base is None and diff_base_kind is None
+        )
         if (
             observation.id != f"history.{unit.id}"
             or observation.observed_at != unit.prediction_at
-            or observation.source.get("base") != unit.base_sha
+            or not (direct_base_matches or merge_base_matches)
             or observation.source.get("head") != unit.prediction_sha
             or observation.source.get("unit_kind") != unit.kind
             or observation.source.get("provider") != unit.provider

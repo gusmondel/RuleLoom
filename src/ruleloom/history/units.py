@@ -19,6 +19,7 @@ _FINAL_EVENTS = frozenset({"change_finalized", "change_merged", "change_closed"}
 _VERIFIABLE_FINAL_EVENTS = _FINAL_EVENTS | {"git_merge"}
 _BUILTIN_GITHUB_ADAPTER = "ruleloom-github/1"
 _BUILTIN_GITHUB_WEBHOOK_ADAPTER = "ruleloom-github-webhook/1"
+_BUILTIN_GITHUB_EVENT_ARCHIVE_ADAPTER = "ruleloom-github-event-archive/2"
 _BUILTIN_GITHUB_UNIT_SOURCE_RE = re.compile(
     r"^github:(github\.github\.com\.repo\.[0-9a-f]{20}):pull:[0-9]+(?:$|:)"
 )
@@ -30,10 +31,15 @@ _BUILTIN_GITHUB_WEBHOOK_EVENT_SOURCE_RE = re.compile(
     r"^github-webhook:(github\.github\.com\.repo\.[0-9a-f]{20}):"
     r"(?:pull:[0-9]+|label:[0-9]+|check:[0-9]+):delivery:[0-9a-f]{20}$"
 )
+_BUILTIN_GITHUB_EVENT_ARCHIVE_SOURCE_RE = re.compile(
+    r"^github-event-archive:(github\.github\.com\.repo\.[0-9a-f]{20}):"
+    r"pull:[0-9]+(?:$|:)"
+)
 _CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
 _BUILTIN_GITHUB_EVENT_SOURCE_PATTERNS = {
     _BUILTIN_GITHUB_ADAPTER: _BUILTIN_GITHUB_EVENT_SOURCE_RE,
     _BUILTIN_GITHUB_WEBHOOK_ADAPTER: _BUILTIN_GITHUB_WEBHOOK_EVENT_SOURCE_RE,
+    _BUILTIN_GITHUB_EVENT_ARCHIVE_ADAPTER: _BUILTIN_GITHUB_EVENT_ARCHIVE_SOURCE_RE,
 }
 
 

@@ -1,0 +1,38 @@
+{
+  "schema_version": 1,
+  "correction_id": "apache-airflow-independent-review-v1-source-continuity-001",
+  "status": "registered_after_initial_analysis_before_publication",
+  "trigger": "Release review found that dataset_max_at proves endpoint freshness but not continuity of every hourly GH Archive source partition inside the frozen window.",
+  "source_audit": {
+    "method": "Enumerate distinct source-wide file_time hours over the frozen window and compare them with every expected UTC hour.",
+    "coverage_query_sha256": "f05421aeb5e3ed34b2ecf681e00d191ad56e999f86a0f6656a8fcac99e3043b4",
+    "expected_hours": 11664,
+    "observed_hours": 11622,
+    "missing_hours": 42
+  },
+  "correction": "A negative is eligible only when no missing source hour could contain a review event becoming available after the opening snapshot and no later than merge. Observed positive changes-requested events remain positive.",
+  "invalidated_result": {
+    "candidate_id": "cand-5ccbfa58732885b0",
+    "archive_negative_outcomes": 3904,
+    "materialized_negative_outcomes": 2181,
+    "reason": "Those counts treated internal source continuity as complete without auditing every hour."
+  },
+  "corrected_result": {
+    "archive_negative_outcomes": 3504,
+    "materialized_negative_outcomes": 2047,
+    "materialized_unknown_outcomes": 1443,
+    "candidate_id": "cand-deee6873eeaa2233"
+  },
+  "frozen_items_unchanged": [
+    "repository",
+    "collection_window",
+    "prediction_point",
+    "outcome_target",
+    "path_vocabulary",
+    "change_thresholds",
+    "learner",
+    "chronological_split",
+    "success_criterion"
+  ],
+  "interpretation": "This is a conservative source-completeness bug correction made after the first metrics were inspected. The corrected null result is publishable and the old artifacts are invalid, but an independent future experiment is still required for confirmation."
+}

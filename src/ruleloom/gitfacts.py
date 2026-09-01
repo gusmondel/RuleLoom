@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import re
 import subprocess
 import threading
 import time
 from contextlib import suppress
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import BinaryIO
@@ -104,23 +105,39 @@ class BackfillReport:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class SnapshotRepositoryContext:
+    """Repository identity and commit availability verified once for a bounded batch."""
+
+    root: Path
+    repository_id: str
+    available_object_ids: frozenset[str]
+    missing_object_ids: frozenset[str]
+
+
 def _run_git_capped(
     repo: Path,
     arguments: tuple[str, ...],
     *,
     input_bytes: bytes | None = None,
     timeout_seconds: float = _GIT_TIMEOUT_SECONDS,
+    allow_lazy_fetch: bool = True,
 ) -> tuple[bytes, bytes, int]:
     """Run Git with bounded wall time and incremental output caps."""
     if input_bytes is not None and len(input_bytes) > 1024 * 1024:
         raise GitFactsError("Git stdin exceeds 1048576 bytes")
     command = ["git", "-C", str(repo), *arguments]
+    environment = None
+    if not allow_lazy_fetch:
+        environment = dict(os.environ)
+        environment["GIT_NO_LAZY_FETCH"] = "1"
     try:
         process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            env=environment,
         )
     except FileNotFoundError as exc:
         raise GitFactsError("Git is not installed or is not available on PATH") from exc
@@ -217,12 +234,14 @@ def _git(
     *arguments: str,
     input_text: str | None = None,
     timeout_seconds: float = _GIT_TIMEOUT_SECONDS,
+    allow_lazy_fetch: bool = True,
 ) -> str:
     stdout, stderr, returncode = _run_git_capped(
         repo,
         arguments,
         input_bytes=input_text.encode() if input_text is not None else None,
         timeout_seconds=timeout_seconds,
+        allow_lazy_fetch=allow_lazy_fetch,
     )
     if returncode != 0:
         detail = (
@@ -265,8 +284,16 @@ def repository_origin_url(repo: Path) -> str | None:
     return remote
 
 
-def missing_commit_objects(repo: Path, object_ids: list[str] | tuple[str, ...]) -> tuple[str, ...]:
-    """Return full object IDs that are absent locally or are not commit objects."""
+def missing_commit_objects(
+    repo: Path,
+    object_ids: list[str] | tuple[str, ...],
+    *,
+    allow_empty_tree: bool = False,
+) -> tuple[str, ...]:
+    """Return full object IDs that are absent locally or are not valid snapshot bases."""
+
+    if not isinstance(allow_empty_tree, bool):
+        raise GitFactsError("allow_empty_tree must be a boolean")
 
     unique = tuple(sorted(set(object_ids)))
     if len(unique) > _MAX_OBJECT_PREFLIGHT_IDS:
@@ -291,6 +318,7 @@ def missing_commit_objects(repo: Path, object_ids: list[str] | tuple[str, ...]) 
             ("cat-file", "--batch-check=%(objectname) %(objecttype)"),
             input_bytes=("\n".join(batch) + "\n").encode(),
             timeout_seconds=remaining,
+            allow_lazy_fetch=False,
         )
         if returncode != 0:
             detail = stderr.decode(errors="replace").strip() or "unknown Git error"
@@ -301,10 +329,13 @@ def missing_commit_objects(repo: Path, object_ids: list[str] | tuple[str, ...]) 
             raise GitFactsError("Git object preflight returned non-UTF-8 output") from exc
     if len(lines) != len(unique):
         raise GitFactsError("Git object preflight returned an incomplete response")
+    accepted_empty_tree = _empty_tree(top_level) if allow_empty_tree else None
     missing: list[str] = []
     for requested, line in zip(unique, lines, strict=True):
         fields = line.split()
-        if fields != [requested, "commit"]:
+        if fields != [requested, "commit"] and not (
+            requested == accepted_empty_tree and fields == [requested, "tree"]
+        ):
             missing.append(requested)
     return tuple(missing)
 
@@ -347,6 +378,24 @@ def _repository(repo: Path, repository_id: str | None = None) -> tuple[Path, str
                 f"{actual!r}"
             )
     return top_level, actual
+
+
+def prepare_snapshot_repository(
+    repo: Path,
+    repository_id: str,
+    object_ids: list[str] | tuple[str, ...],
+) -> SnapshotRepositoryContext:
+    """Verify one repository boundary and all snapshot objects without lazy fetching."""
+
+    root, actual = _repository(repo, repository_id)
+    requested = frozenset(object_ids)
+    missing = frozenset(missing_commit_objects(root, tuple(requested), allow_empty_tree=True))
+    return SnapshotRepositoryContext(
+        root=root,
+        repository_id=actual,
+        available_object_ids=requested.difference(missing),
+        missing_object_ids=missing,
+    )
 
 
 def _resolve_commit(repo: Path, revision: str) -> str:
@@ -456,6 +505,54 @@ def _scoped_tracked_changes(
         len(all_paths),
         len(all_paths.difference(included_paths)),
         len(included_paths.difference(scoped_paths)),
+    )
+
+
+def _parse_name_only(raw: str) -> tuple[str, ...]:
+    paths = tuple(sorted(path for path in raw.split("\x00") if path))
+    if len(paths) != len(set(paths)):
+        raise GitFactsError("Git returned duplicate paths for one diff")
+    if len(paths) > _MAX_CHANGED_FILES:
+        raise GitFactsError(f"Git diff exceeds {_MAX_CHANGED_FILES} changed files")
+    return paths
+
+
+def _scoped_tracked_paths(
+    repo: Path,
+    common: tuple[str, ...],
+    config: EvidenceConfig,
+) -> tuple[tuple[str, ...], int, int, int]:
+    """Return exact paths from Git trees without fetching blob contents."""
+
+    def paths(pathspecs: tuple[str, ...]) -> tuple[str, ...]:
+        return _parse_name_only(
+            _git(
+                repo,
+                "diff",
+                "--name-only",
+                "-z",
+                *common,
+                "--",
+                *pathspecs,
+                allow_lazy_fetch=False,
+            )
+        )
+
+    scoped = paths(_scope_pathspecs(config))
+    if config.include_paths == ("**",) and not config.exclude_paths:
+        return scoped, len(scoped), 0, 0
+    all_paths = set(paths(_universe_pathspecs()))
+    included = (
+        all_paths
+        if config.include_paths == ("**",)
+        else set(paths(_scope_pathspecs(config, apply_exclusions=False)))
+    )
+    scoped_set = set(scoped)
+    return (
+        scoped,
+        len(all_paths),
+        len(all_paths.difference(included)),
+        len(included.difference(scoped_set)),
     )
 
 
@@ -625,6 +722,51 @@ def _read_diff(
         scope_total_files=total_files,
         scope_outside_files=outside_files,
         scope_excluded_files=excluded_files,
+    )
+
+
+def _read_aggregate_diff(
+    repo: Path,
+    base: str,
+    head: str,
+    *,
+    pack: str,
+    pack_version: int,
+    pack_config: ConfiguredPathsConfig | None,
+    evidence_config: EvidenceConfig,
+    additions: int,
+    deletions: int,
+    files_changed: int,
+    statistics_source: str,
+) -> DiffEvidence:
+    common = ("--no-ext-diff", "--no-textconv", "--no-renames", base, head)
+    paths, total_files, outside_files, excluded_files = _scoped_tracked_paths(
+        repo, common, evidence_config
+    )
+    _scope_counts_eligibility(len(paths), outside_files)
+    if excluded_files:
+        raise GitFactsError(
+            "aggregate diff statistics include files excluded by the configured evidence scope"
+        )
+    if files_changed != total_files or files_changed != len(paths):
+        raise GitFactsError(
+            "aggregate changed_files does not match the exact prediction-time Git path manifest"
+        )
+    descriptor = _pack(pack, pack_version, pack_config)
+    if any(descriptor.content_path(path) for path in paths):
+        raise GitFactsError(
+            f"evidence pack {pack}@{pack_version} requires content unavailable in aggregate mode"
+        )
+    return DiffEvidence(
+        changes=tuple(FileChange(path=path, additions=0, deletions=0) for path in paths),
+        excluded_paths=(),
+        scope_total_files=total_files,
+        scope_outside_files=outside_files,
+        scope_excluded_files=excluded_files,
+        aggregate_additions=additions,
+        aggregate_deletions=deletions,
+        aggregate_files_changed=files_changed,
+        statistics_source=statistics_source,
     )
 
 
@@ -862,11 +1004,14 @@ def _observation(
     observation_id: str,
     source_kind: str,
     topological_index: int | None = None,
+    diff_evidence: DiffEvidence | None = None,
+    include_commit_metadata: bool = True,
+    observed_at_override: str | None = None,
 ) -> Observation:
     validate_predicate(target, field_name="target")
     descriptor = _pack(pack, pack_version, pack_config)
     legacy_v1 = pack == SUPPORTED_PACK and pack_version == 1
-    evidence = _read_diff(
+    evidence = diff_evidence or _read_diff(
         repo,
         base,
         head,
@@ -884,18 +1029,30 @@ def _observation(
         pack_config=pack_config,
         evidence_config=evidence_config,
     )
-    timestamp, message, message_hash, message_truncated = _commit_metadata(
-        repo,
-        head,
-        legacy_full_message=legacy_v1,
-    )
     metadata = result.metadata
-    metadata.update({"commit_timestamp": timestamp, "commit_message": message})
+    if include_commit_metadata:
+        timestamp, message, message_hash, message_truncated = _commit_metadata(
+            repo,
+            head,
+            legacy_full_message=legacy_v1,
+        )
+        metadata.update({"commit_timestamp": timestamp, "commit_message": message})
+        if not legacy_v1:
+            metadata.update(
+                {
+                    "commit_message_hash": message_hash,
+                    "commit_message_truncated": message_truncated,
+                }
+            )
+        observed_at = timestamp
+    else:
+        metadata["commit_metadata_available"] = False
+        if observed_at_override is None:
+            raise GitFactsError("observed_at is required when commit metadata is omitted")
+        observed_at = observed_at_override
     if not legacy_v1:
         metadata.update(
             {
-                "commit_message_hash": message_hash,
-                "commit_message_truncated": message_truncated,
                 "scope_include": list(evidence_config.include_paths),
                 "scope_exclude": list(evidence_config.exclude_paths),
             }
@@ -916,7 +1073,7 @@ def _observation(
         source["pack_config_hash"] = descriptor.configuration_hash
     return Observation(
         id=observation_id,
-        observed_at=timestamp,
+        observed_at=observed_at,
         protocol_hash=protocol_hash,
         facts=result.facts,
         labels={target: LabelValue.UNKNOWN},
@@ -939,6 +1096,7 @@ def collect_snapshot(
     evidence_config: EvidenceConfig | None = None,
     repository_id: str | None = None,
     include_topological_index: bool = True,
+    context: SnapshotRepositoryContext | None = None,
 ) -> Observation:
     """Collect one immutable observation for a committed ``base``/``head`` range.
 
@@ -951,9 +1109,24 @@ def collect_snapshot(
         raise GitFactsError("include_topological_index must be a boolean")
     _pack(pack, pack_version, pack_config)
     extraction = _evidence_profile(pack, pack_version, evidence_config)
-    root, repository_name = _repository(repo, repository_id)
-    base_commit = _resolve_diff_base(root, base)
-    head_commit = _resolve_commit(root, head)
+    if context is None:
+        root, repository_name = _repository(repo, repository_id)
+        base_commit = _resolve_diff_base(root, base)
+        head_commit = _resolve_commit(root, head)
+    else:
+        if repo.resolve() != context.root or repository_id != context.repository_id:
+            raise GitFactsError("snapshot repository context does not match this collection")
+        missing = [
+            object_id for object_id in (base, head) if object_id not in context.available_object_ids
+        ]
+        if missing:
+            raise GitFactsError(
+                "snapshot repository context lacks commit objects: " + ",".join(missing)
+            )
+        root = context.root
+        repository_name = context.repository_id
+        base_commit = base
+        head_commit = head
     digest = hashlib.sha256(f"{base_commit}\x00{head_commit}".encode()).hexdigest()[:20]
     return _observation(
         root,
@@ -971,6 +1144,105 @@ def collect_snapshot(
         topological_index=(
             _first_parent_position(root, head_commit) if include_topological_index else None
         ),
+    )
+
+
+def collect_snapshot_with_aggregate_stats(
+    repo: Path,
+    base: str,
+    head: str,
+    *,
+    additions: int,
+    deletions: int,
+    files_changed: int,
+    statistics_source: str,
+    observed_at: str,
+    protocol_hash: str,
+    target: str = "needs_extra_validation",
+    pack: str = DEFAULT_PACK,
+    pack_version: int = 1,
+    pack_config: ConfiguredPathsConfig | None = None,
+    evidence_config: EvidenceConfig | None = None,
+    repository_id: str | None = None,
+    context: SnapshotRepositoryContext | None = None,
+) -> Observation:
+    """Collect path facts without blobs, using point-in-time aggregate churn."""
+
+    if any(
+        isinstance(value, bool) or not isinstance(value, int) or value < 0
+        for value in (additions, deletions, files_changed)
+    ):
+        raise GitFactsError("aggregate diff statistics must be non-negative integers")
+    if not statistics_source or any(character in statistics_source for character in "\x00\r\n"):
+        raise GitFactsError("statistics_source must be a non-empty single-line string")
+    _pack(pack, pack_version, pack_config)
+    extraction = _evidence_profile(pack, pack_version, evidence_config)
+    if context is None:
+        root, repository_name = _repository(repo, repository_id)
+        base_commit = _resolve_diff_base(root, base)
+        head_commit = _resolve_commit(root, head)
+    else:
+        if repo.resolve() != context.root or repository_id != context.repository_id:
+            raise GitFactsError("snapshot repository context does not match this collection")
+        missing = [
+            object_id for object_id in (base, head) if object_id not in context.available_object_ids
+        ]
+        if missing:
+            raise GitFactsError(
+                "snapshot repository context lacks commit objects: " + ",".join(missing)
+            )
+        root = context.root
+        repository_name = context.repository_id
+        base_commit = base
+        head_commit = head
+    diff_base = _git(
+        root,
+        "merge-base",
+        base_commit,
+        head_commit,
+        allow_lazy_fetch=False,
+    ).strip()
+    if _FULL_OBJECT_ID_RE.fullmatch(diff_base) is None:
+        raise GitFactsError("Git returned an invalid merge base for aggregate snapshot")
+    evidence = _read_aggregate_diff(
+        root,
+        diff_base,
+        head_commit,
+        pack=pack,
+        pack_version=pack_version,
+        pack_config=pack_config,
+        evidence_config=extraction,
+        additions=additions,
+        deletions=deletions,
+        files_changed=files_changed,
+        statistics_source=statistics_source,
+    )
+    digest = hashlib.sha256(f"{base_commit}\x00{head_commit}".encode()).hexdigest()[:20]
+    observation = _observation(
+        root,
+        repository_name,
+        base=diff_base,
+        head=head_commit,
+        target=target,
+        protocol_hash=protocol_hash,
+        pack=pack,
+        pack_version=pack_version,
+        pack_config=pack_config,
+        evidence_config=extraction,
+        observation_id=f"range.{digest}",
+        source_kind="git_range",
+        topological_index=None,
+        diff_evidence=evidence,
+        include_commit_metadata=False,
+        observed_at_override=observed_at,
+    )
+    return replace(
+        observation,
+        source={
+            **observation.source,
+            "provider_base": base_commit,
+            "diff_base_kind": "merge_base",
+        },
     )
 
 

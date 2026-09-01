@@ -49,7 +49,9 @@
         "never_alert": {"$ref": "#/$defs/metrics"},
         "always_alert": {"$ref": "#/$defs/metrics"},
         "train_majority": {"$ref": "#/$defs/metrics"},
-        "best_single_literal": {"$ref": "#/$defs/metrics"}
+        "best_single_literal": {"$ref": "#/$defs/metrics"},
+        "size_only": {"$ref": "#/$defs/metrics"},
+        "logistic_regression_boolean_facts": {"$ref": "#/$defs/metrics"}
       }
     },
     "stability": {"type": "number", "minimum": 0, "maximum": 1},

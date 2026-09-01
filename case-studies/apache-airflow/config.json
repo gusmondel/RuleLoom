@@ -1,0 +1,118 @@
+{
+  "approved_dir": ".ruleloom/approved",
+  "candidates_dir": ".ruleloom/candidates",
+  "dataset": ".ruleloom/observations.jsonl",
+  "deprecated_dir": ".ruleloom/deprecated",
+  "evaluation": {
+    "min_test_examples": 4,
+    "min_train_examples": 8,
+    "seed": 17,
+    "test_fraction": 0.35,
+    "test_start_at": "2024-01-01T00:00:00Z"
+  },
+  "evidence": {
+    "exclude_paths": ["3rd-party-licenses/**", "generated/**"],
+    "include_paths": ["**"],
+    "large_change_churn": 99,
+    "metadata_file_limit": 512,
+    "multi_file_count": 4
+  },
+  "learner": {
+    "allow_negation": true,
+    "bootstrap_runs": 100,
+    "engine": "horn",
+    "false_positive_cost": 2.0,
+    "max_body": 3,
+    "max_predicates": 16,
+    "max_rules": 3,
+    "min_precision": 0.7,
+    "min_support": 10,
+    "popper_dir": null,
+    "popper_timeout_seconds": 120
+  },
+  "pack": "configured_paths",
+  "pack_config": {
+    "path_predicates": [
+      {
+        "exclude_paths": [],
+        "include_paths": ["airflow/api/**", "airflow/api_connexion/**", "airflow/api_internal/**"],
+        "predicate": "touches_api"
+      },
+      {
+        "exclude_paths": [],
+        "include_paths": ["clients/**"],
+        "predicate": "touches_clients"
+      },
+      {
+        "exclude_paths": [],
+        "include_paths": ["airflow/migrations/**"],
+        "predicate": "touches_database_migration"
+      },
+      {
+        "exclude_paths": [],
+        "include_paths": ["Dockerfile", "Dockerfile.ci", "docker-context-files/**", "docker_tests/**"],
+        "predicate": "touches_docker_runtime"
+      },
+      {
+        "exclude_paths": [],
+        "include_paths": ["chart/**", "helm_tests/**"],
+        "predicate": "touches_helm_chart"
+      },
+      {
+        "exclude_paths": [],
+        "include_paths": ["airflow/kubernetes/**", "kubernetes_tests/**"],
+        "predicate": "touches_kubernetes_runtime"
+      },
+      {
+        "exclude_paths": [],
+        "include_paths": ["airflow/providers/**"],
+        "predicate": "touches_provider"
+      },
+      {
+        "exclude_paths": [],
+        "include_paths": ["airflow/dag_processing/**", "airflow/executors/**", "airflow/jobs/**", "airflow/task/**"],
+        "predicate": "touches_scheduler_runtime"
+      },
+      {
+        "exclude_paths": [],
+        "include_paths": ["airflow/auth/**", "airflow/secrets/**", "airflow/security/**"],
+        "predicate": "touches_security_auth"
+      },
+      {
+        "exclude_paths": [],
+        "include_paths": ["airflow/www/**"],
+        "predicate": "touches_web_ui"
+      }
+    ]
+  },
+  "pack_version": 1,
+  "predictions": ".ruleloom/predictions.jsonl",
+  "project": "apache-airflow-public-case-study",
+  "promotion": {
+    "min_positive_for_approval": 50,
+    "min_positive_for_shadow": 20,
+    "min_shadow_days_for_approval": 7,
+    "min_shadow_matches_per_rule_for_approval": 10,
+    "min_shadow_mature_outcomes_for_approval": 30,
+    "min_shadow_mcc": 0.1,
+    "min_shadow_negative_outcomes_for_approval": 10,
+    "min_shadow_positive_outcomes_for_approval": 10,
+    "min_shadow_precision": 0.7,
+    "min_shadow_predictions_for_approval": 30,
+    "min_shadow_recall": 0.5,
+    "min_stability": 0.4,
+    "min_test_precision": 0.75,
+    "min_test_recall": 0.5,
+    "require_baseline_improvement": true,
+    "require_test_set": true
+  },
+  "protocol": {
+    "experiment_id": "apache-airflow-independent-review-v1",
+    "outcome_definition": "Independent reviewer submitted GitHub changes_requested after the exact opening snapshot and no later than merge",
+    "prediction_unit": "provider_change",
+    "repository_id": "repo.0538c0db65efd4c5330b"
+  },
+  "schema_version": 3,
+  "shadow_dir": ".ruleloom/shadow",
+  "target": "independent_review_changes_requested"
+}

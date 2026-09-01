@@ -51,10 +51,11 @@ record with the pilot artifacts if the repository owner's data policy permits it
 | Candidate origin | Learned from the locked training partition, or one explicit reviewed manual Horn seed; never describe the latter as learned |
 | Retrospective window | Oldest and newest eligible historical change |
 | Holdout rule | Latest chronological grouped changes, never random. In a raw-commit fallback, admit only one independently audited commit per real-world change or classify it as exploratory. |
+| Fixed holdout boundary | Optional aware `evaluation.test_start_at`; when preregistered, observations before it train and observations at/after it form holdout. Labels unavailable at that instant are embargoed from training. |
 | Confirmation window | Untouched future interval reserved for any design selected after exploratory analysis |
 | Primary predictive metric | Suggested: MCC for the promotion comparison; precision may be the operational priority when false prompts dominate cost |
 | Secondary metrics | Precision, recall, F1, balanced accuracy, prevalence, predicted-positive rate, coverage, confusion counts |
-| Baselines | Never alert, always alert, train-majority, and best train-selected single literal |
+| Baselines | Never alert, always alert, train-majority, fixed size-only, best train-selected single literal, and deterministic Boolean logistic regression |
 | Shadow duration | A time window and/or number of mature eligible changes |
 | Product outcome | One later workflow/quality measure for a controlled phase |
 | Cost guardrails | Latency, tokens, reviewer time, extra validations, false alarms |
@@ -374,7 +375,7 @@ ruleloom history materialize
 ruleloom history status
 ```
 
-The v0.7.0 archive adapter supports the explicit `github.com` host. By default it
+The v0.8.0 archive adapter supports the explicit `github.com` host. By default it
 requires `OWNER/NAME` to equal the repository parsed from an unambiguous
 public-GitHub HTTPS, SSH, or SCP-style `remote.origin.url`. A reviewed mirror or
 checkout without a verifiable matching origin requires
@@ -558,7 +559,7 @@ Export that record as an immutable normalized outcome event and import it with
 at least one positive, one mature negative, one conflict, and one correction
 against the source ledger.
 
-RuleLoom v0.7.0 ships a local GitHub Action/webhook capture substrate and bounded
+RuleLoom v0.8.0 ships a local GitHub Action/webhook capture substrate and bounded
 inbox ingestion, not a hosted App or durable observer daemon. Follow
 [`integrations/GITHUB-CAPTURE.md`](integrations/GITHUB-CAPTURE.md), preregister
 the strict label policy, and measure delivery and maturity coverage. Until a
@@ -747,7 +748,7 @@ For a learned candidate, the retrospective portion of the default `approved`
 gate expects at least 50 positives, a non-empty
 chronological test set, aggregate holdout precision at least 0.75, recall at
 least 0.50, stability at least 0.40, and holdout MCC strictly greater than the
-best of all four baselines. Approval of either a learned or manual candidate
+best of all registered baselines. Approval of either a learned or manual candidate
 also requires the exact prior shadow artifact and the following attributable
 prospective evidence:
 
@@ -1010,7 +1011,7 @@ Pause and repair instrumentation when:
 
 Keep RuleLoom in research-only shadow mode when:
 
-- its holdout MCC does not beat the best of the four registered baselines;
+- its holdout MCC does not beat the best registered baseline;
 - a separately pre-registered uncertainty analysis remains too inconclusive for
   a decision (the current CLI does not compute intervals itself);
 - stability is below the registered gate;

@@ -105,7 +105,8 @@ OS user.
     "test_fraction": 0.25,
     "min_train_examples": 8,
     "min_test_examples": 4,
-    "seed": 17
+    "seed": 17,
+    "test_start_at": "2025-01-01T00:00:00Z"
   },
   "promotion": {
     "min_test_precision": 0.75,
@@ -128,7 +129,7 @@ OS user.
 }
 ```
 
-Version 0.7.0 defaults to configuration schema v2 and the language-neutral
+Version 0.8.0 defaults to configuration schema v2 and the language-neutral
 `generic_changes@1` pack. It also ships schema-v3 `configured_paths@1` and
 `flutter_testing@2`. The frozen `flutter_testing@1` implementation exists
 only to read structurally and reproduce the hashes of historical configuration
@@ -142,6 +143,14 @@ exists only after loading one project's canonical `pack_config`. External
 executable plugins are not loaded in this release: adding a built-in language
 pack uses the same explicit contract and registry without changing learning,
 evaluation, or policy lifecycle code.
+
+`protocol.prediction_unit` accepts `git_commit`, `git_range`, `git_worktree`, or
+`provider_change`; the last value identifies one provider-grouped change whose
+exact snapshot is supplied by a point-in-time adapter. The optional aware
+`evaluation.test_start_at` freezes an exact chronological boundary: observations
+strictly before it are training candidates and observations at or after it are
+holdout candidates. When absent, `test_fraction` selects the latest fraction.
+In both cases, training labels unavailable at the holdout start are embargoed.
 
 `evidence.include_paths` and `exclude_paths` define one repository-relative
 scope per experiment. Change-size thresholds and the metadata preview limit are
@@ -248,12 +257,12 @@ Predicate-like fields start with a lowercase letter and contain lowercase ASCII
 letters, numbers, and underscores. `init` derives `repository_id` from
 `remote.origin.url`, or from root commits when no origin exists; initialization
 therefore requires an origin or at least one commit. The storage lock uses POSIX
-`fcntl`: version 0.7.0 supports macOS and Linux, not Windows.
+`fcntl`: version 0.8.0 supports macOS and Linux, not Windows.
 
 The built-in search also enforces finite operational bounds:
 `max_body` 1–4, `max_rules` 1–10, `max_predicates` 1–32,
 `bootstrap_runs` 0–100, and Popper timeout 1–3600 seconds, plus a combined
-hypothesis/work budget. For `engine="popper"`, version 0.7.0 requires
+hypothesis/work budget. For `engine="popper"`, version 0.8.0 requires
 `max_rules=1`, `bootstrap_runs=0`, and the Horn-specific support/precision/cost
 settings at their defaults. Popper is an offline adapter to an explicitly
 configured, already provisioned checkout; RuleLoom does not install it.
@@ -336,7 +345,7 @@ Each non-empty line in `.ruleloom/observations.jsonl` is one object:
 
 | Field | Type | Contract |
 |---|---|---|
-| `schema_version` | integer | Must be artifact schema `1` in version 0.7.0. |
+| `schema_version` | integer | Must be artifact schema `1` in version 0.8.0. |
 | `id` | string | Unique within the dataset; lowercase letters/numbers plus `.`, `_`, or `-`. |
 | `observed_at` | string | Decision-time timestamp with timezone; used for chronological splitting. |
 | `protocol_hash` | string | Lowercase SHA-256 of the configured evidence protocol; evidence with a different hash must not be pooled. |
@@ -375,6 +384,15 @@ For `configured_paths@1`, metadata additionally records
 `configured_match_manifest_hash`. These audit fields do not alter the fact
 vocabulary.
 
+For an amended provider experiment, extraction may instead combine exact path
+names enumerated from local Git trees with complete aggregate additions,
+deletions, and changed-file count captured at prediction time. It is accepted
+only when the provider count exactly equals the Git path manifest, no configured
+exclusion participated, scope is complete, and the pack does not require file
+contents. Metadata marks `file_churn_available=false`; per-file churn and entropy
+remain unavailable rather than being imputed. The aggregate source and values
+are included in the observation manifest and evidence provenance.
+
 Observation IDs identify immutable snapshots and cannot repeat. For prospective
 assessment, `source.change_id` is the stable independent-unit key: repeated
 snapshots of one PR/task/change reuse it, while unrelated changes must never do
@@ -388,7 +406,7 @@ then ID.
 
 First-parent order establishes ordering, not a valid decision point. A merge or
 squash may already contain validation added because of CI or review. Version
-0.7.0 therefore distinguishes raw `git_commit` evidence from grouped
+0.8.0 therefore distinguishes raw `git_commit` evidence from grouped
 `historical_change` observations. The latter bind one stable `change_id` to an
 exact `base_sha`, `prediction_sha`, and prediction time. Only a `rich` unit with
 a genuinely persisted point-in-time snapshot can be confirmatory. `git_only`
@@ -447,6 +465,25 @@ Provider collection does not fetch Git objects. Materialization needs each
 unit's `base_sha` and `prediction_sha` in the local object database and reports
 unavailable units through `skipped`, `skipped_preview`, and
 `skipped_manifest_hash`; those omissions belong in coverage reporting.
+
+The separate `ruleloom-github-event-archive/2` adapter imports a strict,
+manifest-bound projection of public `PullRequestEvent` and
+`PullRequestReviewEvent` records. It permits only opened/merged PR events and
+created approval/changes-requested decisions, binds the repository, numeric
+provider identity, time window, preregistration digest, query digest, and event
+digest. The exporter separately enumerates every expected source-wide UTC hour;
+the manifest records `coverage_query_sha256`, `expected_hours`,
+`observed_hours`, and the bounded, sorted `missing_hours` list. Endpoint
+freshness (`window_complete`) does not imply internal continuity. A negative is
+eligible only if no missing hour overlaps the interval after its opening became
+available and through its merge becoming available; otherwise it remains
+unknown. Observed positive decisions do not depend on absence and remain
+positive. The adapter rejects symlinks, oversized input, stale endpoints,
+inconsistent coverage counts, and unknown fields. Actor names are pseudonymized
+by the exporter before download; prose, labels, and source content are not
+accepted. This research adapter can derive the atomic
+`independent_review_changes_requested` target when the exact opening base/head
+and sufficient event evidence are present.
 
 `.ruleloom/history/events.jsonl` stores immutable `HistoricalEvent` objects:
 
@@ -519,9 +556,10 @@ is assembled. Streaming exporters should import early structural events with
 `--no-assemble`, then assemble once; the current schema does not mutate an open
 unit into finalized or upgrade `final_only` into `rich`.
 
-Four outcome targets remain separate:
+Five outcome targets remain separate:
 
 - `validation_rework_required`;
+- `independent_review_changes_requested`;
 - `change_attributable_ci_failure`;
 - `post_merge_revert_or_hotfix`; and
 - `post_merge_defect`.
@@ -564,7 +602,7 @@ identity, authorized independent actor, target, value, maturity/completeness,
 and correction provenance. Its adapter may emit an immutable normalized
 `change_finalized` event with explicit `target`, `value`, and
 `evidence_complete`; RuleLoom then applies the ordinary chronology, conflict,
-and atomic-target rules during import and materialization. RuleLoom v0.7.0 ships
+and atomic-target rules during import and materialization. RuleLoom v0.8.0 ships
 a local GitHub Action/webhook capture substrate for future deliveries. It does
 not reconstruct historical label names, run a durable observer daemon, or make
 automatic-label coverage claims without an operational audit.
@@ -610,7 +648,7 @@ only when `available_at` is strictly later than that unit's earliest
 `predicted_at` within the policy set.
 
 The same independent change must not appear on both sides of a retrospective
-split through multiple snapshots. Version 0.7.0 materializes one observation per
+split through multiple snapshots. Version 0.8.0 materializes one observation per
 `ChangeUnit`, and `learn` rejects duplicate mature `change_id` values. It also
 rejects mixing `git_commit` and `historical_change` cohorts. A raw commit cohort
 still needs manual independence auditing; grouped history is the preferred
@@ -628,7 +666,7 @@ Each `fact_evidence` entry contains:
 | `confidence` | number or absent | Optional value from 0 through 1, mainly for non-deterministic facts. |
 
 `agent`, `human`, and `imported` are reserved wire-format values for future
-extractors and migration tooling. In version 0.7.0, current built-in-pack
+extractors and migration tooling. In version 0.8.0, current built-in-pack
 observations are accepted for validation, learning, and prediction only when
 every fact has `kind: "deterministic"` and names the exact configured extractor.
 A record using a reserved non-deterministic kind may be read structurally, but
@@ -661,7 +699,7 @@ missing diff is extraction failure or ineligibility, never logical falsehood.
 
 ## Rule representation
 
-Version 0.7.0 is propositionalized ILP over one change at a time. Each fact is a
+Version 0.8.0 is propositionalized ILP over one change at a time. Each fact is a
 Boolean unary predicate of the same observation variable `A`; there are no
 multiple entity variables, relations between files/types/people, relational
 joins, recursion, predicate invention, or arbitrary Prolog programs. A rule set
@@ -770,7 +808,8 @@ Candidate {
   rules: RuleSet
   metrics: {train: Metrics, test: Metrics} | {historical: Metrics}
   baselines:
-    learned: {never_alert, always_alert, train_majority, best_single_literal}
+    learned: {never_alert, always_alert, train_majority, best_single_literal,
+              size_only, logistic_regression_boolean_facts}
     manual: {never_alert, always_alert}
   stability: number in [0, 1]
   train_ids: string[]
@@ -782,12 +821,16 @@ Candidate {
 ```
 
 All baseline metrics use the same chronological test IDs as the learned rule.
-`train_majority` and `best_single_literal` are selected using training data
-only; for a configured-path experiment, the single-literal search includes the
-dynamic configured predicates. Current metadata records readiness, the selected
-single literal, rule cards with support/counterexamples, and an evaluation object whose method is
-`temporal_holdout`, whose `test_start` is explicit, and whose
-`label_availability_enforced` flag is true.
+`train_majority`, `best_single_literal`, and the logistic threshold are selected
+using training data only; for a configured-path experiment, both train-selected
+models include dynamic configured predicates. `size_only` is the fixed rule
+`large_change OR multi_file_change`. The logistic model is deterministic,
+dependency-free, class-balanced, L2-regularized, and persists its ordered
+predicates, weights, intercept, fit parameters, and threshold in candidate
+metadata. Current metadata also records readiness, the selected single literal,
+rule cards with support/counterexamples, and an evaluation object whose method
+is `temporal_holdout`, whose effective and optional configured test starts are
+explicit, and whose `label_availability_enforced` flag is true.
 
 A manual candidate instead stores its immutable declaration and full post-hoc
 audit under metadata, uses `historical` metrics, and has no train/test split.
@@ -995,7 +1038,7 @@ eligible for prospective confusion metrics. `excluded_preexisting_outcome`
 prevents a retrospectively known answer from masquerading as a prediction. Use
 `report --policy-set <hash>` for the unwrapped single-policy report. The report
 describes aggregate prospective association, never a causal estimate; causal
-impact needs a randomized or pre-specified staged advisory rollout. Version 0.7.0
+impact needs a randomized or pre-specified staged advisory rollout. Version 0.8.0
 does not emit confidence intervals or per-clause prospective tables in this
 report. Promotion separately evaluates the registered Wilson lower-bound and
 per-clause gates described above.

@@ -12,7 +12,7 @@ claim keeps its point-in-time facts, later outcomes, chronological evaluation,
 and review state attached as evidence.
 
 > [!WARNING]
-> RuleLoom v0.7.0 is alpha research software. Start in blinded shadow mode. Do
+> RuleLoom v0.8.0 is alpha research software. Start in blinded shadow mode. Do
 > not use it as a merge gate, security control, or autonomous policy publisher.
 
 The core is language- and provider-neutral. Programming-language knowledge
@@ -23,6 +23,7 @@ only on persisted Boolean facts, timestamps, provenance, and stable change IDs.
 ## Table of contents
 
 - [Why RuleLoom](#why-ruleloom)
+- [Public evidence](#public-evidence)
 - [First-five-minute structural audit](#first-five-minute-structural-audit)
 - [What it does—and does not do](#what-it-doesand-does-not-do)
 - [How it works](#how-it-works)
@@ -69,6 +70,25 @@ required hosted RuleLoom service.
 The differentiator is not merely generating a rule; it is being able to answer
 “why did this guidance appear, what evidence supported it, and is it still
 holding?”
+
+## Public evidence
+
+The first preregistered public evaluation is a deliberately visible null result.
+On 6,314 Apache Airflow pull requests, 3,674 opening snapshots were safely
+materialized. The Horn learner found no qualifying rule and scored holdout MCC
+`0.000`; a supplementary Boolean logistic baseline scored `0.136`, still with
+only `0.159` precision. An exact hourly source audit found 42 missing GH Archive
+hours and conservatively reclassified every negative whose evidence interval
+crossed a gap. The frozen success criterion failed and no policy was
+promoted.
+
+That result is useful: it demonstrates that the ingestion and temporal
+evaluation path can run at repository scale while showing that coarse path
+predicates are insufficient for this review target. It also exposes a
+statistically detectable materialization-retention difference between positive
+and negative units. Read the protocol, cohort flow, exact hashes, metrics, and
+limitations in the
+[Apache Airflow case study](case-studies/apache-airflow/README.md).
 
 ## First-five-minute structural audit
 
@@ -139,7 +159,7 @@ RuleLoom does not:
 - infer a negative outcome merely because no failure was recorded;
 - interpret `AGENTS.md`, `CLAUDE.md`, issue text, review prose, or ordinary
   GitHub labels as rules or outcomes;
-- invent or activate new predicates in v0.7.0;
+- invent or activate new predicates in v0.8.0;
 - implement full relational ILP with joins, recursion, entity variables, or
   unrestricted predicate invention;
 - automatically fetch data from every forge or project-management provider.
@@ -197,7 +217,7 @@ Requirements:
 - Git;
 - the authenticated GitHub CLI (`gh`) only when using
   `history import-github`;
-- macOS or Linux. v0.7.0 uses POSIX `fcntl` locking and does not support
+- macOS or Linux. v0.8.0 uses POSIX `fcntl` locking and does not support
   Windows.
 
 From a checkout:
@@ -387,7 +407,7 @@ An LLM may inspect outcome-blind repository structure, architecture documents,
 and this audit to propose candidate concepts. It cannot activate them: a human
 must review the semantics, deterministic extraction must verify them, and the
 new vocabulary must be frozen before outcomes are opened. RuleLoom does not
-perform automatic predicate invention in v0.7.0.
+perform automatic predicate invention in v0.8.0.
 
 If an existing convention can already be expressed using the frozen predicate
 vocabulary, encode it explicitly rather than asking RuleLoom to parse prose.
@@ -445,7 +465,7 @@ or SCP-style `remote.origin.url`. A reviewed mirror or checkout whose origin
 cannot establish that equality requires the explicit
 `--allow-unverified-repository` override;
 the report records `repository_binding` and the manifest hash binds that choice.
-The archive adapter does not support a GitHub Enterprise host in v0.7.0.
+The archive adapter does not support a GitHub Enterprise host in v0.8.0.
 
 `--since` filters PRs by `created_at` and also bounds the repository-commit scan.
 `--until` is an inclusive as-of cutoff for PR creation and finalization and for
@@ -506,10 +526,43 @@ or append-only adjudication ledger captured the label application point-in-time
 and can emit a normalized immutable outcome event with its original timestamp,
 target, value, evidence completeness, and independent provenance. Import that
 event through `ruleloom history import`; retain and audit the external source.
-RuleLoom v0.7.0 ships the local point-in-time Action/webhook capture substrate
+RuleLoom v0.8.0 ships the local point-in-time Action/webhook capture substrate
 described above. The archive adapter itself still produces no strong outcome
 from label names and cannot upgrade an existing exploratory `git_only` unit;
 start a clean experiment for point-in-time capture of that change.
+
+For reproducible research on a public GitHub repository, v0.8 also includes a
+strict GH Archive projection. The standalone exporter queries only opened,
+merged, approved, and changes-requested event fields, hashes actor identities
+before download, audits every expected source hour, and binds the result to a
+collection manifest and a preregistration hash:
+
+```bash
+python /path/to/RuleLoom/scripts/export_gharchive_clickhouse.py OWNER/NAME \
+  --provider-repository-id 123456 \
+  --since 2024-01-01T00:00:00Z \
+  --until 2025-01-01T00:00:00Z \
+  --preregistration-sha256 <64-hex-digest> \
+  --events /absolute/path/events.jsonl \
+  --manifest /absolute/path/manifest.json
+
+ruleloom history import-github-event-archive \
+  --events /absolute/path/events.jsonl \
+  --manifest /absolute/path/manifest.json
+```
+
+This adapter is deliberately not a universal GitHub importer. It supports the
+atomic `independent_review_changes_requested` research target and requires an
+exact opening base/head snapshot. Endpoint freshness and internal source
+continuity are separate: a missing source hour makes a would-be negative
+unknown whenever that hour overlaps its post-opening, pre-merge evidence
+interval. Observed positive events remain positive. The optional
+`fetch_github_pull_refs.py`
+helper fetches bounded public PR refs without checkout or code execution;
+materialization still abstains on missing objects, incomplete aggregates,
+path-count disagreement, mixed scope, or configured exclusions. See the public
+[Airflow reproduction](case-studies/apache-airflow/README.md) before designing a
+new protocol.
 
 For another provider, export review, CI, change-snapshot, revert, and incident
 data into the normalized JSONL contract, then import it:
@@ -568,9 +621,10 @@ ruleloom history materialize \
   --outcome-target validation_rework_required
 ```
 
-The four historical targets are deliberately separate:
+The five historical targets are deliberately separate:
 
 - `validation_rework_required`;
+- `independent_review_changes_requested`;
 - `change_attributable_ci_failure`;
 - `post_merge_revert_or_hotfix`;
 - `post_merge_defect`.
@@ -590,6 +644,12 @@ ruleloom candidate list
 ruleloom candidate show <candidate-id>
 ```
 
+By default the holdout is the latest configured fraction. A preregistered
+experiment can instead set the optional aware timestamp
+`evaluation.test_start_at` in `.ruleloom/config.json`; observations before it
+form training and observations at or after it form holdout. Labels unavailable
+at the holdout boundary are embargoed from training.
+
 Learning from `git_commit` and `historical_change` observations cannot be mixed
 in one candidate. Historical learning enforces one labeled observation per
 stable `change_id`. Predictive predicate ranking and rule search use only the
@@ -599,6 +659,13 @@ observed excluded constant and alias. Declared predicates that never occur are
 reported by the separate outcome-blind audit. The later chronological holdout
 evaluates that frozen selection—even if aliases diverge there—and never chooses
 predicates, thresholds, or rules.
+
+Every learned candidate is compared on the same holdout with never alert,
+always alert, train-majority, the best train-selected literal, a fixed
+`large_change OR multi_file_change` baseline, and a deterministic class-balanced
+Boolean logistic baseline. Baseline model parameters and the train-selected
+threshold are stored in candidate metadata. Baselines diagnose whether ILP adds
+value; they are not eligible policies.
 
 If the repository already has a reviewed engineering assertion, translate it
 explicitly into a strict JSON manifest instead of asking RuleLoom to interpret

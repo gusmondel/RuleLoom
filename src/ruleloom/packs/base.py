@@ -43,6 +43,34 @@ class DiffEvidence:
     scope_total_files: int | None = None
     scope_outside_files: int = 0
     scope_excluded_files: int = 0
+    aggregate_additions: int | None = None
+    aggregate_deletions: int | None = None
+    aggregate_files_changed: int | None = None
+    statistics_source: str | None = None
+
+    def __post_init__(self) -> None:
+        aggregate = (
+            self.aggregate_additions,
+            self.aggregate_deletions,
+            self.aggregate_files_changed,
+        )
+        if any(value is not None for value in aggregate):
+            if not all(
+                isinstance(value, int) and not isinstance(value, bool) for value in aggregate
+            ):
+                raise ValueError("aggregate diff statistics must all be integers")
+            additions, deletions, files_changed = aggregate
+            assert additions is not None and deletions is not None and files_changed is not None
+            if additions < 0 or deletions < 0 or files_changed < 0:
+                raise ValueError("aggregate diff statistics cannot be negative")
+            if files_changed != len(self.changes):
+                raise ValueError("aggregate files_changed must match the exact path manifest")
+            if any(change.churn for change in self.changes):
+                raise ValueError("aggregate diff statistics require path-only FileChange records")
+            if not self.statistics_source:
+                raise ValueError("aggregate diff statistics require a statistics_source")
+        elif self.statistics_source is not None:
+            raise ValueError("statistics_source requires complete aggregate diff statistics")
 
 
 @dataclass(frozen=True, slots=True)
@@ -210,8 +238,18 @@ def finalize_extraction(
 
     visible = tuple(change for change in evidence.changes if not is_internal_path(change.path))
     paths = [change.path for change in visible]
-    additions = sum(change.additions for change in visible)
-    deletions = sum(change.deletions for change in visible)
+    aggregate_statistics = evidence.aggregate_additions is not None
+    additions = (
+        evidence.aggregate_additions
+        if aggregate_statistics
+        else sum(change.additions for change in visible)
+    )
+    deletions = (
+        evidence.aggregate_deletions
+        if aggregate_statistics
+        else sum(change.deletions for change in visible)
+    )
+    assert additions is not None and deletions is not None
     churn = additions + deletions
     mutable_reasons = {fact: set(items) for fact, items in reasons.items()}
 
@@ -230,7 +268,9 @@ def finalize_extraction(
             f"files:{len(visible)}>={options.multi_file_count}",
         )
 
-    entropy, normalized_entropy = _entropy([change.churn for change in visible])
+    entropy, normalized_entropy = (
+        (None, None) if aggregate_statistics else _entropy([change.churn for change in visible])
+    )
     ordered = sorted(visible, key=lambda item: item.path)
     sample: list[FileChange] = []
     sampled_path_bytes = 0
@@ -248,6 +288,21 @@ def finalize_extraction(
         manifest.update(
             json.dumps(
                 [change.path, change.additions, change.deletions],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        )
+        manifest.update(b"\n")
+    if aggregate_statistics:
+        manifest.update(
+            json.dumps(
+                [
+                    "aggregate",
+                    additions,
+                    deletions,
+                    evidence.aggregate_files_changed,
+                    evidence.statistics_source,
+                ],
                 ensure_ascii=False,
                 separators=(",", ":"),
             ).encode("utf-8")
@@ -280,7 +335,11 @@ def finalize_extraction(
         "normalized_change_entropy": normalized_entropy,
         "change_manifest_hash": manifest_hash,
         "changed_files": [change.path for change in sample],
-        "file_churn": cast_json({change.path: change.churn for change in sample}),
+        "file_churn": (
+            None
+            if aggregate_statistics
+            else cast_json({change.path: change.churn for change in sample})
+        ),
         "metadata_files_truncated": len(ordered) - len(sample),
         "metadata_path_bytes": sampled_path_bytes,
         "excluded_internal_files": len(internal_paths),
@@ -296,6 +355,9 @@ def finalize_extraction(
                 "scope_excluded_files": evidence.scope_excluded_files,
             }
         )
+    if aggregate_statistics:
+        metadata["statistics_source"] = evidence.statistics_source
+        metadata["file_churn_available"] = False
     provenance = {
         fact: FactEvidence(
             kind="deterministic",

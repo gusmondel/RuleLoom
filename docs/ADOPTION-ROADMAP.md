@@ -89,7 +89,9 @@ Acceptance targets:
    measure the eligible-change consultation rate.
 2. A preregistered public case study compares RuleLoom with never/always alert,
    train-majority, size-only, best-single-predicate, and a simple statistical
-   baseline on a chronological holdout. A negative result is still publishable.
+   baseline on a chronological holdout. This gate is complete: the
+   [Apache Airflow null result](../case-studies/apache-airflow/RESULTS.md) is
+   published and no policy was promoted.
 3. A versioned scalable ledger replaces the 64 MiB sorted-JSONL boundary only
    after migration, canonical-export, recovery, concurrency, and million-record
    gates pass. SQLite/WAL and segmented JSONL remain candidates; Parquet/DuckDB

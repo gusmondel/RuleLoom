@@ -661,12 +661,17 @@ def test_learner_config_rejects_unsafe_search_profiles(
 
 
 def test_protocol_evaluation_and_promotion_configs_are_strict() -> None:
+    assert ProtocolConfig(prediction_unit="provider_change").prediction_unit == "provider_change"
     with pytest.raises(ModelError, match="prediction_unit"):
         ProtocolConfig(prediction_unit="pull_request")
     with pytest.raises(ModelError, match="outcome_definition"):
         ProtocolConfig(outcome_definition="bad\nline")
     with pytest.raises(ModelError, match="minimum sizes"):
         EvaluationConfig(min_train_examples=1)
+    with pytest.raises(ModelError, match="timezone"):
+        EvaluationConfig(test_start_at="2025-01-01")
+    fixed = EvaluationConfig(test_start_at="2025-01-01T00:00:00Z")
+    assert EvaluationConfig.from_dict(fixed.to_dict()) == fixed
     with pytest.raises(ModelError, match="min_shadow_mcc"):
         PromotionConfig(min_shadow_mcc=2)
     with pytest.raises(ModelError, match="min_shadow_predictions"):

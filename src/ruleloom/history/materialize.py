@@ -9,7 +9,13 @@ from pathlib import Path
 from typing import cast
 
 from ruleloom.config import RuleLoomConfig
-from ruleloom.gitfacts import GitFactsError, collect_snapshot
+from ruleloom.gitfacts import (
+    GitFactsError,
+    SnapshotRepositoryContext,
+    collect_snapshot,
+    collect_snapshot_with_aggregate_stats,
+    prepare_snapshot_repository,
+)
 from ruleloom.history.models import ChangeUnit, HistoricalEvent
 from ruleloom.history.outcomes import (
     ATOMIC_OUTCOME_TARGETS,
@@ -35,6 +41,9 @@ from ruleloom.models import (
 
 _MAX_SKIP_PREVIEW = 50
 _TARGET_ALIASES = {"needs_extra_validation": VALIDATION_REWORK_REQUIRED}
+_EVENT_ARCHIVE_ADAPTER_V2 = "ruleloom-github-event-archive/2"
+
+AggregateDiffStatistics = tuple[int, int, int, str]
 
 
 @dataclass(frozen=True, slots=True)
@@ -46,6 +55,7 @@ class MaterializationReport:
     unknown: int
     confirmatory: int
     skipped: int
+    skipped_by_reason: tuple[tuple[str, int], ...]
     skipped_preview: tuple[tuple[str, str], ...]
     outcome_target: str
     weak_evidence_enabled: bool
@@ -61,6 +71,7 @@ class MaterializationReport:
             "confirmatory": self.confirmatory,
             "exploratory": len(self.observations) - self.confirmatory,
             "skipped": self.skipped,
+            "skipped_by_reason": dict(self.skipped_by_reason),
             "skipped_preview": [list(item) for item in self.skipped_preview],
             "outcome_target": self.outcome_target,
             "weak_evidence_enabled": self.weak_evidence_enabled,
@@ -95,20 +106,44 @@ def _historical_observation(
     outcome_target: str,
     event_manifest_hash: str,
     weak_evidence_enabled: bool,
+    aggregate_statistics: AggregateDiffStatistics | None,
+    repository_context: SnapshotRepositoryContext,
 ) -> Observation:
-    snapshot = collect_snapshot(
-        root,
-        unit.base_sha,
-        unit.prediction_sha,
-        protocol_hash=config.evidence_protocol_hash,
-        target=config.target,
-        pack=config.pack,
-        pack_version=config.pack_version,
-        pack_config=config.pack_config,
-        evidence_config=config.evidence,
-        repository_id=config.protocol.repository_id,
-        include_topological_index=False,
-    )
+    if aggregate_statistics is None:
+        snapshot = collect_snapshot(
+            root,
+            unit.base_sha,
+            unit.prediction_sha,
+            protocol_hash=config.evidence_protocol_hash,
+            target=config.target,
+            pack=config.pack,
+            pack_version=config.pack_version,
+            pack_config=config.pack_config,
+            evidence_config=config.evidence,
+            repository_id=config.protocol.repository_id,
+            include_topological_index=False,
+            context=repository_context,
+        )
+    else:
+        additions, deletions, files_changed, statistics_source = aggregate_statistics
+        snapshot = collect_snapshot_with_aggregate_stats(
+            root,
+            unit.base_sha,
+            unit.prediction_sha,
+            additions=additions,
+            deletions=deletions,
+            files_changed=files_changed,
+            statistics_source=statistics_source,
+            observed_at=unit.prediction_at,
+            protocol_hash=config.evidence_protocol_hash,
+            target=config.target,
+            pack=config.pack,
+            pack_version=config.pack_version,
+            pack_config=config.pack_config,
+            evidence_config=config.evidence,
+            repository_id=config.protocol.repository_id,
+            context=repository_context,
+        )
     evidence = derivation.evidence
     label = derivation.value
     warnings: list[str] = []
@@ -157,6 +192,52 @@ def _historical_observation(
         source=source,
         metadata=metadata,
     )
+
+
+def _aggregate_diff_statistics(
+    unit: ChangeUnit,
+    events: tuple[HistoricalEvent, ...],
+) -> AggregateDiffStatistics | None:
+    snapshots = [
+        event
+        for event in events
+        if event.kind == "change_snapshot"
+        and event.data.get("base_sha") == unit.base_sha
+        and event.data.get("head_sha") == unit.prediction_sha
+    ]
+    if len(snapshots) != 1 or snapshots[0].data.get("adapter") != _EVENT_ARCHIVE_ADAPTER_V2:
+        return None
+    raw = snapshots[0].data.get("diff_statistics")
+    if not isinstance(raw, dict):
+        raise ModelError("event-archive v2 prediction snapshot lacks diff_statistics")
+    expected = {"additions", "deletions", "files_changed", "complete", "source"}
+    if set(raw) != expected:
+        raise ModelError("event-archive v2 diff_statistics has an invalid schema")
+    complete = raw.get("complete")
+    if not isinstance(complete, bool):
+        raise ModelError("event-archive v2 diff_statistics.complete must be a boolean")
+    if not complete:
+        return None
+    values = (raw.get("additions"), raw.get("deletions"), raw.get("files_changed"))
+    if any(isinstance(value, bool) or not isinstance(value, int) or value < 0 for value in values):
+        raise ModelError("event-archive v2 diff statistics must be non-negative integers")
+    source = raw.get("source")
+    if source != "github_event_archive_opened_event":
+        raise ModelError("event-archive v2 diff statistics has an unexpected source")
+    additions, deletions, files_changed = cast(tuple[int, int, int], values)
+    return additions, deletions, files_changed, source
+
+
+def _skip_reason_code(reason: str) -> str:
+    if reason.startswith("missing local Git commit objects:"):
+        return "missing_commit_objects"
+    if reason.startswith("aggregate changed_files does not match"):
+        return "aggregate_path_count_mismatch"
+    if reason.startswith("aggregate diff statistics include files excluded"):
+        return "aggregate_scope_exclusions"
+    if "configured evidence scope" in reason:
+        return "ineligible_evidence_scope"
+    return "git_evidence_error"
 
 
 def validate_materialized_outcome(
@@ -256,11 +337,27 @@ def materialize_history(
     )
     observations: list[Observation] = []
     skipped_preview: list[tuple[str, str]] = []
+    skipped_by_reason: dict[str, int] = defaultdict(int)
     skipped_manifest = hashlib.sha256()
     counts = {LabelValue.POSITIVE: 0, LabelValue.NEGATIVE: 0, LabelValue.UNKNOWN: 0}
     ordered_units = sorted(
         unit_values, key=lambda item: (parse_timestamp(item.prediction_at), item.id)
     )
+    required_objects = tuple(
+        sorted(
+            {
+                object_id
+                for unit in ordered_units
+                for object_id in (unit.base_sha, unit.prediction_sha)
+            }
+        )
+    )
+    repository_context = prepare_snapshot_repository(
+        root,
+        config.protocol.repository_id,
+        required_objects,
+    )
+    missing_objects = repository_context.missing_object_ids
     for unit in ordered_units:
         linked = {
             event.id: event for event in events_by_change.get((unit.repository_id, unit.id), ())
@@ -280,6 +377,21 @@ def materialize_history(
             selected_target,
             include_weak=include_weak,
         )
+        unit_missing = tuple(
+            object_id
+            for object_id in (unit.base_sha, unit.prediction_sha)
+            if object_id in missing_objects
+        )
+        if unit_missing:
+            reason = "missing local Git commit objects: " + ",".join(unit_missing)
+            skipped_by_reason[_skip_reason_code(reason)] += 1
+            skipped_manifest.update(unit.id.encode())
+            skipped_manifest.update(b"\x00")
+            skipped_manifest.update(reason.encode())
+            skipped_manifest.update(b"\n")
+            if len(skipped_preview) < _MAX_SKIP_PREVIEW:
+                skipped_preview.append((unit.id, reason))
+            continue
         try:
             observation = _historical_observation(
                 root,
@@ -289,9 +401,12 @@ def materialize_history(
                 outcome_target=selected_target,
                 event_manifest_hash=unit_event_manifest_hash,
                 weak_evidence_enabled=include_weak,
+                aggregate_statistics=_aggregate_diff_statistics(unit, unit_events),
+                repository_context=repository_context,
             )
         except GitFactsError as exc:
             reason = str(exc)
+            skipped_by_reason[_skip_reason_code(reason)] += 1
             skipped_manifest.update(unit.id.encode())
             skipped_manifest.update(b"\x00")
             skipped_manifest.update(reason.encode())
@@ -321,6 +436,7 @@ def materialize_history(
         unknown=counts[LabelValue.UNKNOWN],
         confirmatory=sum(item.source.get("confirmatory") is True for item in observations),
         skipped=len(unit_values) - len(observations),
+        skipped_by_reason=tuple(sorted(skipped_by_reason.items())),
         skipped_preview=tuple(skipped_preview),
         outcome_target=selected_target,
         weak_evidence_enabled=include_weak,

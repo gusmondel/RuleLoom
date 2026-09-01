@@ -14,6 +14,7 @@ from ruleloom.models import (
     JsonObject,
     ModelError,
     content_hash,
+    parse_timestamp,
     strict_json_loads,
     validate_predicate,
     validate_subject,
@@ -228,26 +229,38 @@ class EvaluationConfig:
     min_train_examples: int = 8
     min_test_examples: int = 4
     seed: int = 17
+    test_start_at: str | None = None
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.test_fraction) or not 0 < self.test_fraction < 1:
             raise ModelError("evaluation.test_fraction must be strictly between 0 and 1")
         if self.min_train_examples < 2 or self.min_test_examples < 1:
             raise ModelError("evaluation minimum sizes are invalid")
+        if self.test_start_at is not None:
+            parse_timestamp(self.test_start_at)
 
     def to_dict(self) -> JsonObject:
-        return {
+        value: JsonObject = {
             "test_fraction": self.test_fraction,
             "min_train_examples": self.min_train_examples,
             "min_test_examples": self.min_test_examples,
             "seed": self.seed,
         }
+        if self.test_start_at is not None:
+            value["test_start_at"] = self.test_start_at
+        return value
 
     @classmethod
     def from_dict(cls, value: dict[str, object]) -> EvaluationConfig:
         _reject_unknown(
             value,
-            {"test_fraction", "min_train_examples", "min_test_examples", "seed"},
+            {
+                "test_fraction",
+                "min_train_examples",
+                "min_test_examples",
+                "seed",
+                "test_start_at",
+            },
             "evaluation",
         )
         return cls(
@@ -268,6 +281,11 @@ class EvaluationConfig:
                 minimum=1,
             ),
             seed=_integer(value.get("seed", 17), "evaluation.seed"),
+            test_start_at=(
+                _string(value["test_start_at"], "evaluation.test_start_at")
+                if "test_start_at" in value
+                else None
+            ),
         )
 
 
@@ -285,9 +303,15 @@ class ProtocolConfig:
     def __post_init__(self) -> None:
         validate_subject(self.experiment_id)
         validate_subject(self.repository_id)
-        if self.prediction_unit not in {"git_commit", "git_range", "git_worktree"}:
+        if self.prediction_unit not in {
+            "git_commit",
+            "git_range",
+            "git_worktree",
+            "provider_change",
+        }:
             raise ModelError(
-                "protocol.prediction_unit must be git_commit, git_range, or git_worktree"
+                "protocol.prediction_unit must be git_commit, git_range, git_worktree, "
+                "or provider_change"
             )
         if (
             not self.outcome_definition.strip()

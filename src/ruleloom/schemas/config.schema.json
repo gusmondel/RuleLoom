@@ -50,7 +50,9 @@
       "properties": {
         "experiment_id": {"$ref": "#/$defs/subject"},
         "repository_id": {"$ref": "#/$defs/subject"},
-        "prediction_unit": {"enum": ["git_commit", "git_range", "git_worktree"]},
+        "prediction_unit": {
+          "enum": ["git_commit", "git_range", "git_worktree", "provider_change"]
+        },
         "outcome_definition": {
           "type": "string",
           "minLength": 1,
@@ -161,7 +163,8 @@
         },
         "min_train_examples": {"type": "integer", "minimum": 2},
         "min_test_examples": {"type": "integer", "minimum": 1},
-        "seed": {"type": "integer", "minimum": 0}
+        "seed": {"type": "integer", "minimum": 0},
+        "test_start_at": {"type": "string", "format": "date-time"}
       }
     },
     "promotion": {

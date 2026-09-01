@@ -1,0 +1,256 @@
+{
+  "schema_version": 1,
+  "experiment_id": "apache-airflow-independent-review-v1",
+  "status": "preregistered_before_target_association",
+  "selection": {
+    "rubric": {
+      "temporal_event_availability": 30,
+      "observable_outcome_density": 25,
+      "processing_cost": 20,
+      "pull_request_commit_mapping": 15,
+      "structural_diversity": 5,
+      "license_and_reproducibility": 5
+    },
+    "candidates": [
+      {
+        "repository": "apache/airflow",
+        "score": 89,
+        "decision": "selected"
+      },
+      {
+        "repository": "home-assistant/core",
+        "score": 86,
+        "decision": "rejected_processing_cost"
+      },
+      {
+        "repository": "astral-sh/ruff",
+        "score": 83,
+        "decision": "rejected_sparse_formal_review_outcomes"
+      },
+      {
+        "repository": "pytest-dev/pytest",
+        "score": 81,
+        "decision": "rejected_lower_positive_density"
+      },
+      {
+        "repository": "pydantic/pydantic",
+        "score": 79,
+        "decision": "rejected_lower_positive_density"
+      },
+      {
+        "repository": "kubernetes/kubernetes",
+        "score": 72,
+        "decision": "rejected_processing_and_provider_specificity"
+      }
+    ]
+  },
+  "repository": {
+    "provider": "github",
+    "full_name": "apache/airflow",
+    "provider_repository_id": 33884891,
+    "default_branch": "main",
+    "collection_cutoff_revision": "93e6f0070aa4d295f348912c10037be63c419e0f",
+    "collection_cutoff": "2024-06-01T00:00:00Z",
+    "license": "Apache-2.0"
+  },
+  "collection": {
+    "source": "GH Archive projected through the public ClickHouse github_events table",
+    "adapter": "ruleloom-github-event-archive/1",
+    "exporter": "ruleloom-gharchive-clickhouse/1",
+    "start_inclusive": "2023-02-01T00:00:00Z",
+    "end_exclusive": "2024-06-01T00:00:00Z",
+    "allowed_event_types": [
+      "PullRequestEvent",
+      "PullRequestReviewEvent"
+    ],
+    "allowed_pull_actions": [
+      "opened",
+      "merged"
+    ],
+    "allowed_review_actions": [
+      "created"
+    ],
+    "allowed_review_states": [
+      "approved",
+      "changes_requested"
+    ],
+    "prohibited_fields": [
+      "account_login",
+      "body",
+      "labels",
+      "path",
+      "review_body",
+      "title"
+    ],
+    "known_source_limitation": "The public ClickHouse copy has a gap after early June 2024 until September 2025; the frozen window ends before that gap.",
+    "bigquery_alternative_dry_run_bytes": 6675979890708
+  },
+  "target": {
+    "name": "independent_review_changes_requested",
+    "atomic_definition": "Whether an independent reviewer submitted GitHub's structured changes_requested decision after the prediction snapshot and no later than merge.",
+    "positive": "At least one point-in-time review event has decision=changes_requested and reviewer pseudonym different from the opening author pseudonym.",
+    "negative": "The complete event window contains a merge after at least one independent approval and contains no independent changes_requested review before merge.",
+    "unknown": "Missing opening snapshot, missing merge, no independent formal review, incomplete window, ambiguous identity, malformed event, event at or before prediction availability, or any conflicting evidence."
+  },
+  "unit": {
+    "name": "github_pull_request_opening_snapshot",
+    "grouping": "One public GitHub pull request number in apache/airflow.",
+    "prediction_point": "The conservative archive availability time of the opened event, rounded by the exporter to no earlier than the end of its GH Archive hour.",
+    "base": "pull_request.base.sha from the opened event",
+    "head": "pull_request.head.sha from the opened event",
+    "force_push_policy": "The opening SHA remains the prediction snapshot; later heads cannot replace it. Missing Git objects cause abstention from materialization."
+  },
+  "vocabulary": {
+    "pack": "configured_paths",
+    "pack_version": 1,
+    "design_source": "Outcome-blind apache/airflow tree at the frozen cutoff revision plus opening-event size fields.",
+    "large_change_churn": 99,
+    "multi_file_count": 4,
+    "threshold_rationale": "Exact 75th percentiles of additions+deletions and changed_files across 6314 opening events in the frozen collection window; one of 6314 rows lacked size fields and was ignored for threshold estimation.",
+    "include_paths": [
+      "**"
+    ],
+    "exclude_paths": [
+      "3rd-party-licenses/**",
+      "generated/**"
+    ],
+    "path_predicates": [
+      {
+        "predicate": "touches_api",
+        "include_paths": [
+          "airflow/api/**",
+          "airflow/api_connexion/**",
+          "airflow/api_internal/**"
+        ],
+        "exclude_paths": []
+      },
+      {
+        "predicate": "touches_clients",
+        "include_paths": [
+          "clients/**"
+        ],
+        "exclude_paths": []
+      },
+      {
+        "predicate": "touches_database_migration",
+        "include_paths": [
+          "airflow/migrations/**"
+        ],
+        "exclude_paths": []
+      },
+      {
+        "predicate": "touches_docker_runtime",
+        "include_paths": [
+          "Dockerfile",
+          "Dockerfile.ci",
+          "docker-context-files/**",
+          "docker_tests/**"
+        ],
+        "exclude_paths": []
+      },
+      {
+        "predicate": "touches_helm_chart",
+        "include_paths": [
+          "chart/**",
+          "helm_tests/**"
+        ],
+        "exclude_paths": []
+      },
+      {
+        "predicate": "touches_kubernetes_runtime",
+        "include_paths": [
+          "airflow/kubernetes/**",
+          "kubernetes_tests/**"
+        ],
+        "exclude_paths": []
+      },
+      {
+        "predicate": "touches_provider",
+        "include_paths": [
+          "airflow/providers/**"
+        ],
+        "exclude_paths": []
+      },
+      {
+        "predicate": "touches_scheduler_runtime",
+        "include_paths": [
+          "airflow/dag_processing/**",
+          "airflow/executors/**",
+          "airflow/jobs/**",
+          "airflow/task/**"
+        ],
+        "exclude_paths": []
+      },
+      {
+        "predicate": "touches_security_auth",
+        "include_paths": [
+          "airflow/auth/**",
+          "airflow/secrets/**",
+          "airflow/security/**"
+        ],
+        "exclude_paths": []
+      },
+      {
+        "predicate": "touches_web_ui",
+        "include_paths": [
+          "airflow/www/**"
+        ],
+        "exclude_paths": []
+      }
+    ]
+  },
+  "learner": {
+    "engine": "horn",
+    "max_body": 3,
+    "max_rules": 3,
+    "allow_negation": true,
+    "min_precision": 0.7,
+    "min_support": 10,
+    "false_positive_cost": 2.0,
+    "bootstrap_runs": 100,
+    "max_predicates": 16
+  },
+  "evaluation": {
+    "ordering": "chronological_by_prediction_time_with_label_availability_embargo",
+    "training_window": "2023-02-01T00:00:00Z through 2023-12-31T23:59:59Z",
+    "holdout_window": "2024-01-01T00:00:00Z through 2024-05-31T23:59:59Z",
+    "test_fraction": 0.35,
+    "primary_metric": "mcc",
+    "secondary_metrics": [
+      "precision",
+      "recall",
+      "f1",
+      "balanced_accuracy",
+      "alert_rate",
+      "coverage"
+    ],
+    "baselines": [
+      "never_alert",
+      "always_alert",
+      "train_majority",
+      "size_only",
+      "best_train_selected_literal",
+      "logistic_regression_boolean_facts"
+    ],
+    "success_criterion": "Holdout MCC strictly exceeds every frozen baseline, holdout precision is at least 0.70, alert rate is at most 0.20, and both train and holdout contain at least 20 positive and 20 negative mature units.",
+    "failure_is_publishable": true
+  },
+  "attempts_and_exclusions": [
+    {
+      "id": "feasibility-2026-06",
+      "status": "excluded_design_sample",
+      "reason": "Ten June 2026 event rows and aggregate review counts were inspected while validating the public ClickHouse schema; June 2026 is not part of this experiment."
+    },
+    {
+      "id": "bigquery-24-month",
+      "status": "rejected_before_execution",
+      "reason": "Dry-run projected 6675979890708 processed bytes, so the paid query was not executed."
+    },
+    {
+      "id": "clickhouse-2024-06-to-2025-09",
+      "status": "excluded_source_gap",
+      "reason": "The public ClickHouse table contains no apache/airflow events in this interval."
+    }
+  ],
+  "interpretation_limit": "A retrospective win would support prediction of this exact structured review outcome under this protocol. It would not show prevented defects, causal benefit, portability to other repositories, or correctness of any promoted agent policy."
+}

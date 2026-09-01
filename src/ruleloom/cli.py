@@ -40,6 +40,7 @@ from ruleloom.history.github import (
     collect_github_history,
     github_repository_from_origin,
 )
+from ruleloom.history.github_event_archive import normalize_github_event_archive
 from ruleloom.history.github_webhooks import ingest_github_capture_directory
 from ruleloom.history.importing import import_change_units, import_events
 from ruleloom.history.materialize import materialize_history
@@ -581,7 +582,7 @@ def _cmd_history_import_github(args: argparse.Namespace) -> int:
         )
     )
     try:
-        missing_objects = missing_commit_objects(root, required_objects)
+        missing_objects = missing_commit_objects(root, required_objects, allow_empty_tree=True)
     except GitFactsError as exc:
         raise ModelError(f"cannot preflight local Git objects: {exc}") from exc
     missing_set = set(missing_objects)
@@ -609,6 +610,69 @@ def _cmd_history_import_github(args: argparse.Namespace) -> int:
                 "explicitly before their units can be materialized. Cutoffs filter this "
                 "collection and never delete evidence already present in the append-only "
                 "ledger."
+            ),
+        }
+    )
+    return 0
+
+
+def _cmd_history_import_github_event_archive(args: argparse.Namespace) -> int:
+    root, config = _project(args)
+    _ensure_repository_boundary(root, config)
+    try:
+        origin = repository_origin_url(root)
+    except GitFactsError as exc:
+        raise ModelError(f"cannot inspect remote.origin.url: {exc}") from exc
+    report = normalize_github_event_archive(
+        Path(args.events),
+        Path(args.manifest),
+        repository_id=config.protocol.repository_id,
+    )
+    origin_repository = github_repository_from_origin(origin)
+    if (
+        origin_repository is None
+        or origin_repository.casefold() != report.manifest.repository.casefold()
+    ):
+        raise ModelError(
+            "event-archive manifest repository is not verifiably equal to this "
+            "checkout's public-GitHub remote.origin.url"
+        )
+    required_objects = tuple(
+        sorted(
+            {
+                object_id
+                for unit in report.units
+                for object_id in (unit.base_sha, unit.prediction_sha)
+            }
+        )
+    )
+    try:
+        missing_objects = missing_commit_objects(root, required_objects, allow_empty_tree=True)
+    except GitFactsError as exc:
+        raise ModelError(f"cannot preflight local Git objects: {exc}") from exc
+    counts = _persist_history_import(root, config, report.events, report.units)
+    missing_set = set(missing_objects)
+    local_git_preflight: JsonObject = {
+        "required_commit_objects": len(required_objects),
+        "available_commit_objects": len(required_objects) - len(missing_objects),
+        "missing_commit_objects": len(missing_objects),
+        "affected_change_units": sum(
+            unit.base_sha in missing_set or unit.prediction_sha in missing_set
+            for unit in report.units
+        ),
+        "missing_preview": list(missing_objects[:20]),
+        "preview_truncated": len(missing_objects) > 20,
+    }
+    _json(
+        {
+            **report.to_dict(),
+            **counts,
+            "local_git_preflight": local_git_preflight,
+            "note": (
+                "The event archive preserves exact opening snapshots and structured review "
+                "decisions. No repository code, provider prose, mutable labels, or current "
+                "PR state was used. Missing local Git objects must be fetched before affected "
+                "units can be materialized."
             ),
         }
     )
@@ -1748,6 +1812,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="global top-level provider-record budget; exhaustion aborts without persistence",
     )
     github_import.set_defaults(handler=_cmd_history_import_github)
+
+    github_event_archive_import = history_commands.add_parser(
+        "import-github-event-archive",
+        help="import a verified point-in-time GH Archive JSONL projection",
+    )
+    github_event_archive_import.add_argument(
+        "--events",
+        required=True,
+        help="prose-free event-archive JSONL produced by the versioned exporter",
+    )
+    github_event_archive_import.add_argument(
+        "--manifest",
+        required=True,
+        help="strict collection manifest binding query, window, preregistration, and data",
+    )
+    github_event_archive_import.set_defaults(handler=_cmd_history_import_github_event_archive)
 
     materialize = history_commands.add_parser(
         "materialize", help="extract prediction-time facts and conservative outcome labels"

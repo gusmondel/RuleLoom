@@ -1,11 +1,12 @@
 # Public case-study protocol
 
-This protocol is a template for RuleLoom's first public evaluation. It prevents
-choosing a famous repository first and inventing a convenient outcome after
-seeing the results.
+This is the reusable protocol used for RuleLoom's first public evaluation. It
+prevents choosing a famous repository first and inventing a convenient outcome
+after seeing the results. Apache Airflow was selected through the frozen rubric;
+the preregistration and failed success criterion are published under
+[`case-studies/apache-airflow`](../case-studies/apache-airflow/README.md).
 
-No repository has been selected and no product-effect claim has been made by
-this document.
+That retrospective result makes no product-effect claim.
 
 ## Phase 1: outcome-blind feasibility
 

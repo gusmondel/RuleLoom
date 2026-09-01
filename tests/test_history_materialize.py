@@ -177,6 +177,62 @@ def test_materializes_git_root_unit_against_canonical_empty_tree(
     assert observation.metadata["changed_files"] == ["base.txt"]
 
 
+def test_materializes_archive_aggregate_stats_with_one_repository_preflight(
+    materialization_repo: tuple[Path, RuleLoomConfig, str, str],
+) -> None:
+    repo, config, base, head = materialization_repo
+    snapshot = replace(
+        _event(
+            "snapshot-aggregate",
+            "change_snapshot",
+            "2025-01-02T01:00:00Z",
+            {
+                "adapter": "ruleloom-github-event-archive/2",
+                "base_sha": base,
+                "head_sha": head,
+                "point_in_time": True,
+                "diff_statistics": {
+                    "additions": 500,
+                    "deletions": 20,
+                    "files_changed": 1,
+                    "complete": True,
+                    "source": "github_event_archive_opened_event",
+                },
+            },
+        ),
+        repository_id=config.protocol.repository_id,
+    )
+    unit = ChangeUnit(
+        id="pr-aggregate",
+        repository_id=config.protocol.repository_id,
+        kind="provider_change",
+        base_sha=base,
+        prediction_sha=head,
+        prediction_at=snapshot.occurred_at,
+        commits=(head,),
+        event_ids=(snapshot.id,),
+        provider="github",
+        source_ref="github-event-archive:test:pull:1",
+        evidence_quality="rich",
+        confirmatory=True,
+    )
+    snapshot = replace(
+        snapshot,
+        change_id=unit.id,
+        source_ref=unit.source_ref,
+        provider="github",
+    )
+
+    report = materialize_history(repo, config, [unit], [snapshot])
+
+    assert report.unknown == report.confirmatory == 1
+    observation = report.observations[0]
+    assert observation.metadata["churn"] == 520
+    assert observation.metadata["file_churn"] is None
+    assert observation.metadata["commit_metadata_available"] is False
+    assert "commit_message" not in observation.metadata
+
+
 def test_weak_label_is_opt_in_and_never_confirmatory(
     materialization_repo: tuple[Path, RuleLoomConfig, str, str],
 ) -> None:
@@ -345,6 +401,7 @@ def test_materialization_skips_discarded_first_parent_traversal(
         *,
         input_bytes: bytes | None = None,
         timeout_seconds: float = gitfacts_module._GIT_TIMEOUT_SECONDS,
+        allow_lazy_fetch: bool = True,
     ) -> tuple[bytes, bytes, int]:
         commands.append(arguments)
         return original(
@@ -352,6 +409,7 @@ def test_materialization_skips_discarded_first_parent_traversal(
             arguments,
             input_bytes=input_bytes,
             timeout_seconds=timeout_seconds,
+            allow_lazy_fetch=allow_lazy_fetch,
         )
 
     monkeypatch.setattr(gitfacts_module, "_run_git_capped", record_commands)
@@ -397,3 +455,30 @@ def test_materialization_skips_discarded_first_parent_traversal(
         key: value for key, value in indexed.metadata.items() if key != "topological_index"
     }
     assert {key: materialized.metadata[key] for key in expected_metadata} == expected_metadata
+
+
+def test_materialization_reports_missing_object_skip_category(
+    materialization_repo: tuple[Path, RuleLoomConfig, str, str],
+) -> None:
+    repo, config, base, _head = materialization_repo
+    missing = "f" * 40
+    unit = ChangeUnit(
+        id="change-missing",
+        repository_id=config.protocol.repository_id,
+        kind="git_only",
+        base_sha=base,
+        prediction_sha=missing,
+        prediction_at="2025-01-03T00:00:00Z",
+        commits=(missing,),
+        event_ids=(),
+        provider="git",
+        source_ref=missing,
+        evidence_quality="git_only",
+        confirmatory=False,
+    )
+
+    report = materialize_history(repo, config, [unit], [])
+
+    assert report.skipped == 1
+    assert report.skipped_by_reason == (("missing_commit_objects", 1),)
+    assert report.to_dict()["skipped_by_reason"] == {"missing_commit_objects": 1}

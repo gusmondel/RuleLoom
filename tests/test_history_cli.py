@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -11,10 +12,15 @@ import pytest
 from ruleloom import cli
 from ruleloom.config import RuleLoomConfig
 from ruleloom.history.github import GitHubHistoryError, GitHubHistoryReport
+from ruleloom.history.github_event_archive import (
+    GITHUB_EVENT_ARCHIVE_ADAPTER_VERSION,
+    GITHUB_EVENT_ARCHIVE_EXPORTER_VERSION,
+    GITHUB_EVENT_ARCHIVE_ROW_SCHEMA_VERSION,
+)
 from ruleloom.history.github_webhooks import GitHubCaptureDirectoryReport
 from ruleloom.history.models import ChangeUnit, HistoricalEvent
 from ruleloom.history.storage import change_units_path, events_path, load_change_units, load_events
-from ruleloom.models import LabelValue
+from ruleloom.models import LabelValue, canonical_json
 from ruleloom.storage import dataset_path, load_observations
 
 
@@ -654,6 +660,94 @@ def test_history_cli_imports_first_class_github_archive_without_assembling_dupli
     assert received_kwargs["repository_binding"] == "verified_origin"
     assert load_events(events_path(repo)) == [snapshot, final]
     assert load_change_units(change_units_path(repo)) == [unit]
+
+
+def test_history_cli_imports_verified_github_event_archive(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = tmp_path / "event-archive-repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "History Test")
+    _git(repo, "config", "user.email", "history@example.invalid")
+    _git(repo, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+    base = _commit(repo, "base.txt", "2025-01-01T00:00:00Z")
+    head = _commit(repo, "head.txt", "2025-01-02T00:00:00Z")
+    assert cli.main(["init", str(repo)]) == 0
+    capsys.readouterr()
+
+    row = {
+        "schema_version": GITHUB_EVENT_ARCHIVE_ROW_SCHEMA_VERSION,
+        "event_type": "PullRequestEvent",
+        "repository": "acme/widgets",
+        "occurred_at": "2025-01-02T01:00:00Z",
+        "available_at": "2025-01-02T02:00:00Z",
+        "action": "opened",
+        "actor_key": "github.login." + hashlib.sha256(b"author").hexdigest(),
+        "number": 1,
+        "base_sha": base,
+        "head_sha": head,
+        "review_state": "none",
+        "additions": 1,
+        "deletions": 0,
+        "changed_files": 1,
+        "statistics_complete": True,
+    }
+    content = (canonical_json(row) + "\n").encode()
+    archive_path = tmp_path / "events.jsonl"
+    archive_path.write_bytes(content)
+    manifest = {
+        "schema_version": 1,
+        "event_schema_version": GITHUB_EVENT_ARCHIVE_ROW_SCHEMA_VERSION,
+        "adapter_version": GITHUB_EVENT_ARCHIVE_ADAPTER_VERSION,
+        "exporter_version": GITHUB_EVENT_ARCHIVE_EXPORTER_VERSION,
+        "source": "gharchive-clickhouse-public",
+        "source_url": "https://play.clickhouse.com/",
+        "repository": "acme/widgets",
+        "provider_repository_id": 123456,
+        "collection_start": "2025-01-01T00:00:00Z",
+        "collection_end": "2025-02-01T00:00:00Z",
+        "dataset_max_at": "2025-02-02T00:00:00Z",
+        "collected_at": "2025-02-03T00:00:00Z",
+        "query_sha256": "a" * 64,
+        "coverage_query_sha256": "c" * 64,
+        "events_sha256": hashlib.sha256(content).hexdigest(),
+        "preregistration_sha256": "b" * 64,
+        "window_complete": True,
+        "expected_hours": 744,
+        "observed_hours": 744,
+        "missing_hours": [],
+    }
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(canonical_json(manifest) + "\n", encoding="utf-8")
+
+    imported = _run(
+        [
+            "history",
+            "--root",
+            str(repo),
+            "import-github-event-archive",
+            "--events",
+            str(archive_path),
+            "--manifest",
+            str(manifest_path),
+        ],
+        capsys,
+    )
+
+    assert imported["rows_read"] == 1
+    assert imported["events_inserted"] == 1
+    assert imported["units_inserted"] == 1
+    assert imported["confirmatory_units"] == 1
+    assert imported["local_git_preflight"] == {
+        "required_commit_objects": 2,
+        "available_commit_objects": 2,
+        "missing_commit_objects": 0,
+        "affected_change_units": 0,
+        "missing_preview": [],
+        "preview_truncated": False,
+    }
 
 
 def test_history_cli_budget_exhaustion_never_reaches_persistence(

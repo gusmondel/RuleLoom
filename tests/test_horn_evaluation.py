@@ -10,6 +10,7 @@ from ruleloom.evaluation import (
     best_literal_baseline,
     bootstrap_stability,
     evaluate,
+    fit_boolean_logistic_baseline,
     majority_baseline,
     temporal_split,
 )
@@ -314,7 +315,7 @@ def test_horn_hard_budget_covers_multi_rule_search() -> None:
         for index in range(1, 9)
     ]
 
-    with pytest.raises(ModelError, match="hard literal-check budget"):
+    with pytest.raises(ModelError, match="hard bitset-work budget"):
         learn_horn(
             examples,
             TARGET,
@@ -390,6 +391,50 @@ def test_temporal_split_uses_instant_order_across_timezone_offsets() -> None:
 
     assert [item.id for item in split.train] == ["earlier-instant"]
     assert [item.id for item in split.test] == ["later-instant"]
+
+
+def test_boolean_logistic_baseline_is_deterministic_and_training_only() -> None:
+    examples = [
+        _dated_observation(
+            index,
+            {"risk"} if index % 2 else {"safe"},
+            LabelValue.POSITIVE if index % 2 else LabelValue.NEGATIVE,
+        )
+        for index in range(1, 9)
+    ]
+
+    first = fit_boolean_logistic_baseline(examples, TARGET, iterations=100)
+    second = fit_boolean_logistic_baseline(list(reversed(examples)), TARGET, iterations=100)
+
+    assert first == second
+    assert first.predicts(frozenset({"risk"}))
+    assert not first.predicts(frozenset({"safe"}))
+    assert evaluate(examples, TARGET, first.predicts).matthews_correlation == 1.0
+
+
+def test_temporal_split_honors_a_fixed_preregistered_boundary() -> None:
+    observations = [
+        _observation(
+            f"item-{day}",
+            {"risk"} if day % 2 else set(),
+            LabelValue.POSITIVE if day % 2 else LabelValue.NEGATIVE,
+            observed_at=f"2025-01-{day:02d}T00:00:00Z",
+            available_at=f"2025-01-{day:02d}T01:00:00Z",
+        )
+        for day in range(1, 7)
+    ]
+
+    split = temporal_split(
+        observations,
+        TARGET,
+        test_fraction=0.8,
+        min_train=2,
+        min_test=2,
+        test_start_at="2025-01-05T00:00:00Z",
+    )
+
+    assert [item.id for item in split.train] == [f"item-{day}" for day in range(1, 5)]
+    assert [item.id for item in split.test] == ["item-5", "item-6"]
 
 
 def test_temporal_split_prefers_git_topology_over_backdated_commit_time() -> None:
@@ -473,7 +518,10 @@ def test_candidate_excludes_labels_unavailable_at_holdout_start() -> None:
         "always_alert",
         "train_majority",
         "best_single_literal",
+        "size_only",
+        "logistic_regression_boolean_facts",
     }
+    assert candidate.metadata["baseline_models"]["size_only"]["training_selected"] is False
 
 
 def test_candidate_deduplicates_only_on_temporally_eligible_train() -> None:
