@@ -225,23 +225,56 @@ class ConfiguredPathsConfig:
 
 @dataclass(frozen=True, slots=True)
 class _CompiledGlob:
+    literal_prefix: tuple[str, ...]
     components: tuple[str | None, ...]
     component_weight: int
 
+    def _prefix_work(self, path_components: tuple[str, ...]) -> tuple[int, bool]:
+        if len(path_components) < len(self.literal_prefix):
+            return 2, False
+        work_units = 1
+        for pattern_component, path_component in zip(
+            self.literal_prefix,
+            path_components,
+            strict=False,
+        ):
+            work_units += len(pattern_component) + len(path_component) + 2
+            if pattern_component != path_component:
+                return work_units, False
+        return work_units, True
+
+    def estimated_work(self, path_components: tuple[str, ...]) -> int:
+        prefix_work, prefix_matches = self._prefix_work(path_components)
+        if not prefix_matches:
+            return prefix_work
+        remaining = path_components[len(self.literal_prefix) :]
+        path_outer_weight = len(remaining) + 1
+        path_character_weight = 1 + sum(len(component) + 1 for component in remaining)
+        return (
+            prefix_work
+            + path_outer_weight * (len(self.components) + 1)
+            + path_character_weight * (1 + self.component_weight)
+        )
+
     def matches(self, path_components: tuple[str, ...]) -> bool:
-        previous = [False] * (len(path_components) + 1)
+        _, prefix_matches = self._prefix_work(path_components)
+        if not prefix_matches:
+            return False
+        prefix_length = len(self.literal_prefix)
+        remaining_length = len(path_components) - prefix_length
+        previous = [False] * (remaining_length + 1)
         previous[0] = True
         for pattern_component in self.components:
-            current = [False] * (len(path_components) + 1)
+            current = [False] * (remaining_length + 1)
             if pattern_component is None:
                 current[0] = previous[0]
-                for path_index in range(1, len(path_components) + 1):
+                for path_index in range(1, remaining_length + 1):
                     current[path_index] = previous[path_index] or current[path_index - 1]
             else:
-                for path_index in range(1, len(path_components) + 1):
+                for path_index in range(1, remaining_length + 1):
                     current[path_index] = previous[path_index - 1] and _component_matches(
                         pattern_component,
-                        path_components[path_index - 1],
+                        path_components[prefix_length + path_index - 1],
                     )
             previous = current
         return previous[-1]
@@ -275,8 +308,18 @@ def _component_matches(pattern: str, value: str) -> bool:
 
 
 def _compile_glob(pattern: str) -> _CompiledGlob:
-    components = tuple(None if component == "**" else component for component in pattern.split("/"))
+    raw_components = pattern.split("/")
+    prefix_length = 0
+    for component in raw_components:
+        if component == "**" or "*" in component or "?" in component:
+            break
+        prefix_length += 1
+    literal_prefix = tuple(raw_components[:prefix_length])
+    components = tuple(
+        None if component == "**" else component for component in raw_components[prefix_length:]
+    )
     return _CompiledGlob(
+        literal_prefix,
         components,
         sum(len(component) + 1 for component in components if component is not None),
     )
@@ -329,8 +372,7 @@ def extract_configured_path_facts(
             key=lambda item: item.path,
         )
     )
-    path_outer_weight = 0
-    path_character_weight = 0
+    path_components: list[tuple[str, ...]] = []
     for change in visible:
         component_count = change.path.count("/") + 1
         if (
@@ -340,8 +382,7 @@ def extract_configured_path_facts(
             raise ValueError(
                 "configured path extraction encountered a path beyond the safe matcher limits"
             )
-        path_outer_weight += component_count + 1
-        path_character_weight += len(change.path) + 1
+        path_components.append(tuple(change.path.split("/")))
     comparisons = len(visible) * config.total_globs
     if comparisons > MAX_MATCH_COMPARISONS:
         raise ValueError(
@@ -350,22 +391,22 @@ def extract_configured_path_facts(
         )
     compiled = configured_predicates(config)
     globs = tuple(glob for predicate in compiled for glob in predicate.globs)
-    work_units = path_outer_weight * sum(
-        len(glob.components) + 1 for glob in globs
-    ) + path_character_weight * (1 + sum(glob.component_weight for glob in globs))
-    if work_units > MAX_MATCH_WORK_UNITS:
-        raise ValueError(
-            f"configured path extraction requires {work_units} estimated matcher work units; "
-            f"the safe limit is {MAX_MATCH_WORK_UNITS}"
-        )
+    work_units = 0
+    for components in path_components:
+        for glob in globs:
+            work_units += glob.estimated_work(components)
+            if work_units > MAX_MATCH_WORK_UNITS:
+                raise ValueError(
+                    "configured path extraction exceeds the safe limit of "
+                    f"{MAX_MATCH_WORK_UNITS} estimated matcher work units"
+                )
     reasons: dict[str, set[str]] = {}
     counts = {item.predicate: 0 for item in compiled}
     unmatched = 0
     overlapping = 0
     manifest = hashlib.sha256()
-    for change in visible:
-        path_components = tuple(change.path.split("/"))
-        matched = tuple(item.predicate for item in compiled if item.matches(path_components))
+    for change, components in zip(visible, path_components, strict=True):
+        matched = tuple(item.predicate for item in compiled if item.matches(components))
         if not matched:
             unmatched += 1
         if len(matched) > 1:

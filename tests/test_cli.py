@@ -13,7 +13,7 @@ from ruleloom import cli
 from ruleloom.config import LearnerConfig, RuleLoomConfig
 from ruleloom.gitfacts import collect_snapshot
 from ruleloom.learners.popper import PopperDoctorReport
-from ruleloom.models import LabelValue, ModelError
+from ruleloom.models import LabelValue, ModelError, content_hash
 from ruleloom.storage import dataset_path, load_observations, load_predictions
 
 
@@ -265,6 +265,28 @@ def test_cli_initializes_and_collects_with_configured_paths(
         "touches_shared_contract",
     } <= observations[0].facts
     assert observations[0].source["pack_config_hash"] == config.pack_config_hash
+
+    exit_code, stdout, stderr = _run_cli(
+        ["predicates", "--root", str(repo), "audit"],
+        capsys,
+    )
+    assert exit_code == 0
+    assert stderr == ""
+    audit = json.loads(stdout)
+    assert audit["outcome_blind"] is True
+    assert audit["observation_count"] == 1
+    assert audit["experiment_id"] == config.protocol.experiment_id
+    assert audit["target"] == config.target
+    assert audit["config_hash"] == config.hash
+    assert audit["evidence_protocol_hash"] == config.evidence_protocol_hash
+    assert len(audit["observation_manifest_hash"]) == 64
+    assert len(audit["audit_manifest_hash"]) == 64
+    manifest = audit.pop("audit_manifest_hash")
+    assert content_hash(audit) == manifest
+    assert audit["pack"] == "configured_paths"
+    rows = {item["predicate"]: item for item in audit["predicates"]}
+    assert rows["touches_surface_web"]["prevalence"] == 1.0
+    assert rows["touches_surface_web"]["path_examples"] == ["apps/web/main.ts"]
 
 
 def test_cli_rejects_configured_path_flags_for_static_packs(

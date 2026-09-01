@@ -57,10 +57,12 @@ from ruleloom.lifecycle import (
     utc_now,
 )
 from ruleloom.models import (
+    JsonObject,
     LabelEvidence,
     LabelValue,
     ModelError,
     Observation,
+    content_hash,
     parse_timestamp,
     validate_subject,
 )
@@ -70,6 +72,7 @@ from ruleloom.packs import (
     available_packs,
     latest_pack_version,
 )
+from ruleloom.predicate_audit import audit_predicates
 from ruleloom.project import initialize_project, validate_observations, validate_project
 from ruleloom.reporting import build_pilot_report, build_pilot_reports
 from ruleloom.storage import (
@@ -1100,6 +1103,40 @@ def _cmd_packs_list(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_predicates_audit(args: argparse.Namespace) -> int:
+    root, config = _project(args)
+    observations = load_observations(dataset_path(root, config))
+    validate_observations(observations, config, as_of=datetime.now(UTC))
+    configured = (
+        tuple(item.predicate for item in config.pack_config.path_predicates)
+        if config.pack_config is not None
+        else ()
+    )
+    report = audit_predicates(
+        observations,
+        config.resolved_pack.predicates,
+        configured_predicates=configured,
+        rare_threshold=args.rare_threshold,
+        saturated_threshold=args.saturated_threshold,
+        drift_threshold=args.drift_threshold,
+        overlap_threshold=args.overlap_threshold,
+    )
+    payload: JsonObject = {
+        "experiment_id": config.protocol.experiment_id,
+        "repository_id": config.protocol.repository_id,
+        "target": config.target,
+        "config_hash": config.hash,
+        "evidence_protocol_hash": config.evidence_protocol_hash,
+        "pack": config.pack,
+        "pack_version": config.pack_version,
+        "pack_config_hash": config.pack_config_hash,
+        **report,
+    }
+    payload["audit_manifest_hash"] = content_hash(payload)
+    _json(payload)
+    return 0
+
+
 def _add_root(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--root",
@@ -1166,6 +1203,20 @@ def build_parser() -> argparse.ArgumentParser:
     packs_list = pack_commands.add_parser("list")
     packs_list.add_argument("--json", action="store_true")
     packs_list.set_defaults(handler=_cmd_packs_list)
+
+    predicates = subparsers.add_parser(
+        "predicates", help="audit the frozen predicate vocabulary without reading outcomes"
+    )
+    _add_root(predicates)
+    predicate_commands = predicates.add_subparsers(dest="predicates_command", required=True)
+    predicate_audit = predicate_commands.add_parser(
+        "audit", help="report prevalence, path examples, overlap, and temporal drift"
+    )
+    predicate_audit.add_argument("--rare-threshold", type=float, default=0.01)
+    predicate_audit.add_argument("--saturated-threshold", type=float, default=0.99)
+    predicate_audit.add_argument("--drift-threshold", type=float, default=0.20)
+    predicate_audit.add_argument("--overlap-threshold", type=float, default=0.90)
+    predicate_audit.set_defaults(handler=_cmd_predicates_audit)
 
     collect = subparsers.add_parser("collect", help="collect prediction-time facts")
     _add_root(collect)

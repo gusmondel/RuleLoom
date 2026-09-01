@@ -275,6 +275,16 @@ def _resolve_commit(repo: Path, revision: str) -> str:
     return _git(repo, "rev-parse", "--verify", f"{revision}^{{commit}}").strip()
 
 
+def _resolve_diff_base(repo: Path, revision: str) -> str:
+    """Resolve a committed base or the repository's canonical empty tree."""
+    if not revision or revision.startswith("-") or "\x00" in revision:
+        raise GitFactsError(f"unsafe or empty Git revision: {revision!r}")
+    empty_tree = _empty_tree(repo)
+    if revision == empty_tree:
+        return empty_tree
+    return _resolve_commit(repo, revision)
+
+
 def _parse_numstat(raw: str) -> tuple[FileChange, ...]:
     changes: list[FileChange] = []
     for record in raw.split("\x00"):
@@ -854,7 +864,7 @@ def collect_snapshot(
     _pack(pack, pack_version, pack_config)
     extraction = _evidence_profile(pack, pack_version, evidence_config)
     root, repository_name = _repository(repo, repository_id)
-    base_commit = _resolve_commit(root, base)
+    base_commit = _resolve_diff_base(root, base)
     head_commit = _resolve_commit(root, head)
     digest = hashlib.sha256(f"{base_commit}\x00{head_commit}".encode()).hexdigest()[:20]
     return _observation(

@@ -128,7 +128,7 @@ OS user.
 }
 ```
 
-Version 0.4.0 defaults to configuration schema v2 and the language-neutral
+Version 0.5.0 defaults to configuration schema v2 and the language-neutral
 `generic_changes@1` pack. It also ships schema-v3 `configured_paths@1` and
 `flutter_testing@2`. The frozen `flutter_testing@1` implementation exists
 only to read structurally and reproduce the hashes of historical configuration
@@ -248,15 +248,17 @@ Predicate-like fields start with a lowercase letter and contain lowercase ASCII
 letters, numbers, and underscores. `init` derives `repository_id` from
 `remote.origin.url`, or from root commits when no origin exists; initialization
 therefore requires an origin or at least one commit. The storage lock uses POSIX
-`fcntl`: version 0.4.0 supports macOS and Linux, not Windows.
+`fcntl`: version 0.5.0 supports macOS and Linux, not Windows.
 
 The built-in search also enforces finite operational bounds:
 `max_body` 1–4, `max_rules` 1–10, `max_predicates` 1–32,
 `bootstrap_runs` 0–100, and Popper timeout 1–3600 seconds, plus a combined
-hypothesis/work budget. For `engine="popper"`, version 0.4.0 requires
+hypothesis/work budget. For `engine="popper"`, version 0.5.0 requires
 `max_rules=1`, `bootstrap_runs=0`, and the Horn-specific support/precision/cost
 settings at their defaults. Popper is an offline adapter to an explicitly
 configured, already provisioned checkout; RuleLoom does not install it.
+Its candidate `engine_version` combines the RuleLoom adapter revision with the
+fingerprint of the external checkout and probed runtime environment.
 
 Changing configuration changes `config_hash`. A candidate must retain the hash
 of the configuration used to generate it. Separately, `evidence_protocol_hash`
@@ -334,7 +336,7 @@ Each non-empty line in `.ruleloom/observations.jsonl` is one object:
 
 | Field | Type | Contract |
 |---|---|---|
-| `schema_version` | integer | Must be artifact schema `1` in version 0.4.0. |
+| `schema_version` | integer | Must be artifact schema `1` in version 0.5.0. |
 | `id` | string | Unique within the dataset; lowercase letters/numbers plus `.`, `_`, or `-`. |
 | `observed_at` | string | Decision-time timestamp with timezone; used for chronological splitting. |
 | `protocol_hash` | string | Lowercase SHA-256 of the configured evidence protocol; evidence with a different hash must not be pooled. |
@@ -386,7 +388,7 @@ then ID.
 
 First-parent order establishes ordering, not a valid decision point. A merge or
 squash may already contain validation added because of CI or review. Version
-0.4.0 therefore distinguishes raw `git_commit` evidence from grouped
+0.5.0 therefore distinguishes raw `git_commit` evidence from grouped
 `historical_change` observations. The latter bind one stable `change_id` to an
 exact `base_sha`, `prediction_sha`, and prediction time. Only a `rich` unit with
 a genuinely persisted point-in-time snapshot can be confirmatory. `git_only`
@@ -527,7 +529,7 @@ only when `available_at` is strictly later than that unit's earliest
 `predicted_at` within the policy set.
 
 The same independent change must not appear on both sides of a retrospective
-split through multiple snapshots. Version 0.4.0 materializes one observation per
+split through multiple snapshots. Version 0.5.0 materializes one observation per
 `ChangeUnit`, and `learn` rejects duplicate mature `change_id` values. It also
 rejects mixing `git_commit` and `historical_change` cohorts. A raw commit cohort
 still needs manual independence auditing; grouped history is the preferred
@@ -545,7 +547,7 @@ Each `fact_evidence` entry contains:
 | `confidence` | number or absent | Optional value from 0 through 1, mainly for non-deterministic facts. |
 
 `agent`, `human`, and `imported` are reserved wire-format values for future
-extractors and migration tooling. In version 0.4.0, current built-in-pack
+extractors and migration tooling. In version 0.5.0, current built-in-pack
 observations are accepted for validation, learning, and prediction only when
 every fact has `kind: "deterministic"` and names the exact configured extractor.
 A record using a reserved non-deterministic kind may be read structurally, but
@@ -578,7 +580,7 @@ missing diff is extraction failure or ineligibility, never logical falsehood.
 
 ## Rule representation
 
-Version 0.4.0 is propositionalized ILP over one change at a time. Each fact is a
+Version 0.5.0 is propositionalized ILP over one change at a time. Each fact is a
 Boolean unary predicate of the same observation variable `A`; there are no
 multiple entity variables, relations between files/types/people, relational
 joins, recursion, predicate invention, or arbitrary Prolog programs. A rule set
@@ -876,7 +878,7 @@ eligible for prospective confusion metrics. `excluded_preexisting_outcome`
 prevents a retrospectively known answer from masquerading as a prediction. Use
 `report --policy-set <hash>` for the unwrapped single-policy report. The report
 describes aggregate prospective association, never a causal estimate; causal
-impact needs a randomized or pre-specified staged advisory rollout. Version 0.4.0
+impact needs a randomized or pre-specified staged advisory rollout. Version 0.5.0
 does not emit confidence intervals or per-clause prospective tables in this
 report. Promotion separately evaluates the registered Wilson lower-bound and
 per-clause gates described above.

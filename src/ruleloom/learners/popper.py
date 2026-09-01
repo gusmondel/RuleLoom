@@ -42,6 +42,7 @@ _LITERAL_RE = re.compile(
 _SOLUTION_MARKER_RE = re.compile(r"\*+\s+SOLUTION\s+\*+", re.IGNORECASE)
 _TIMEOUT_RE = re.compile(r"TIMEOUT OF .* SECONDS EXCEEDED", re.IGNORECASE)
 _ELAPSED_PREFIX_RE = re.compile(r"^\s*\d+(?:\.\d+)?s\s+")
+POPPER_ADAPTER_VERSION = "ruleloom-popper-adapter/0.1"
 
 
 class PopperError(RuntimeError):
@@ -176,7 +177,9 @@ def export_popper_problem(
 
     Every observed predicate is unary over the observation id.  Closed-world
     negation is made explicit: when ``p`` is absent, ``not_p`` is present.  The
-    ``not_`` namespace is therefore reserved for this representation.
+    ``not_`` namespace is therefore reserved for this representation. Constant
+    predicates and duplicate truth columns are excluded from the bounded
+    hypothesis space using only these labelled training observations.
     Unknown-labelled observations are excluded from the learning problem.
     """
     try:
@@ -221,7 +224,21 @@ def export_popper_problem(
             "fact predicates starting with 'not_' are reserved for closed-world negation: "
             + ", ".join(reserved)
         )
-    predicates = tuple(rank_predicates(labelled, target)[:max_predicates])
+    positive_count = sum(item.labels[target] is LabelValue.POSITIVE for item in labelled)
+    negative_count = sum(item.labels[target] is LabelValue.NEGATIVE for item in labelled)
+    if not positive_count or not negative_count:
+        raise PopperExportError(
+            "predicate ranking requires at least one positive and one negative example"
+        )
+    predicates = tuple(
+        rank_predicates(
+            labelled,
+            target,
+            allow_negation=allow_negation,
+        )[:max_predicates]
+    )
+    if not predicates:
+        raise PopperExportError("labelled observations contain no non-constant facts to learn from")
 
     positive_ids = tuple(item.id for item in labelled if item.labels[target] is LabelValue.POSITIVE)
     negative_ids = tuple(item.id for item in labelled if item.labels[target] is LabelValue.NEGATIVE)
@@ -697,7 +714,7 @@ def run_popper(
         command=command,
         stdout=stdout,
         stderr=stderr,
-        engine_version=report.runtime_fingerprint,
+        engine_version=f"{POPPER_ADAPTER_VERSION};runtime={report.runtime_fingerprint}",
     )
 
 
@@ -747,6 +764,7 @@ def learn_popper(
 
 
 __all__ = [
+    "POPPER_ADAPTER_VERSION",
     "PopperConfigurationError",
     "PopperDependencyError",
     "PopperDoctorReport",

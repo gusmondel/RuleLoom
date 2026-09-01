@@ -8,6 +8,7 @@ from typing import Any
 import pytest
 
 from ruleloom.learners.popper import (
+    POPPER_ADAPTER_VERSION,
     PopperConfigurationError,
     PopperDependencyError,
     PopperExportError,
@@ -91,16 +92,14 @@ def test_export_popper_problem_writes_examples_closed_world_and_bias(tmp_path: P
 
     assert problem.positive_ids == ("commit-1",)
     assert problem.negative_ids == ("commit.2",)
-    assert problem.predicates == ("uses_async", "changes_dart")
+    assert problem.predicates == ("uses_async",)
     assert problem.examples_path.read_text(encoding="utf-8").splitlines()[1:] == [
         "pos(needs_extra_validation('commit-1')).",
         "neg(needs_extra_validation('commit.2')).",
     ]
     assert problem.background_path.read_text(encoding="utf-8").splitlines()[1:] == [
         "uses_async('commit-1').",
-        "changes_dart('commit-1').",
         "not_uses_async('commit.2').",
-        "changes_dart('commit.2').",
     ]
     bias = problem.bias_path.read_text(encoding="utf-8")
     assert "max_body(2)." in bias
@@ -133,6 +132,42 @@ def test_export_ranks_predicates_before_applying_the_limit(tmp_path: Path) -> No
     assert "common" not in problem.background_path.read_text(encoding="utf-8")
 
 
+def test_export_collapses_duplicate_training_columns_lexically(tmp_path: Path) -> None:
+    problem = export_popper_problem(
+        [
+            observation("positive-1", {"alpha", "alpha_alias"}, LabelValue.POSITIVE),
+            observation("positive-2", {"alpha", "alpha_alias"}, LabelValue.POSITIVE),
+            observation("negative-1", set(), LabelValue.NEGATIVE),
+            observation("negative-2", set(), LabelValue.NEGATIVE),
+        ],
+        TARGET,
+        tmp_path / "problem",
+    )
+
+    assert problem.predicates == ("alpha",)
+    background = problem.background_path.read_text(encoding="utf-8")
+    assert "alpha('positive-1')." in background
+    assert "alpha_alias" not in background
+
+
+def test_export_without_negation_prefers_positive_direction(tmp_path: Path) -> None:
+    problem = export_popper_problem(
+        [
+            observation("positive-1", {"z_risk"}, LabelValue.POSITIVE),
+            observation("positive-2", {"z_risk"}, LabelValue.POSITIVE),
+            observation("negative-1", {"a_safe"}, LabelValue.NEGATIVE),
+            observation("negative-2", {"a_safe"}, LabelValue.NEGATIVE),
+        ],
+        TARGET,
+        tmp_path / "problem",
+        allow_negation=False,
+        max_predicates=1,
+    )
+
+    assert problem.predicates == ("z_risk",)
+    assert "a_safe" not in problem.background_path.read_text(encoding="utf-8")
+
+
 def test_export_can_hide_closed_world_predicates_from_hypothesis_space(tmp_path: Path) -> None:
     problem = export_popper_problem(
         [
@@ -156,6 +191,19 @@ def test_export_can_hide_closed_world_predicates_from_hypothesis_space(tmp_path:
             [observation("labelled", set(), LabelValue.POSITIVE)],
             TARGET,
             "contain no facts",
+        ),
+        (
+            [observation("labelled", {"constant"}, LabelValue.POSITIVE)],
+            TARGET,
+            "one positive and one negative",
+        ),
+        (
+            [
+                observation("positive", {"constant"}, LabelValue.POSITIVE),
+                observation("negative", {"constant"}, LabelValue.NEGATIVE),
+            ],
+            TARGET,
+            "no non-constant facts",
         ),
         (
             [observation("labelled", {TARGET}, LabelValue.POSITIVE)],
@@ -513,7 +561,7 @@ def test_run_popper_uses_noisy_mode_and_two_timeouts(tmp_path: Path) -> None:
     assert recorded["capture_output"] is True
     assert recorded["check"] is False
     assert result.engine_version == (
-        f"{fingerprint_popper(checkout)}/env-sha256:"
+        f"{POPPER_ADAPTER_VERSION};runtime={fingerprint_popper(checkout)}/env-sha256:"
         f"{hashlib.sha256(PROBE_MANIFEST.encode()).hexdigest()}"
     )
 
@@ -521,7 +569,10 @@ def test_run_popper_uses_noisy_mode_and_two_timeouts(tmp_path: Path) -> None:
 def test_run_popper_reports_dependencies_exit_and_process_timeout(tmp_path: Path) -> None:
     checkout = fake_checkout(tmp_path / "checkout")
     problem = export_popper_problem(
-        [observation("positive", {"fact"}, LabelValue.POSITIVE)],
+        [
+            observation("positive", {"fact"}, LabelValue.POSITIVE),
+            observation("negative", set(), LabelValue.NEGATIVE),
+        ],
         TARGET,
         tmp_path / "problem",
     )
@@ -586,7 +637,10 @@ def test_run_popper_reports_dependencies_exit_and_process_timeout(tmp_path: Path
 def test_run_popper_enforces_final_clause_limit(tmp_path: Path) -> None:
     checkout = fake_checkout(tmp_path / "checkout")
     problem = export_popper_problem(
-        [observation("positive", {"fact", "uses_async"}, LabelValue.POSITIVE)],
+        [
+            observation("positive", {"fact", "uses_async"}, LabelValue.POSITIVE),
+            observation("negative", set(), LabelValue.NEGATIVE),
+        ],
         TARGET,
         tmp_path / "problem",
     )
@@ -618,7 +672,10 @@ def test_run_popper_enforces_final_clause_limit(tmp_path: Path) -> None:
 def test_run_popper_rejects_process_and_hypothesis_boundary_violations(tmp_path: Path) -> None:
     checkout = fake_checkout(tmp_path / "checkout")
     problem = export_popper_problem(
-        [observation("positive", {"fact", "uses_async"}, LabelValue.POSITIVE)],
+        [
+            observation("positive", {"fact", "uses_async"}, LabelValue.POSITIVE),
+            observation("negative", set(), LabelValue.NEGATIVE),
+        ],
         TARGET,
         tmp_path / "problem",
     )

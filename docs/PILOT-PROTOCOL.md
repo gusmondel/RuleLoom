@@ -40,6 +40,7 @@ record with the pilot artifacts if the repository owner's data policy permits it
 | Excluded paths | Repository-relative `evidence.exclude_paths` globs defining generated, vendored, or otherwise ineligible material |
 | Configured feature library | For `configured_paths@1`, the complete canonical `pack_config`, resolved predicate list, `pack_config_hash`, outcome-blind design source/revision, author, and rationale |
 | Feature-library lock | Timestamp and independent witness that the vocabulary was frozen before access to outcomes, candidate rules, metrics, or holdout errors |
+| Predicate audit | Preserved pre-outcome `ruleloom predicates audit` JSON, command revision, repository/experiment/target/config/protocol identity, outcome-blind observation and complete-audit manifest hashes, chronology/window sizes, thresholds, warnings, reviewer decision, and any superseded experiment ID |
 | Configuration attempts | Every vocabulary/scope/threshold tried, including abandoned attempts |
 | Change thresholds | Exact `large_change_churn`, `multi_file_count`, and `metadata_file_limit` values |
 | Positive label | Independent event that counts as positive |
@@ -92,6 +93,16 @@ time, roles, rationale, and complete attempt log before labels are opened. A
 post-lock semantic change—predicate, glob, scope, threshold, target, extraction
 meaning, or grouping rule—starts a different protocol. Order-only canonical
 reformatting may retain identity only when the resulting hash is unchanged.
+
+An LLM may propose predicate names and deterministic definitions from the
+recorded repository tree, architecture/ownership documents, and an outcome-blind
+predicate audit. Treat its output as untrusted design input. It must not read
+outcomes for a pre-lock proposal, write an activated policy, approve its own
+proposal, or silently edit the frozen configuration. A human reviewer must
+accept the semantics and extraction evidence. Every accepted addition, removal,
+rename, or definition change is a new experiment/protocol hash. If the LLM or
+human designer used labels, rules, metrics, or holdout errors, reserve an
+untouched future confirmation window.
 
 ## Recommended first target
 
@@ -283,7 +294,9 @@ Bootstrap the existing Git graph before waiting for new changes:
 
 ```bash
 ruleloom history bootstrap-git --all
+ruleloom history materialize
 ruleloom history status
+ruleloom predicates audit
 ```
 
 `--all` retains the most recent reachable prefix until the first of three bounds:
@@ -295,6 +308,53 @@ sample is not mistaken for complete history. This step is language-neutral and
 immediately measures repository volume, but its `git_only`/`final_only` units
 are exploratory because Git alone does not prove a PR-time decision point or
 independent outcome.
+
+Run `predicates audit` and preserve its JSON **before exporting, opening, or
+importing outcome sources**. The command is outcome-blind and reports:
+
+- total observations and the ordering used: complete single-repository
+  first-parent topology when available, otherwise `observed_at`;
+- equal early/late chronological halves, with the later half receiving the
+  extra observation when the total is odd;
+- per-predicate counts and prevalence, plus `never_true`, `always_true`, `rare`,
+  `saturated`, and absolute prevalence-drift flags;
+- configured-path match counts and up to eight deterministic path examples per
+  configured predicate;
+- coverage of the configured predicate union; and
+- observed equivalence, complementarity, one-way implication, and sufficiently
+  high Jaccard-overlap relations.
+
+The default diagnostic thresholds are 0.01 for rare, 0.99 for saturated, 0.20
+absolute prevalence shift for drift, and 0.90 Jaccard similarity for overlap.
+Any overrides are analysis settings rather than evidence-protocol fields, but
+must be recorded so another reviewer can reproduce the flags.
+Equivalence and high-overlap relations require a union supported by at least two
+observations. A one-way implication additionally requires antecedent support of
+`max(2, ceil(rare_threshold * observations))`, which suppresses trivial subset
+relations from sparse facts without hiding rare exact aliases. The JSON records
+both effective support minima.
+
+The report includes `experiment_id`, `target`, `config_hash`,
+`evidence_protocol_hash`, an outcome-blind manifest over exactly the observation
+fields consumed by the audit, and a manifest of the complete report payload.
+The latter excludes only its own field before hashing. Verify and retain those
+identities with the artifact; matching pack/glob names alone do not establish
+that two audits used the same scope, target, thresholds, or input evidence.
+
+These are structural diagnostics, not target associations or logical proofs.
+An observed implication may be an accident of the sampled history, and a
+prevalence near 50% proves neither relevance nor irrelevance. The audit must not
+rank predicates using labels, and it never authorizes deletion or activation.
+Predictive ranking happens later using only the training partition.
+
+Use the audit to repair a mechanically wrong glob, an empty concept, empirical
+duplication, extreme saturation, or path-layout drift while the process is still
+outcome-blind. Preserve every attempt. Any semantic repair—including a changed
+predicate, glob, evidence scope, change threshold, extractor, or target—requires
+a fresh experiment and protocol hash followed by rematerialization and a new
+pre-outcome audit. Never rewrite old observations to adopt the new meaning. If
+outcomes were already opened, the old sample is design data and the revision
+needs an untouched future confirmation window.
 
 For confirmatory reconstruction, export authorized forge/review/CI/incident
 history into the normalized historical-event v1 JSONL contract, then run:
@@ -521,6 +581,21 @@ bounds for precision and recall. If the pilot needs broader uncertainty
 analysis, pre-register and run it separately. If one class is absent from train
 or test, stop and collect more evidence.
 
+All target-aware selection is confined to the temporally eligible training
+partition. The built-in learner excludes training-constant columns, collapses
+exact duplicate truth columns to their lexical representative, ranks the
+remaining predicates by the absolute positive/negative prevalence-rate gap when
+negation is enabled, or by the signed positive-minus-negative gap when it is
+disabled, applies its configured search bound, and learns rules on training
+observations.
+The candidate records observed constants, alias groups, representatives, and
+that the holdout was not consulted; the pre-outcome audit separately reports
+declared predicates that never occur. Popper receives that same training cohort
+only. The `best_single_literal` baseline is likewise selected on training data.
+The chronological test partition evaluates the already frozen rule and
+baseline—even if previously duplicate columns diverge there—and must never
+select predicates or be used to revise the vocabulary.
+
 Review the candidate against all of the following:
 
 - `never_alert`, `always_alert`, and `train_majority` on the same holdout;
@@ -534,12 +609,13 @@ Review the candidate against all of the following:
 - whether the rule is useful beyond restating an obvious predicate;
 - whether the rule could encode a developer, release, or time-period confounder.
 
-For `configured_paths@1`, confirm that `best_single_literal` considered every
-configured fact and separately report each predicate's train/test prevalence,
-zero- or always-true status, pairwise/observed overlap, and path-rename drift. A
-rule that merely restates one component flag has not demonstrated value from ILP
-complexity. Never edit the path library after seeing this audit and continue to
-call the same holdout a test.
+For `configured_paths@1`, preserve the pre-outcome vocabulary audit, confirm
+that train-only selection was applied, and separately report each predicate's
+train/test prevalence, zero- or always-true status, pairwise/observed overlap,
+and path-rename drift. A rule that merely restates one component flag has not
+demonstrated value from ILP complexity. Never edit the path library after seeing
+target-aware training or holdout results and continue to call the same holdout a
+test.
 
 The default `shadow` gate requires at least 20 positive outcomes and a non-empty
 learned rule set. Before this first reviewed transition, RuleLoom requires the

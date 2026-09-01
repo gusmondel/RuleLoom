@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
+from fractions import Fraction
 from itertools import combinations, product
 
 from ruleloom.models import (
@@ -19,6 +20,8 @@ from ruleloom.models import (
     RuleLiteral,
     RuleSet,
 )
+
+HORN_ENGINE_VERSION = "ruleloom-horn/0.3"
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,6 +53,24 @@ class HornBudget:
 
 
 @dataclass(frozen=True, slots=True)
+class PredicateSelection:
+    """Deterministic predicate preprocessing over one labelled training cohort."""
+
+    labelled_observations: int
+    positive_observations: int
+    negative_observations: int
+    observed_predicates: tuple[str, ...]
+    constant_predicates: tuple[str, ...]
+    duplicate_groups: tuple[tuple[str, ...], ...]
+    ranked_predicates: tuple[str, ...]
+
+    @property
+    def duplicate_predicates(self) -> tuple[str, ...]:
+        """Aliases removed after retaining each group's lexical representative."""
+        return tuple(alias for group in self.duplicate_groups for alias in group[1:])
+
+
+@dataclass(frozen=True, slots=True)
 class _ScoredClause:
     clause: HornClause
     covered_positive_ids: frozenset[str]
@@ -73,26 +94,91 @@ def _literal_bodies(
                 )
 
 
-def rank_predicates(examples: Sequence[Observation], target: str) -> list[str]:
-    """Rank predicates deterministically by class-presence discrimination."""
-    facts = sorted({fact for item in examples for fact in item.facts})
+def select_train_predicates(
+    examples: Sequence[Observation],
+    target: str,
+    *,
+    allow_negation: bool = True,
+) -> PredicateSelection:
+    """Filter and rank predicates using only the supplied training observations.
 
-    def discrimination(predicate: str) -> tuple[float, int, str]:
-        positive_present = sum(
-            predicate in item.facts and item.labels[target] is LabelValue.POSITIVE
-            for item in examples
-        )
-        negative_present = sum(
-            predicate in item.facts and item.labels[target] is LabelValue.NEGATIVE
-            for item in examples
-        )
-        return (
-            abs(positive_present - negative_present),
-            positive_present + negative_present,
-            predicate,
-        )
+    Unknown labels do not participate. Structurally constant columns are
+    removed, and predicates with identical truth columns retain only their
+    lexicographically first representative. This structural reduction does not
+    inspect target values, although cohort membership is limited to labelled
+    training observations. With negation available, representatives are ranked
+    by their absolute class-conditional rate gap. Without negation, the signed
+    positive-minus-negative rate gap prevents a negative-only signal from
+    displacing an equally strong positive literal. If either class is absent,
+    no gap is defined and the empty ranking forces the learner to abstain.
+    """
+    labelled = tuple(
+        item
+        for item in examples
+        if item.labels.get(target, LabelValue.UNKNOWN) is not LabelValue.UNKNOWN
+    )
+    positives = tuple(item for item in labelled if item.labels[target] is LabelValue.POSITIVE)
+    negatives = tuple(item for item in labelled if item.labels[target] is LabelValue.NEGATIVE)
+    facts = tuple(sorted({fact for item in labelled for fact in item.facts}))
+    columns = {
+        predicate: tuple(predicate in item.facts for item in labelled) for predicate in facts
+    }
+    constant_predicates = tuple(
+        predicate for predicate in facts if len(set(columns[predicate])) <= 1
+    )
+    column_groups: dict[tuple[bool, ...], list[str]] = {}
+    for predicate in facts:
+        column = columns[predicate]
+        if len(set(column)) <= 1:
+            continue
+        column_groups.setdefault(column, []).append(predicate)
+    duplicate_groups = tuple(
+        tuple(group)
+        for group in sorted(column_groups.values(), key=lambda item: item[0])
+        if len(group) > 1
+    )
+    representatives = tuple(group[0] for group in column_groups.values())
 
-    return sorted(facts, key=discrimination, reverse=True)
+    if not positives or not negatives:
+        ranked_predicates: tuple[str, ...] = ()
+    else:
+
+        def ranking_key(predicate: str) -> tuple[Fraction, str]:
+            positive_present = sum(predicate in item.facts for item in positives)
+            negative_present = sum(predicate in item.facts for item in negatives)
+            signed_rate_gap = Fraction(positive_present, len(positives)) - Fraction(
+                negative_present, len(negatives)
+            )
+            rate_gap = abs(signed_rate_gap) if allow_negation else signed_rate_gap
+            return -rate_gap, predicate
+
+        ranked_predicates = tuple(sorted(representatives, key=ranking_key))
+
+    return PredicateSelection(
+        labelled_observations=len(labelled),
+        positive_observations=len(positives),
+        negative_observations=len(negatives),
+        observed_predicates=facts,
+        constant_predicates=constant_predicates,
+        duplicate_groups=duplicate_groups,
+        ranked_predicates=ranked_predicates,
+    )
+
+
+def rank_predicates(
+    examples: Sequence[Observation],
+    target: str,
+    *,
+    allow_negation: bool = True,
+) -> list[str]:
+    """Return structurally reduced predicates ranked on the supplied train cohort."""
+    return list(
+        select_train_predicates(
+            examples,
+            target,
+            allow_negation=allow_negation,
+        ).ranked_predicates
+    )
 
 
 def _score_clause(
@@ -167,7 +253,11 @@ def learn_horn(
         )
     positives = [item for item in examples if item.labels[target] is LabelValue.POSITIVE]
     negatives = [item for item in examples if item.labels[target] is LabelValue.NEGATIVE]
-    predicates = rank_predicates(examples, target)[: options.max_predicates]
+    predicates = rank_predicates(
+        examples,
+        target,
+        allow_negation=options.allow_negation,
+    )[: options.max_predicates]
     uncovered = frozenset(item.id for item in positives)
     selected: list[HornClause] = []
 

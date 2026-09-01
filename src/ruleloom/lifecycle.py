@@ -24,7 +24,13 @@ from ruleloom.evaluation import (
     temporal_split,
 )
 from ruleloom.gitfacts import GitFactsError, repository_identity
-from ruleloom.learners.horn import HornBudget, HornSettings, learn_horn
+from ruleloom.learners.horn import (
+    HORN_ENGINE_VERSION,
+    HornBudget,
+    HornSettings,
+    learn_horn,
+    select_train_predicates,
+)
 from ruleloom.models import (
     Candidate,
     HornClause,
@@ -447,11 +453,16 @@ def learn_candidate(
     train, availability_warnings = _availability_filter(split.train, split.test, target)
     if len(labeled(train, target, as_of=cutoff)) < 2:
         raise ModelError("at least two temporally eligible mature labels are required")
+    predicate_selection = select_train_predicates(
+        train,
+        target,
+        allow_negation=config.learner.allow_negation,
+    )
 
     if config.learner.engine == "horn":
         predicate_count = min(
             config.learner.max_predicates,
-            len({fact for observation in train for fact in observation.facts}),
+            len(predicate_selection.ranked_predicates),
         )
         rules_factor = config.learner.max_rules + (
             config.learner.max_rules * (config.learner.max_rules + 1) // 2
@@ -472,7 +483,7 @@ def learn_candidate(
     if config.learner.engine == "horn":
         horn_budget = HornBudget(_MAX_HORN_LITERAL_CHECKS)
         rules = _run_horn(train, target, config, budget=horn_budget)
-        engine_version = "ruleloom-horn/0.1"
+        engine_version = HORN_ENGINE_VERSION
     else:
         from ruleloom.learners.popper import learn_popper
 
@@ -508,6 +519,17 @@ def learn_candidate(
         return _run_horn(sample, sample_target, config, budget=horn_budget)
 
     warnings = [*split.warnings, *availability_warnings]
+    if predicate_selection.constant_predicates:
+        warnings.append(
+            "predicate preprocessing excluded "
+            f"{len(predicate_selection.constant_predicates)} training-constant predicate(s)"
+        )
+    if predicate_selection.duplicate_predicates:
+        warnings.append(
+            "predicate preprocessing collapsed "
+            f"{len(predicate_selection.duplicate_predicates)} duplicate training-column "
+            "alias(es); representatives were chosen lexically without consulting holdout"
+        )
     if config.learner.engine == "horn":
         stability = bootstrap_stability(
             train,
@@ -530,6 +552,13 @@ def learn_candidate(
     dataset_hash = observations_hash(observations)
     best_literal_name, _ = best_literal_baseline(train, split.test, target, as_of=cutoff)
     historical_unit = next(iter(units))
+    duplicate_groups: list[JsonValue] = [
+        {
+            "representative": group[0],
+            "aliases": list(group[1:]),
+        }
+        for group in predicate_selection.duplicate_groups
+    ]
     metadata: JsonObject = {
         "pack": config.pack,
         "pack_version": config.pack_version,
@@ -555,6 +584,20 @@ def learn_candidate(
             "method": "temporal_holdout",
             "test_start": split.test[0].observed_at if split.test else None,
             "label_availability_enforced": True,
+        },
+        "predicate_selection": {
+            "scope": "temporally_eligible_train",
+            "holdout_consulted": False,
+            "labelled_observations": predicate_selection.labelled_observations,
+            "positive_observations": predicate_selection.positive_observations,
+            "negative_observations": predicate_selection.negative_observations,
+            "observed_predicate_count": len(predicate_selection.observed_predicates),
+            "eligible_representative_count": len(predicate_selection.ranked_predicates),
+            "search_predicates": list(
+                predicate_selection.ranked_predicates[: config.learner.max_predicates]
+            ),
+            "constant_predicates": list(predicate_selection.constant_predicates),
+            "duplicate_groups": duplicate_groups,
         },
     }
     if historical_unit == "historical_change":

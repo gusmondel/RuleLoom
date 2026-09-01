@@ -161,7 +161,7 @@ or observer output visible to the agent or people who determine outcome labels.
 
 ## Dependency and release hygiene
 
-Version 0.2 supports macOS and Linux and relies on POSIX `fcntl` locking; Windows
+Version 0.5.0 supports macOS and Linux and relies on POSIX `fcntl` locking; Windows
 is not supported. The core intentionally has no runtime Python dependencies.
 Optional Popper and solver integrations expand the trusted computing base and
 must be pinned, recorded, and tested. RuleLoom does not download or install

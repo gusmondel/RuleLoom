@@ -410,7 +410,12 @@ def test_v2_consumers_reject_non_integer_or_missing_pack_version(
 def test_v1_consumers_reject_conflicting_present_pack_version(
     invalid_version: object,
 ) -> None:
-    config = RuleLoomConfig(project="ExampleProject")
+    config = RuleLoomConfig(
+        schema_version=1,
+        project="ExampleProject",
+        pack="flutter_testing",
+        pack_version=1,
+    )
     historical = _observation(0, LabelValue.POSITIVE, {"large_change"}, config=config)
     prospective = _observation(
         1,
@@ -1045,18 +1050,30 @@ def test_learning_fails_closed_on_unknown_units_repositories_and_excessive_work(
             config,
         )
 
+    legacy_config = RuleLoomConfig(
+        schema_version=1,
+        project="ExampleProject",
+        pack="flutter_testing",
+        pack_version=1,
+    )
+    large_predicates = get_pack("flutter_testing", 1).predicates[:12]
     large = [
         _observation(
             index,
             LabelValue.POSITIVE if index % 2 == 0 else LabelValue.NEGATIVE,
-            set(get_pack("flutter_testing", 1).predicates[:12]),
+            {
+                predicate
+                for offset, predicate in enumerate(large_predicates)
+                if (index + offset) % 13 != 0
+            },
+            config=legacy_config,
         )
         for index in range(400)
     ]
     with pytest.raises(ModelError, match="safe budget"):
         learn_candidate(
             large,
-            RuleLoomConfig(project="ExampleProject"),
+            legacy_config,
             as_of=datetime(2028, 1, 1, tzinfo=UTC),
         )
 

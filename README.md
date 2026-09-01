@@ -9,7 +9,7 @@ chronological holdout, and requires human review before any rule can reach a
 coding agent.
 
 > [!WARNING]
-> RuleLoom v0.4.0 is alpha research software. Start in blinded shadow mode. Do
+> RuleLoom v0.5.0 is alpha research software. Start in blinded shadow mode. Do
 > not use it as a merge gate, security control, or autonomous policy publisher.
 
 The core is language- and provider-neutral. Programming-language knowledge
@@ -86,7 +86,7 @@ RuleLoom does not:
 - replace tests, CI, code review, or human judgment;
 - turn Git-only history into confirmatory evidence;
 - infer a negative outcome merely because no failure was recorded;
-- invent new predicates in v0.4.0;
+- invent new predicates in v0.5.0;
 - implement full relational ILP with joins, recursion, entity variables, or
   unrestricted predicate invention;
 - automatically fetch data from every forge or project-management provider.
@@ -139,7 +139,7 @@ Requirements:
 
 - Python 3.11 or newer;
 - Git;
-- macOS or Linux. v0.4.0 uses POSIX `fcntl` locking and does not support
+- macOS or Linux. v0.5.0 uses POSIX `fcntl` locking and does not support
   Windows.
 
 From a checkout:
@@ -218,7 +218,55 @@ PR-time snapshot or an independent outcome. Shallow, commit-limited, and
 storage-limited histories are reported explicitly. Raw Git output has a separate
 bounded safety limit and fails closed when unusually large metadata exceeds it.
 
-### 3. Import point-in-time events when available
+### 3. Audit the frozen vocabulary before opening outcomes
+
+Materialize the Git-only units and inspect predicate behavior before exporting,
+opening, or importing review, CI, revert, or incident outcomes:
+
+```bash
+ruleloom history materialize
+ruleloom predicates audit
+```
+
+`predicates audit` is outcome-blind: it reports whole-sample prevalence,
+early/late chronological windows, configured-path match counts and bounded path
+examples, constant/rare/saturated predicates, observed equivalence,
+complementarity, implication and high overlap, and prevalence drift. It does not
+rank predicates by their relationship to the target. In particular, prevalence
+near 50% is neither evidence of usefulness nor evidence of irrelevance; only
+training outcomes can establish predictive discrimination, followed by an
+untouched chronological holdout.
+
+The default diagnostic thresholds are 1% for rare, 99% for saturated, 20
+percentage points of absolute early/late prevalence shift for drift, and 0.90
+Jaccard similarity for high overlap. Override them with
+`--rare-threshold`, `--saturated-threshold`, `--drift-threshold`, and
+`--overlap-threshold`, and preserve the values with the audit artifact.
+Relations need at least two supporting observations. To suppress trivial subset
+relations from sparse facts, a one-way implication additionally requires an
+antecedent count of `max(2, ceil(rare_threshold * observations))`; the report
+records the resulting effective minimum.
+
+The JSON also binds the repository, experiment, target, complete configuration,
+evidence protocol, and an outcome-blind observation manifest. Its final audit
+manifest hashes that complete payload before the hash field itself is appended,
+so reports from different scopes, thresholds, or input facts cannot be confused.
+
+Use this audit to find mechanical vocabulary problems such as a glob that never
+matches, an always-true concept, two empirically duplicate concepts, or a path
+layout change reflected in temporal drift. Every semantic change to a predicate,
+glob, evidence scope, change-shape threshold, extractor, or target starts a new
+experiment and protocol hash. Preserve the old attempt, initialize the revised
+vocabulary separately, rematerialize, and repeat the outcome-blind audit. Do not
+reinterpret existing observations under the new meaning.
+
+An LLM may inspect outcome-blind repository structure, architecture documents,
+and this audit to propose candidate concepts. It cannot activate them: a human
+must review the semantics, deterministic extraction must verify them, and the
+new vocabulary must be frozen before outcomes are opened. RuleLoom does not
+perform automatic predicate invention in v0.5.0.
+
+### 4. Import point-in-time events when available
 
 Export review, CI, change-snapshot, revert, and incident data from any provider
 into the normalized JSONL contract, then import it:
@@ -236,7 +284,7 @@ ruleloom history import \
   --units /absolute/path/to/change-units.jsonl
 ```
 
-The core does not call a provider API in v0.4.0; the exporter is an adapter at
+The core does not call a provider API in v0.5.0; the exporter is an adapter at
 the boundary. Event imports are append-only. A later outcome event may safely
 advance a materialized label from `unknown` to mature, but cannot rewrite a
 mature label or the predictor snapshot. See the
@@ -249,7 +297,7 @@ import to assemble it. Once created, a `ChangeUnit` ID cannot be upgraded from
 open to finalized or from `final_only` to `rich`; outcome-only events may still
 be appended and rematerialized.
 
-### 4. Materialize facts and delayed outcomes
+### 5. Materialize facts and delayed outcomes
 
 ```bash
 ruleloom history materialize
@@ -281,7 +329,7 @@ The four historical targets are deliberately separate:
 Weak heuristics are excluded by default. `--include-weak` is an explicit
 exploratory opt-in and makes dependent cases non-confirmatory.
 
-### 5. Learn and inspect a candidate
+### 6. Learn and inspect a candidate
 
 Continue only after `readiness` reports both mature classes and enough temporal
 train/holdout evidence for the configured gates:
@@ -294,9 +342,15 @@ ruleloom candidate show <candidate-id>
 
 Learning from `git_commit` and `historical_change` observations cannot be mixed
 in one candidate. Historical learning enforces one labeled observation per
-stable `change_id`.
+stable `change_id`. Predictive predicate ranking and rule search use only the
+training partition. Training-constant columns are excluded and exact duplicate
+columns are collapsed to a lexical representative; the candidate records every
+observed excluded constant and alias. Declared predicates that never occur are
+reported by the separate outcome-blind audit. The later chronological holdout
+evaluates that frozen selection—even if aliases diverge there—and never chooses
+predicates, thresholds, or rules.
 
-### 6. Run a blinded shadow pilot
+### 7. Run a blinded shadow pilot
 
 After human inspection, promote only to shadow for the initial pilot:
 
@@ -481,7 +535,7 @@ or holdout errors.
 Adapters have two independent roles:
 
 1. **Evidence adapters** normalize a provider's change, review, CI, revert, and
-   incident records into historical-event JSONL. v0.4.0 ships the contract and
+   incident records into historical-event JSONL. v0.5.0 ships the contract and
    importer, not hosted provider integrations.
 2. **Agent adapters** render only approved policies into
    `.agents/skills/ruleloom/SKILL.md` for Codex and
@@ -496,6 +550,7 @@ derived artifacts and should be reviewed like source code.
 | --- | --- |
 | `ruleloom init` | Initialize one frozen experiment and local data layout |
 | `ruleloom packs list` | Inspect registered evidence packs and predicates |
+| `ruleloom predicates audit` | Audit frozen predicate coverage and drift without outcomes |
 | `ruleloom history bootstrap-git` | Ingest bounded Git topology as exploratory history |
 | `ruleloom history import` | Import normalized events and/or change units |
 | `ruleloom history materialize` | Reconstruct prediction-time facts and conservative labels |

@@ -660,7 +660,7 @@ class EvidenceConfig:
 class RuleLoomConfig:
     project: str
     target: str = "needs_extra_validation"
-    pack: str = "flutter_testing"
+    pack: str = "generic_changes"
     pack_version: int = 1
     dataset: str = ".ruleloom/observations.jsonl"
     candidates_dir: str = ".ruleloom/candidates"
@@ -673,7 +673,7 @@ class RuleLoomConfig:
     learner: LearnerConfig = field(default_factory=LearnerConfig)
     evaluation: EvaluationConfig = field(default_factory=EvaluationConfig)
     promotion: PromotionConfig = field(default_factory=PromotionConfig)
-    schema_version: int = 1
+    schema_version: int = 2
     pack_config: ConfiguredPathsConfig | None = None
 
     def __post_init__(self) -> None:

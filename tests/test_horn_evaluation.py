@@ -13,7 +13,14 @@ from ruleloom.evaluation import (
     majority_baseline,
     temporal_split,
 )
-from ruleloom.learners.horn import HornBudget, HornSettings, learn_horn
+from ruleloom.learners.horn import (
+    HORN_ENGINE_VERSION,
+    HornBudget,
+    HornSettings,
+    learn_horn,
+    rank_predicates,
+    select_train_predicates,
+)
 from ruleloom.lifecycle import learn_candidate
 from ruleloom.models import (
     FactEvidence,
@@ -27,7 +34,13 @@ from ruleloom.models import (
 )
 
 TARGET = "needs_extra_validation"
-PROTOCOL_HASH = RuleLoomConfig(project="Tests").evidence_protocol_hash
+LEGACY_CONFIG = RuleLoomConfig(
+    schema_version=1,
+    project="Tests",
+    pack="flutter_testing",
+    pack_version=1,
+)
+PROTOCOL_HASH = LEGACY_CONFIG.evidence_protocol_hash
 
 
 def _observation(
@@ -131,6 +144,149 @@ def test_horn_learner_finds_a_precise_conjunction_with_negation() -> None:
     }
     assert rules.predicts(frozenset({"uses_async"}))
     assert not rules.predicts(frozenset({"uses_async", "adds_widget_test"}))
+
+
+def test_predicate_ranking_resists_negative_class_imbalance() -> None:
+    examples = [
+        *(
+            _dated_observation(index, {"always", "risk"}, LabelValue.POSITIVE)
+            for index in range(1, 3)
+        ),
+        *(_dated_observation(index, {"always"}, LabelValue.NEGATIVE) for index in range(3, 11)),
+    ]
+
+    assert rank_predicates(examples, TARGET) == ["risk"]
+
+    rules = learn_horn(
+        examples,
+        TARGET,
+        HornSettings(
+            max_body=1,
+            max_rules=1,
+            allow_negation=False,
+            min_precision=1.0,
+            min_support=2,
+            max_predicates=1,
+        ),
+    )
+
+    assert rules.clauses == (HornClause(TARGET, (RuleLiteral("risk"),)),)
+
+
+def test_predicate_ranking_keeps_discriminative_negation_under_imbalance() -> None:
+    examples = [
+        *(_dated_observation(index, {"always"}, LabelValue.POSITIVE) for index in range(1, 9)),
+        *(
+            _dated_observation(index, {"always", "safe"}, LabelValue.NEGATIVE)
+            for index in range(9, 11)
+        ),
+    ]
+
+    assert rank_predicates(examples, TARGET) == ["safe"]
+
+    rules = learn_horn(
+        examples,
+        TARGET,
+        HornSettings(
+            max_body=1,
+            max_rules=1,
+            allow_negation=True,
+            min_precision=1.0,
+            min_support=8,
+            max_predicates=1,
+        ),
+    )
+
+    assert rules.clauses == (HornClause(TARGET, (RuleLiteral("safe", negated=True),)),)
+
+
+def test_predicate_ranking_without_negation_prefers_positive_direction() -> None:
+    examples = [
+        _dated_observation(1, {"z_risk"}, LabelValue.POSITIVE),
+        _dated_observation(2, {"z_risk"}, LabelValue.POSITIVE),
+        _dated_observation(3, {"a_safe"}, LabelValue.NEGATIVE),
+        _dated_observation(4, {"a_safe"}, LabelValue.NEGATIVE),
+    ]
+
+    assert rank_predicates(examples, TARGET) == ["a_safe", "z_risk"]
+    assert rank_predicates(examples, TARGET, allow_negation=False) == [
+        "z_risk",
+        "a_safe",
+    ]
+    assert learn_horn(
+        examples,
+        TARGET,
+        HornSettings(
+            max_body=1,
+            max_rules=1,
+            allow_negation=False,
+            min_precision=1.0,
+            min_support=2,
+            max_predicates=1,
+        ),
+    ).clauses == (HornClause(TARGET, (RuleLiteral("z_risk"),)),)
+
+
+def test_predicate_ranking_abstains_when_either_class_is_absent() -> None:
+    examples = [
+        _dated_observation(1, {"always", "sometimes"}, LabelValue.POSITIVE),
+        _dated_observation(2, {"always"}, LabelValue.POSITIVE),
+    ]
+
+    assert rank_predicates(examples, TARGET) == []
+    assert (
+        learn_horn(
+            examples,
+            TARGET,
+            HornSettings(min_support=1, max_predicates=1),
+        ).clauses
+        == ()
+    )
+
+
+def test_predicate_ranking_drops_constants_and_breaks_rate_ties_lexically() -> None:
+    examples = [
+        _dated_observation(1, {"always", "alpha"}, LabelValue.POSITIVE),
+        _dated_observation(2, {"always", "zeta"}, LabelValue.POSITIVE),
+        _dated_observation(3, {"always", "alpha"}, LabelValue.NEGATIVE),
+        _dated_observation(4, {"always", "zeta"}, LabelValue.NEGATIVE),
+    ]
+
+    assert rank_predicates(examples, TARGET) == ["alpha", "zeta"]
+
+
+def test_predicate_selection_collapses_duplicate_training_columns_lexically() -> None:
+    examples = [
+        _dated_observation(1, {"always", "alpha", "alpha_alias"}, LabelValue.POSITIVE),
+        _dated_observation(2, {"always", "alpha", "alpha_alias"}, LabelValue.POSITIVE),
+        _dated_observation(3, {"always"}, LabelValue.NEGATIVE),
+        _dated_observation(4, {"always"}, LabelValue.NEGATIVE),
+        _observation(
+            "unknown-future",
+            {"always", "alpha_alias"},
+            LabelValue.UNKNOWN,
+            observed_at="2026-01-05T09:00:00+00:00",
+        ),
+    ]
+
+    selection = select_train_predicates(examples, TARGET)
+
+    assert selection.constant_predicates == ("always",)
+    assert selection.duplicate_groups == (("alpha", "alpha_alias"),)
+    assert selection.duplicate_predicates == ("alpha_alias",)
+    assert selection.ranked_predicates == ("alpha",)
+    assert rank_predicates(examples, TARGET) == ["alpha"]
+    assert learn_horn(
+        examples,
+        TARGET,
+        HornSettings(
+            max_body=1,
+            max_rules=1,
+            allow_negation=False,
+            min_precision=1.0,
+            min_support=2,
+        ),
+    ).clauses == (HornClause(TARGET, (RuleLiteral("alpha"),)),)
 
 
 def test_horn_learner_abstains_when_support_or_precision_is_insufficient() -> None:
@@ -286,7 +442,10 @@ def test_candidate_excludes_labels_unavailable_at_holdout_start() -> None:
         _dated_observation(6, {"touches_test"}, LabelValue.NEGATIVE),
     ]
     config = RuleLoomConfig(
+        schema_version=1,
         project="ExampleProject",
+        pack="flutter_testing",
+        pack_version=1,
         learner=LearnerConfig(
             max_body=1,
             max_rules=1,
@@ -304,6 +463,7 @@ def test_candidate_excludes_labels_unavailable_at_holdout_start() -> None:
 
     candidate = learn_candidate(observations, config)
 
+    assert candidate.engine_version == HORN_ENGINE_VERSION
     assert candidate.train_ids == ("example-1", "example-2", "example-4")
     assert candidate.test_ids == ("example-5", "example-6")
     assert any("temporal leakage" in warning for warning in candidate.warnings)
@@ -314,6 +474,103 @@ def test_candidate_excludes_labels_unavailable_at_holdout_start() -> None:
         "train_majority",
         "best_single_literal",
     }
+
+
+def test_candidate_deduplicates_only_on_temporally_eligible_train() -> None:
+    observations = [
+        _dated_observation(1, {"large_change", "multi_file_change"}, LabelValue.POSITIVE),
+        _dated_observation(2, {"large_change", "multi_file_change"}, LabelValue.POSITIVE),
+        _dated_observation(3, set(), LabelValue.NEGATIVE),
+        _dated_observation(4, set(), LabelValue.NEGATIVE),
+        _dated_observation(5, {"large_change", "multi_file_change"}, LabelValue.POSITIVE),
+        _dated_observation(6, set(), LabelValue.NEGATIVE),
+        # The future holdout distinguishes the aliases. It must not influence
+        # preprocessing or representative choice.
+        _dated_observation(7, {"multi_file_change"}, LabelValue.POSITIVE),
+        _dated_observation(8, set(), LabelValue.NEGATIVE),
+    ]
+    config = RuleLoomConfig(
+        schema_version=1,
+        project="ExampleProject",
+        pack="flutter_testing",
+        pack_version=1,
+        learner=LearnerConfig(
+            max_body=1,
+            max_rules=1,
+            min_precision=1.0,
+            min_support=2,
+            bootstrap_runs=0,
+        ),
+        evaluation=EvaluationConfig(
+            test_fraction=0.25,
+            min_train_examples=6,
+            min_test_examples=2,
+        ),
+    )
+
+    candidate = learn_candidate(observations, config)
+
+    assert candidate.rules.clauses == (HornClause(TARGET, (RuleLiteral("large_change"),)),)
+    assert candidate.metadata["predicate_selection"] == {
+        "scope": "temporally_eligible_train",
+        "holdout_consulted": False,
+        "labelled_observations": 6,
+        "positive_observations": 3,
+        "negative_observations": 3,
+        "observed_predicate_count": 2,
+        "eligible_representative_count": 1,
+        "search_predicates": ["large_change"],
+        "constant_predicates": [],
+        "duplicate_groups": [
+            {
+                "representative": "large_change",
+                "aliases": ["multi_file_change"],
+            }
+        ],
+    }
+    assert any("without consulting holdout" in warning for warning in candidate.warnings)
+    assert candidate.metrics["test"].false_negative == 1
+
+
+def test_candidate_without_negation_uses_signed_training_ranking() -> None:
+    observations = [
+        _dated_observation(1, {"uses_async"}, LabelValue.POSITIVE),
+        _dated_observation(2, {"uses_async"}, LabelValue.POSITIVE),
+        _dated_observation(3, {"adds_widget_test"}, LabelValue.NEGATIVE),
+        _dated_observation(4, {"adds_widget_test"}, LabelValue.NEGATIVE),
+        _dated_observation(5, {"uses_async"}, LabelValue.POSITIVE),
+        _dated_observation(6, {"adds_widget_test"}, LabelValue.NEGATIVE),
+        _dated_observation(7, {"uses_async"}, LabelValue.POSITIVE),
+        _dated_observation(8, {"adds_widget_test"}, LabelValue.NEGATIVE),
+    ]
+    config = RuleLoomConfig(
+        schema_version=1,
+        project="ExampleProject",
+        pack="flutter_testing",
+        pack_version=1,
+        learner=LearnerConfig(
+            max_body=1,
+            max_rules=1,
+            allow_negation=False,
+            min_precision=1.0,
+            min_support=2,
+            max_predicates=1,
+            bootstrap_runs=0,
+        ),
+        evaluation=EvaluationConfig(
+            test_fraction=0.25,
+            min_train_examples=6,
+            min_test_examples=2,
+        ),
+    )
+
+    candidate = learn_candidate(observations, config)
+
+    assert candidate.rules.clauses == (HornClause(TARGET, (RuleLiteral("uses_async"),)),)
+    predicate_selection = candidate.metadata["predicate_selection"]
+    assert isinstance(predicate_selection, dict)
+    assert predicate_selection["search_predicates"] == ["uses_async"]
+    assert candidate.metrics["test"].matthews_correlation == 1.0
 
 
 def test_bootstrap_stability_is_reproducible_and_handles_no_runs() -> None:

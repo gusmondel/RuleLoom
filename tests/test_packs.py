@@ -208,6 +208,38 @@ def test_configured_globs_are_rooted_case_sensitive_and_double_star_matches_zero
     }
 
 
+@pytest.mark.parametrize(
+    ("pattern", "path", "expected"),
+    [
+        ("apps/web/main.ts", "apps/web/main.ts", True),
+        ("apps/web/main.ts", "apps/web/main.ts.bak", False),
+        ("apps/web/main.ts", "apps/web", False),
+        ("apps/web/**", "apps/web", True),
+        ("apps/web/**", "apps/web/src/page.ts", True),
+        ("apps/web/**", "apps", False),
+        ("apps/*/main.?s", "apps/web/main.ts", True),
+        ("apps/*/main.?s", "apps/web/deep/main.ts", False),
+        ("a/**/b", "a/b", True),
+        ("a/**/b", "a/x/y/b", True),
+        ("a/**/b", "a/x/y/c", False),
+        ("**/contracts/?pi.*", "contracts/api.json", True),
+        ("**/contracts/?pi.*", "packages/contracts/api.yaml", True),
+        ("**", "README.md", True),
+        ("**", "deep/source/main.py", True),
+        ("*.rules.test.*", "firestore.rules.test.js", True),
+        ("*.rules.test.*", "tests/firestore.rules.test.js", False),
+    ],
+)
+def test_compiled_glob_literal_prefix_optimization_preserves_semantics(
+    pattern: str,
+    path: str,
+    expected: bool,
+) -> None:
+    compiled = configured_paths_module._compile_glob(pattern)
+
+    assert compiled.matches(tuple(path.split("/"))) is expected
+
+
 def test_configured_component_matcher_agrees_with_portable_wildcard_semantics() -> None:
     alphabet = "ab*?"
     patterns = (
@@ -353,7 +385,68 @@ def test_configured_paths_metadata_remains_bounded_for_large_diffs() -> None:
     assert len(encoded) < 256 * 1024
 
 
-def test_configured_paths_rejects_adversarial_matcher_work_before_matching() -> None:
+def test_configured_paths_routes_large_diffs_through_literal_prefixes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    predicates = []
+    for predicate_index in range(17):
+        includes = tuple(
+            (
+                "packages/**"
+                if predicate_index == 0 and glob_index == 0
+                else (f"unrelated_surface_{predicate_index:02d}/long_component_{glob_index:02d}/**")
+            )
+            for glob_index in range(3)
+        )
+        predicates.append(
+            PathPredicateConfig(
+                f"touches_surface_{predicate_index:02d}",
+                includes,
+            )
+        )
+    config = _configured_paths(*predicates)
+    evidence = DiffEvidence(
+        changes=tuple(
+            FileChange(
+                f"packages/component_{index:05d}/src/feature_{index:05d}.ts",
+                additions=1,
+                deletions=0,
+            )
+            for index in range(6_700)
+        )
+    )
+    component_match_calls = 0
+    original_component_matches = configured_paths_module._component_matches
+
+    def counted_component_matches(pattern: str, value: str) -> bool:
+        nonlocal component_match_calls
+        component_match_calls += 1
+        return original_component_matches(pattern, value)
+
+    monkeypatch.setattr(
+        configured_paths_module,
+        "_component_matches",
+        counted_component_matches,
+    )
+
+    result = get_pack("configured_paths", 1, config).run(
+        evidence,
+        EvidenceConfig(metadata_file_limit=16).pack_options,
+    )
+
+    counts = result.metadata["configured_path_match_counts"]
+    assert isinstance(counts, dict)
+    assert counts["touches_surface_00"] == 6_700
+    assert all(
+        count == 0 for predicate, count in counts.items() if predicate != "touches_surface_00"
+    )
+    assert config.total_globs == 51
+    assert component_match_calls == 0
+
+
+def test_configured_paths_rejects_adversarial_matcher_work_before_matching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     pattern = "*a" * 127 + "*"
     config = _configured_paths(PathPredicateConfig("touches_adversarial", (pattern,)))
     evidence = DiffEvidence(
@@ -362,6 +455,11 @@ def test_configured_paths_rejects_adversarial_matcher_work_before_matching() -> 
             for index in range(6_700)
         )
     )
+
+    def unexpected_match(_pattern: str, _value: str) -> bool:
+        raise AssertionError("unsafe matcher work was attempted before preflight rejection")
+
+    monkeypatch.setattr(configured_paths_module, "_component_matches", unexpected_match)
 
     with pytest.raises(ValueError, match="matcher work units"):
         get_pack("configured_paths", 1, config).run(evidence, EvidenceConfig().pack_options)
@@ -439,7 +537,12 @@ def test_flutter_semantic_change_isolated_by_version_and_protocol_hash() -> None
         pack="flutter_testing",
         pack_version=2,
     )
-    v1_profile = RuleLoomConfig(project="ExampleProject")
+    v1_profile = RuleLoomConfig(
+        schema_version=1,
+        project="ExampleProject",
+        pack="flutter_testing",
+        pack_version=1,
+    )
 
     assert "mutates_state" not in v1.facts
     assert "mutates_state" in v2.facts

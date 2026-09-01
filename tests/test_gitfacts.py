@@ -163,6 +163,56 @@ def test_collect_snapshot_extracts_deterministic_flutter_evidence(
     assert observation.source["kind"] == "git_range"
 
 
+def test_collect_snapshot_accepts_only_canonical_empty_tree_as_noncommit_base(
+    flutter_repo: tuple[Path, str, str],
+) -> None:
+    repo, root_commit, head = flutter_repo
+    empty_tree = (
+        subprocess.run(
+            ["git", "-C", str(repo), "hash-object", "-t", "tree", "--stdin"],
+            check=True,
+            capture_output=True,
+            input=b"",
+        )
+        .stdout.decode("ascii")
+        .strip()
+    )
+
+    observation = collect_snapshot(
+        repo,
+        empty_tree,
+        root_commit,
+        protocol_hash=PROTOCOL_HASH,
+        pack="generic_changes",
+        pack_version=1,
+    )
+
+    assert observation.source["base"] == empty_tree
+    assert observation.source["head"] == root_commit
+    assert observation.metadata["changed_files"] == ["README.md"]
+    assert observation.facts == {"touches_docs"}
+
+    ordinary_tree = _git(repo, "rev-parse", f"{head}^{{tree}}")
+    with pytest.raises(GitFactsError, match="expected commit type"):
+        collect_snapshot(
+            repo,
+            ordinary_tree,
+            head,
+            protocol_hash=PROTOCOL_HASH,
+            pack="generic_changes",
+            pack_version=1,
+        )
+    with pytest.raises(GitFactsError, match="expected commit type"):
+        collect_snapshot(
+            repo,
+            root_commit,
+            ordinary_tree,
+            protocol_hash=PROTOCOL_HASH,
+            pack="generic_changes",
+            pack_version=1,
+        )
+
+
 def test_backfill_is_chronological_and_never_infers_labels(
     flutter_repo: tuple[Path, str, str],
 ) -> None:
@@ -199,7 +249,10 @@ def test_legacy_config_and_bare_collector_defaults_remain_compatible(
 ) -> None:
     repo, base, head = flutter_repo
     config = RuleLoomConfig(
+        schema_version=1,
         project="LegacyApi",
+        pack="flutter_testing",
+        pack_version=1,
         protocol=ProtocolConfig(repository_id=repository_identity(repo)),
     )
     observation = collect_snapshot(

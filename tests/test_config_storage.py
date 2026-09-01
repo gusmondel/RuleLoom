@@ -58,7 +58,10 @@ TARGET = "needs_extra_validation"
 REPOSITORY_ID = "repo.test"
 CONFIG_HASH = "c" * 64
 TEST_CONFIG = RuleLoomConfig(
+    schema_version=1,
     project="StorageTrust",
+    pack="flutter_testing",
+    pack_version=1,
     protocol=ProtocolConfig(
         experiment_id="test-pilot-v1",
         repository_id=REPOSITORY_ID,
@@ -234,7 +237,12 @@ def test_pack_config_addition_preserves_pre_v3_positional_constructor_order() ->
 
 
 def test_schema_v1_config_identity_remains_stable() -> None:
-    config = RuleLoomConfig(project="ExampleProject")
+    config = RuleLoomConfig(
+        schema_version=1,
+        project="ExampleProject",
+        pack="flutter_testing",
+        pack_version=1,
+    )
 
     assert config.schema_version == 1
     assert "pack_version" not in config.to_dict()
@@ -244,6 +252,21 @@ def test_schema_v1_config_identity_remains_stable() -> None:
         config.evidence_protocol_hash
         == "0b8c8c7e25b4975d8c84a3b83dbf160902760c9b7bc2212e80dfc85008697188"
     )
+    assert RuleLoomConfig.from_dict(config.to_dict()) == config
+
+
+def test_constructor_defaults_to_schema_v2_generic_changes() -> None:
+    config = RuleLoomConfig(project="ExampleProject")
+
+    assert config == default_config("ExampleProject")
+    assert (config.schema_version, config.pack, config.pack_version) == (
+        2,
+        "generic_changes",
+        1,
+    )
+    assert config.evidence_protocol["extractor"] == "ruleloom.generic_changes.git.v1"
+    assert "pack_version" in config.to_dict()
+    assert "evidence" in config.to_dict()
 
 
 def test_schema_v2_binds_pack_version_scope_and_thresholds_to_protocol() -> None:

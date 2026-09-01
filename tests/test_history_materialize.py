@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from ruleloom.config import RuleLoomConfig
+from ruleloom.history.git import collect_git_history
 from ruleloom.history.materialize import (
     materialize_history,
     resolve_outcome_target,
@@ -148,6 +149,30 @@ def test_materializes_point_in_time_facts_and_strong_outcome(
     )
     with pytest.raises(ModelError, match="recomputed outcome evidence"):
         validate_materialized_outcome(config, forged, unit, [snapshot, review])
+
+
+def test_materializes_git_root_unit_against_canonical_empty_tree(
+    materialization_repo: tuple[Path, RuleLoomConfig, str, str],
+) -> None:
+    repo, config, root_commit, _ = materialization_repo
+    history = collect_git_history(
+        repo,
+        max_commits=None,
+        repository_id=config.protocol.repository_id,
+    )
+    root_unit = next(unit for unit in history.units if unit.prediction_sha == root_commit)
+    root_event = next(event for event in history.events if event.change_id == root_unit.id)
+
+    report = materialize_history(repo, config, [root_unit], [root_event])
+
+    assert report.examined == 1
+    assert report.skipped == 0
+    assert report.unknown == 1
+    observation = report.observations[0]
+    assert observation.id == f"history.{root_unit.id}"
+    assert observation.source["base"] == root_unit.base_sha
+    assert observation.source["head"] == root_commit
+    assert observation.metadata["changed_files"] == ["base.txt"]
 
 
 def test_weak_label_is_opt_in_and_never_confirmatory(
