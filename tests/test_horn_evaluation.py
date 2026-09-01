@@ -19,6 +19,7 @@ from ruleloom.learners.horn import (
     HornBudget,
     HornSettings,
     learn_horn,
+    learn_horn_diagnostics,
     rank_predicates,
     select_train_predicates,
 )
@@ -145,6 +146,73 @@ def test_horn_learner_finds_a_precise_conjunction_with_negation() -> None:
     }
     assert rules.predicts(frozenset({"uses_async"}))
     assert not rules.predicts(frozenset({"uses_async", "adds_widget_test"}))
+
+
+def test_relative_lift_gate_accepts_precise_niche_guardrail() -> None:
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    examples = [
+        _observation(
+            f"lift-{index}",
+            {"uses_async"} if index < 10 else set(),
+            LabelValue.POSITIVE if index < 10 else LabelValue.NEGATIVE,
+            observed_at=(start + timedelta(days=index)).isoformat(),
+        )
+        for index in range(100)
+    ]
+
+    result = learn_horn_diagnostics(
+        examples,
+        TARGET,
+        HornSettings(
+            max_body=1,
+            max_rules=1,
+            allow_negation=False,
+            min_support=2,
+            max_predicates=1,
+            gate_mode="relative_lift",
+            min_lift_lower_bound=3.0,
+            min_alert_rate=0.01,
+        ),
+    )
+
+    assert len(result.rules.clauses) == 1
+    assert result.rules.clauses[0].signature == "needs_extra_validation:-uses_async"
+
+
+def test_near_misses_report_train_only_rejection_and_search_size() -> None:
+    start = datetime(2025, 1, 1, tzinfo=UTC)
+    examples = [
+        _observation(
+            f"near-{index}",
+            {"uses_async"} if index < 20 else set(),
+            LabelValue.POSITIVE if index < 10 else LabelValue.NEGATIVE,
+            observed_at=(start + timedelta(days=index)).isoformat(),
+        )
+        for index in range(100)
+    ]
+
+    result = learn_horn_diagnostics(
+        examples,
+        TARGET,
+        HornSettings(
+            max_body=1,
+            max_rules=1,
+            allow_negation=False,
+            min_support=2,
+            max_predicates=1,
+            gate_mode="relative_lift",
+            min_lift_lower_bound=3.0,
+            near_miss_limit=3,
+        ),
+    )
+
+    assert not result.rules.clauses
+    assert result.hypotheses_examined == 1
+    assert len(result.near_misses) == 1
+    diagnostic = result.near_misses[0].to_dict()
+    assert diagnostic["selection_scope"] == "train_only_exploratory"
+    assert diagnostic["post_selection_inference"] is False
+    assert "conservative_lift_below_minimum" in diagnostic["rejection_reasons"]
 
 
 def test_predicate_ranking_resists_negative_class_imbalance() -> None:

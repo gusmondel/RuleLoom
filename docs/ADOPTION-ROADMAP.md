@@ -37,7 +37,8 @@ flowchart LR
     A --> R[Reviewed repository assertions]
     P[Point-in-time provider events] --> L[Canonical evidence ledger]
     L --> T[Temporal materializer]
-    T --> I[ILP learner and lifecycle]
+    T --> S[Pre-holdout signal probe]
+    S --> I[ILP learner and lifecycle]
     I --> E[Evidence API]
     E --> C[CLI and progressive report]
     E --> M[Local MCP server]
@@ -102,6 +103,25 @@ Acceptance targets:
    a real need for durable multi-repository webhooks, organization installation,
    or centralized checks. A hosted App processes provider metadata and therefore
    must not be described as wholly local-first.
+
+### v0.9: signal-aware protocol and historical predicates
+
+1. A schema-v4 rolling-origin probe estimates whether the frozen vocabulary has
+   useful pre-holdout signal before Horn can access the deployment holdout.
+2. Null Horn results expose bounded train-only near-misses and rejection reasons
+   without converting post-selection diagnostics into evidence.
+3. Low-prevalence clauses use preregistered relative-to-base-rate and alert-rate
+   gates; MCC, average precision, and risk/coverage remain visible.
+4. `generic_changes@2` adds ordinal change shape, diffusion, prior hotspots,
+   dormancy, missing co-change partners, and privacy-preserving ownership
+   boundaries without language parsing.
+5. Materialization reports retention by outcome class, while missing historical
+   snapshots remain abstentions and prospective capture prevents recurrence.
+6. A bounded structural smoke run now executes the same frozen protocol on
+   Flask, ripgrep, and Express and records safe abstention with no labels. This
+   supports only implementation portability; predictive portability still
+   requires provider outcomes and each surviving rule still requires
+   repository-local prospective confirmation.
 
 ## Adoption gates
 

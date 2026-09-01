@@ -137,6 +137,44 @@ RuleLoom, and report-engine versions, and fails unless the evidence hash, volume
 and normalized structural report are equivalent. Timings are environment-local;
 they are not a portable performance claim.
 
+## Point-in-time history features in v0.9
+
+`generic_changes@2` replays retained observations once per persistence batch to
+derive prior hotspots, dormancy, and bounded co-change state. It requires exact
+path manifests and caps one observation at 50 paths for pair updates plus five
+million pair updates per cohort. When either bound is reached, the report keeps
+the limitation explicit instead of silently sampling a different relation.
+
+Prior-snapshot `CODEOWNERS` lookup uses native Git `cat-file` batches. One
+bounded batch resolves all requested `<base>:<location>` expressions; a second
+set of batches reads each distinct CODEOWNERS blob only once. Unchanged
+CODEOWNERS content across thousands of commits therefore avoids thousands of
+`git show` processes and duplicate blob reads. Each blob is capped at 1 MiB,
+lazy network fetch is disabled, unsupported pattern syntax abstains, and owner
+identities are never persisted. Matching also abstains above 10,000 parsed rules
+or one million path-rule comparisons. A regression test covers the bounded
+process count across multiple distinct commits.
+
+Historical feature replay is still linear in retained observations and exact
+changed-path entries. It is not a substitute for the future indexed-ledger work
+below.
+
+### Partial clones fail closed instead of fetching one blob at a time
+
+Exact `--numstat` and content evidence needs historical blobs. In a
+`--filter=blob:none` clone, an ordinary Git diff may demand-fetch those blobs
+individually. RuleLoom sets `GIT_NO_LAZY_FETCH=1` for these reads. If a promisor
+blob is absent, the entire materialization transaction aborts with instructions
+to hydrate the selected history or use a full observer clone. It does not keep
+the subset that happened to be cached.
+
+Git `2.49+` documents the experimental `git backfill` command for downloading
+missing historical blobs in batches, but some vendor builds do not ship it and
+running it mutates the observer's object database and uses the network.
+RuleLoom therefore never invokes it implicitly. The bounded
+[three-repository smoke run](../case-studies/portability-v09/RESULTS.md) records
+the failure mode and the fail-closed regression result.
+
 ## The remaining storage limit
 
 The v0.7 canonical ledger is still two atomically paired, sorted JSONL files.
@@ -155,6 +193,7 @@ unreviewed larger allocation.
 | Option | Best use | Decision |
 |---|---|---|
 | Native Git plumbing | Exact repository traversal, object lookup, and diff semantics | **Default now.** Git is already required; batch protocols remove most process startup without adding a runtime or packaging boundary. |
+| Git `backfill` | Batch hydration of missing blobs in a partial observer clone | User-controlled preparation when supported; experimental, networked, and never invoked implicitly by RuleLoom. |
 | libgit2 / pygit2 | In-process graph and tree traversal | Benchmark as a future optional backend. It can reduce traversal overhead, but requires native binaries and a parity suite for rename, path, SHA-256, shallow-repository, and diff behavior. |
 | Dulwich | Pure-Python Git object access | Keep as a portability candidate, not the default. It removes subprocess startup but adds a dependency and still needs the same semantic parity work. |
 | SQLite with WAL | Indexed local event ledger, incremental queries, transactions | Leading candidate for a v2 ledger or index. Python ships SQLite, but WAL, migration, recovery, locking, and canonical export must be tested before it can replace evidence JSONL. |
@@ -165,6 +204,9 @@ Relevant primary documentation:
 
 - Git's long-running object protocol is documented under
   [`cat-file --batch`](https://git-scm.com/docs/git-cat-file).
+- Git documents both the one-object-at-a-time partial-clone hazard and its
+  experimental batch hydrator under
+  [`git backfill`](https://git-scm.com/docs/git-backfill).
 - Git can accelerate graph walks with a
   [commit-graph](https://git-scm.com/docs/commit-graph.html); RuleLoom may consume
   one maintained by Git, but a read-only audit does not write repository

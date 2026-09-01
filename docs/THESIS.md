@@ -52,7 +52,7 @@ Software repositories offer structured, repeated decisions. Some signals are
 language-neutral—change size, file distribution, tests, documentation, CI, and
 dependency manifests—while specialized packs can add facts about syntax and
 framework behavior such as state mutation, asynchronous code, or navigation.
-RuleLoom 0.8.0 encodes each change as Boolean unary predicates and represents
+RuleLoom 0.9.0 encodes each change as Boolean unary predicates and represents
 conjunctions of those properties as rules rather than opaque scores. It does not
 learn relations among multiple entities.
 
@@ -64,7 +64,9 @@ change-time evidence
        v
  deterministic predicates ------> delayed, independent outcome
        |                                      |
-       +--------------- ILP ------------------+
+       +------ pre-holdout signal probe -------+
+                           |
+                    bounded Horn ILP
                            |
                     candidate clauses
                            |
@@ -90,7 +92,7 @@ mechanism for repository-change outcomes and, after prospective validation, for
 coding guidance. AutoSpec makes that link less speculative for agent safety,
 but it remains unvalidated for this product target.
 
-Cold start does not mean waiting for a year of future labels. Version 0.8.0 can
+Cold start does not mean waiting for a year of future labels. Version 0.9.0 can
 ingest a bounded recent prefix of the reachable Git graph immediately and
 combine it with authorized, normalized forge/review/CI/revert/incident events
 already retained by the repository workflow. A bounded built-in GitHub adapter
@@ -113,6 +115,8 @@ with different extraction semantics from being silently pooled. Schema v3 adds
 canonical `pack_config` to that identity for configurable packs. Path matching
 can be language-neutral while the configured component taxonomy remains
 repository-specific background knowledge.
+Schema v4 freezes a future holdout boundary, a rolling-origin signal probe, and
+relative Horn gates before labels are inspected.
 
 ## Why ILP rather than a larger prompt
 
@@ -223,7 +227,7 @@ yet support third-party pack plugins, so broader extensibility remains unproven.
 - Collection does not alter application code.
 - The default evidence path is deterministic and the selected pack must attach
   provenance to every emitted fact. Although the artifact schema reserves
-  `agent`, `human`, and `imported` provenance kinds, version 0.8.0 accepts only
+  `agent`, `human`, and `imported` provenance kinds, version 0.9.0 accepts only
   exact deterministic built-in-pack provenance for validation, learning, and
   prediction; non-deterministic facts are future work.
 - Each experiment selects exactly one pack name/version. Pack identity,
@@ -249,13 +253,13 @@ yet support third-party pack plugins, so broader extensibility remains unproven.
   mutable current names do not prove what a label was called at the historical
   application time. Strong label-backed outcomes require an external
   point-in-time webhook/export/immutable ledger and normalized event import.
-  v0.8.0 includes a local GitHub Action/webhook capture substrate for future
+  v0.9.0 includes a local GitHub Action/webhook capture substrate for future
   deliveries; it cannot repair a mutable historical archive after the fact.
 - A predictor snapshot must precede its outcome-generating event. A final diff
   containing validation added because of review is not a valid review-time
   predictor, regardless of chronological ordering.
 - Training never uses observations newer than the holdout.
-- Version 0.8.0 historical materialization emits one observation per stable
+- Version 0.9.0 historical materialization emits one observation per stable
   `ChangeUnit`; `learn` rejects duplicate mature `change_id` values and mixed
   unit cohorts. `git_only`/`final_only` and weak-dependent cases are exploratory,
   and they cannot support approval of a learned historical candidate. A manual
@@ -324,17 +328,19 @@ true after a representative pilot:
 Failure is an acceptable result. The pilot is designed to distinguish a useful
 repository-learning loop from a polished demonstration.
 
-## Scope of version 0.8.0
+## Scope of version 0.9.0
 
 Included:
 
 - propositionalized unary Boolean facts over one repository change variable;
 - `positive`, `negative`, and `unknown` labels;
-- schema-v2/v3 single-pack experiment protocols with pack version,
+- schema-v2/v3/v4 single-pack experiment protocols with pack version,
   pack-neutral collection settings, and schema-v3 canonical `pack_config`
   included in their evidence identity;
-- `generic_changes@1` for language-neutral Git path and change-shape facts;
-- schema-v3 `configured_paths@1` for bounded, canonical, repository-defined
+- `generic_changes@1` compatibility plus default `generic_changes@2` for
+  language-neutral Git path/change shape, ordinal bands, diffusion, historical
+  hotspots/dormancy, bounded co-change omissions, and ownership boundaries;
+- schema-v3/v4 `configured_paths@1` for bounded, canonical, repository-defined
   `touches_*` path facts plus the common generic facts;
 - frozen `flutter_testing@1` compatibility plus the current
   `flutter_testing@2` extractor, which recognizes both `.state =` and bare
@@ -350,7 +356,7 @@ Included:
 - a point-in-time GitHub Action/webhook capture substrate with strict label
   policies, MAC-protected bundles, repository pinning, and bounded atomic local
   inbox ingestion;
-- four separate review/CI/revert/incident outcomes, strong-only derivation by
+- five separate review/CI/revert/incident outcomes, strong-only derivation by
   default, explicit weak-vote opt-in, provenance, and `unknown` on absence or
   conflict;
 - grouped retrospective learning with duplicate-change rejection and a hard
@@ -363,8 +369,10 @@ Included:
   repository-assertion adherence audit;
 - a pack-agnostic ILP, evaluation, reporting, and policy lifecycle;
 - bounded Horn clauses with optional closed-world negation;
+- schema-v4 train-only rolling-origin signal probes, relative-to-base-rate Horn
+  gates, and explicitly exploratory near-miss diagnostics;
 - optional, externally provisioned Popper/MDL integration for noisy labels,
-  restricted in version 0.8.0 to one non-recursive rule and no bootstrap reruns;
+  restricted in version 0.9.0 to one non-recursive rule and no bootstrap reruns;
 - chronological holdout, baselines, confusion metrics, and bootstrap stability;
 - label-availability filtering at the holdout boundary;
 - candidate, shadow, approval, deprecation, local-trust, and agent-sync
@@ -380,6 +388,7 @@ Not included:
   predicate invention, or arbitrary Prolog;
 - causal estimation;
 - automatic policy promotion;
+- automatic cross-repository training or predicate transfer;
 - remote telemetry or hosted data;
 - model fine-tuning;
 - enforcement of security or merge policy;

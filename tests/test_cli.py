@@ -10,11 +10,23 @@ from pathlib import Path
 import pytest
 
 from ruleloom import cli
-from ruleloom.config import LearnerConfig, RuleLoomConfig
+from ruleloom.config import (
+    CONFIG_PATH,
+    EvaluationConfig,
+    LearnerConfig,
+    RuleLoomConfig,
+    SignalProbeConfig,
+)
 from ruleloom.gitfacts import collect_snapshot
 from ruleloom.learners.popper import PopperDoctorReport
 from ruleloom.models import LabelValue, ModelError, content_hash
-from ruleloom.storage import dataset_path, load_observations, load_predictions, load_shadow
+from ruleloom.storage import (
+    dataset_path,
+    load_observations,
+    load_predictions,
+    load_shadow,
+    write_json,
+)
 
 
 def _git(repo: Path, *arguments: str) -> str:
@@ -288,8 +300,9 @@ def test_cli_defaults_to_generic_pack_and_lists_versioned_packs(
     assert exit_code == 0
     assert stderr == ""
     config = RuleLoomConfig.load(repo)
-    assert config.schema_version == 2
-    assert (config.pack, config.pack_version) == ("generic_changes", 1)
+    assert config.schema_version == 4
+    assert config.signal_probe.enabled is True
+    assert (config.pack, config.pack_version) == ("generic_changes", 2)
 
     exit_code, stdout, stderr = _run_cli(["packs", "list", "--json"], capsys)
     assert exit_code == 0
@@ -298,6 +311,7 @@ def test_cli_defaults_to_generic_pack_and_lists_versioned_packs(
     assert {(item["name"], item["version"]) for item in packs} == {
         ("configured_paths", 1),
         ("generic_changes", 1),
+        ("generic_changes", 2),
         ("flutter_testing", 1),
         ("flutter_testing", 2),
     }
@@ -478,7 +492,9 @@ def test_cli_initializes_and_collects_with_configured_paths(
     assert "Initialized RuleLoom" in stdout
     assert stderr == ""
     config = RuleLoomConfig.load(repo)
-    assert config.schema_version == 3
+    assert config.schema_version == 4
+    assert config.signal_probe.enabled is True
+    assert config.evaluation.test_start_at is not None
     assert config.pack_config is not None
     assert config.pack_config.predicates == (
         "touches_shared_contract",
@@ -682,6 +698,20 @@ def test_cli_runs_evidence_to_reviewed_policy_workflow(
     exit_code, _, stderr = _run_cli(["init", str(repo)], capsys)
     assert exit_code == 2
     assert "refusing to overwrite" in stderr
+
+    # Preserve this legacy end-to-end fixture as coverage for schema-v2 behavior. Dedicated
+    # schema-v4 tests exercise the train-only signal gate and frozen prospective holdout.
+    initialized = RuleLoomConfig.load(repo)
+    write_json(
+        repo / CONFIG_PATH,
+        replace(
+            initialized,
+            schema_version=2,
+            learner=LearnerConfig(),
+            evaluation=EvaluationConfig(),
+            signal_probe=SignalProbeConfig(),
+        ).to_dict(),
+    )
 
     exit_code, stdout, stderr = _run_cli(
         ["collect", "--root", str(repo), "git", "--last", str(len(commits))],

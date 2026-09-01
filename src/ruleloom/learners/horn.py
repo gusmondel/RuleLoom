@@ -11,17 +11,21 @@ from collections.abc import Iterable, Iterator, Sequence
 from dataclasses import dataclass
 from fractions import Fraction
 from itertools import combinations, product
+from typing import cast
 
 from ruleloom.models import (
     HornClause,
+    JsonObject,
     LabelValue,
+    Metrics,
     ModelError,
     Observation,
     RuleLiteral,
     RuleSet,
 )
+from ruleloom.signal_probe import conservative_lift_diagnostic
 
-HORN_ENGINE_VERSION = "ruleloom-horn/0.4"
+HORN_ENGINE_VERSION = "ruleloom-horn/0.5"
 
 
 @dataclass(frozen=True, slots=True)
@@ -33,6 +37,11 @@ class HornSettings:
     min_support: int = 2
     false_positive_cost: float = 1.5
     max_predicates: int = 12
+    gate_mode: str = "absolute_precision"
+    min_lift_lower_bound: float = 3.0
+    min_alert_rate: float = 0.01
+    confidence_level: float = 0.95
+    near_miss_limit: int = 10
 
 
 @dataclass(slots=True)
@@ -93,6 +102,76 @@ class _BitScoredClause:
     false_positive: int
     precision: float
     utility: float
+
+
+@dataclass(frozen=True, slots=True)
+class ClauseDiagnostic:
+    clause: HornClause
+    true_positive: int
+    false_positive: int
+    true_negative: int
+    false_negative: int
+    utility: float
+    lift: JsonObject
+    rejection_reasons: tuple[str, ...]
+
+    @property
+    def metrics(self) -> Metrics:
+        return Metrics.from_counts(
+            self.true_positive,
+            self.false_positive,
+            self.true_negative,
+            self.false_negative,
+        )
+
+    def to_dict(self) -> JsonObject:
+        return {
+            "signature": self.clause.signature,
+            "rule": self.clause.to_dict(),
+            "prolog": self.clause.to_prolog(),
+            "metrics": self.metrics.to_dict(),
+            "support": self.true_positive,
+            "utility": self.utility,
+            "lift": self.lift,
+            "rejection_reasons": list(self.rejection_reasons),
+            "selection_scope": "train_only_exploratory",
+            "post_selection_inference": False,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class HornLearningResult:
+    rules: RuleSet
+    near_misses: tuple[ClauseDiagnostic, ...]
+    hypotheses_examined: int
+    unique_hypotheses_examined: int
+
+    def diagnostics_dict(self) -> JsonObject:
+        return {
+            "near_misses": [item.to_dict() for item in self.near_misses],
+            "hypotheses_examined": self.hypotheses_examined,
+            "unique_hypotheses_examined": self.unique_hypotheses_examined,
+            "selection_scope": "train_only_exploratory",
+            "multiple_testing_warning": (
+                "near-misses were selected after searching many hypotheses and are not "
+                "confirmatory evidence"
+            ),
+        }
+
+
+def _gate_reasons(metrics: Metrics, options: HornSettings) -> list[str]:
+    reasons: list[str] = []
+    if options.gate_mode == "absolute_precision":
+        if metrics.precision < options.min_precision:
+            reasons.append("precision_below_absolute_minimum")
+        return reasons
+    lift = conservative_lift_diagnostic(metrics, options.confidence_level)
+    lower = lift["conservative_lift_lower"]
+    if not isinstance(lower, int | float) or lower < options.min_lift_lower_bound:
+        reasons.append("conservative_lift_below_minimum")
+    if metrics.predicted_positive_rate < options.min_alert_rate:
+        reasons.append("alert_rate_below_minimum")
+    return reasons
 
 
 def _literal_bodies(
@@ -240,13 +319,13 @@ def _combined_precision(
     )
 
 
-def learn_horn(
+def learn_horn_diagnostics(
     observations: Sequence[Observation],
     target: str,
     settings: HornSettings | None = None,
     *,
     budget: HornBudget | None = None,
-) -> RuleSet:
+) -> HornLearningResult:
     """Learn a disjunction of bounded Horn clauses from positive/negative examples."""
     options = settings or HornSettings()
     active_budget = budget or HornBudget(50_000_000)
@@ -286,10 +365,14 @@ def learn_horn(
     selected: list[HornClause] = []
     selected_coverage = 0
     word_count = max(1, (len(examples) + 63) // 64)
+    hypotheses_examined = 0
+    unique_hypotheses: set[str] = set()
+    diagnostics: dict[str, ClauseDiagnostic] = {}
 
     for _ in range(options.max_rules):
         candidates: list[_BitScoredClause] = []
         for body in _literal_bodies(predicates, options.max_body, options.allow_negation):
+            hypotheses_examined += 1
             active_budget.consume(len(body) * word_count)
             coverage = all_mask
             for literal in body:
@@ -310,20 +393,43 @@ def learn_horn(
             combined = selected_coverage | coverage
             combined_true_positive = (combined & positive_mask).bit_count()
             combined_false_positive = (combined & negative_mask).bit_count()
-            combined_precision = (
-                combined_true_positive / (combined_true_positive + combined_false_positive)
-                if combined_true_positive + combined_false_positive
-                else 0.0
+            clause = HornClause(target=target, body=body)
+            unique_hypotheses.add(clause.signature)
+            metrics = Metrics.from_counts(
+                total_positive,
+                false_positive,
+                negative_mask.bit_count() - false_positive,
+                positive_mask.bit_count() - total_positive,
             )
-            if (
-                true_positive >= options.min_support
-                and precision >= options.min_precision
-                and utility > 0
-                and combined_precision >= options.min_precision
-            ):
+            reasons = _gate_reasons(metrics, options)
+            if true_positive < options.min_support:
+                reasons.append("new_support_below_minimum")
+            if utility <= 0:
+                reasons.append("utility_not_positive")
+            combined_metrics = Metrics.from_counts(
+                combined_true_positive,
+                combined_false_positive,
+                negative_mask.bit_count() - combined_false_positive,
+                positive_mask.bit_count() - combined_true_positive,
+            )
+            reasons.extend(
+                f"combined_{reason}" for reason in _gate_reasons(combined_metrics, options)
+            )
+            if reasons and clause.signature not in diagnostics:
+                diagnostics[clause.signature] = ClauseDiagnostic(
+                    clause=clause,
+                    true_positive=total_positive,
+                    false_positive=false_positive,
+                    true_negative=negative_mask.bit_count() - false_positive,
+                    false_negative=positive_mask.bit_count() - total_positive,
+                    utility=utility,
+                    lift=conservative_lift_diagnostic(metrics, options.confidence_level),
+                    rejection_reasons=tuple(dict.fromkeys(reasons)),
+                )
+            if not reasons:
                 candidates.append(
                     _BitScoredClause(
-                        clause=HornClause(target=target, body=body),
+                        clause=clause,
                         coverage=coverage,
                         true_positive=true_positive,
                         false_positive=false_positive,
@@ -349,4 +455,32 @@ def learn_horn(
         uncovered &= ~best.coverage
         if not uncovered:
             break
-    return RuleSet(target=target, clauses=tuple(selected))
+    ranked_near_misses = sorted(
+        diagnostics.values(),
+        key=lambda item: (
+            -cast(float, item.lift["conservative_lift_lower"]),
+            -item.metrics.precision,
+            -item.true_positive,
+            item.false_positive,
+            len(item.clause.body),
+            item.clause.signature,
+        ),
+    )[: options.near_miss_limit]
+    return HornLearningResult(
+        rules=RuleSet(target=target, clauses=tuple(selected)),
+        near_misses=tuple(ranked_near_misses),
+        hypotheses_examined=hypotheses_examined,
+        unique_hypotheses_examined=len(unique_hypotheses),
+    )
+
+
+def learn_horn(
+    observations: Sequence[Observation],
+    target: str,
+    settings: HornSettings | None = None,
+    *,
+    budget: HornBudget | None = None,
+) -> RuleSet:
+    """Compatibility wrapper returning only rules from the diagnostic learner."""
+
+    return learn_horn_diagnostics(observations, target, settings, budget=budget).rules

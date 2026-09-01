@@ -99,6 +99,11 @@ class LearnerConfig:
     max_predicates: int = 12
     popper_dir: str | None = None
     popper_timeout_seconds: int = 120
+    gate_mode: str = "absolute_precision"
+    min_lift_lower_bound: float = 3.0
+    min_alert_rate: float = 0.01
+    confidence_level: float = 0.95
+    near_miss_limit: int = 10
 
     def __post_init__(self) -> None:
         if self.engine not in {"horn", "popper"}:
@@ -119,6 +124,20 @@ class LearnerConfig:
             raise ModelError("max_predicates must be between 1 and 32")
         if not 1 <= self.popper_timeout_seconds <= 3600:
             raise ModelError("popper_timeout_seconds must be between 1 and 3600")
+        if self.gate_mode not in {"absolute_precision", "relative_lift"}:
+            raise ModelError("learner.gate_mode must be 'absolute_precision' or 'relative_lift'")
+        if (
+            not math.isfinite(self.min_lift_lower_bound)
+            or self.min_lift_lower_bound < 1
+            or self.min_lift_lower_bound > 1000
+        ):
+            raise ModelError("learner.min_lift_lower_bound must be between 1 and 1000")
+        if not math.isfinite(self.min_alert_rate) or not 0 <= self.min_alert_rate <= 1:
+            raise ModelError("learner.min_alert_rate must be between 0 and 1")
+        if not math.isfinite(self.confidence_level) or not 0.5 < self.confidence_level < 1:
+            raise ModelError("learner.confidence_level must be strictly between 0.5 and 1")
+        if not 0 <= self.near_miss_limit <= 100:
+            raise ModelError("learner.near_miss_limit must be between 0 and 100")
         hypotheses = self.hypothesis_count()
         if hypotheses > 250_000 or hypotheses * (self.bootstrap_runs + 1) > 5_000_000:
             raise ModelError(
@@ -161,8 +180,8 @@ class LearnerConfig:
             for size in range(1, min(self.max_body, predicates) + 1)
         )
 
-    def to_dict(self) -> JsonObject:
-        return {
+    def to_dict(self, *, include_signal_gates: bool = False) -> JsonObject:
+        value: JsonObject = {
             "engine": self.engine,
             "max_body": self.max_body,
             "max_rules": self.max_rules,
@@ -175,9 +194,33 @@ class LearnerConfig:
             "popper_dir": self.popper_dir,
             "popper_timeout_seconds": self.popper_timeout_seconds,
         }
+        if include_signal_gates:
+            value.update(
+                {
+                    "gate_mode": self.gate_mode,
+                    "min_lift_lower_bound": self.min_lift_lower_bound,
+                    "min_alert_rate": self.min_alert_rate,
+                    "confidence_level": self.confidence_level,
+                    "near_miss_limit": self.near_miss_limit,
+                }
+            )
+        return value
 
     @classmethod
-    def from_dict(cls, value: dict[str, object]) -> LearnerConfig:
+    def from_dict(
+        cls, value: dict[str, object], *, include_signal_gates: bool = False
+    ) -> LearnerConfig:
+        signal_fields = (
+            {
+                "gate_mode",
+                "min_lift_lower_bound",
+                "min_alert_rate",
+                "confidence_level",
+                "near_miss_limit",
+            }
+            if include_signal_gates
+            else set()
+        )
         _reject_unknown(
             value,
             {
@@ -192,6 +235,7 @@ class LearnerConfig:
                 "max_predicates",
                 "popper_dir",
                 "popper_timeout_seconds",
+                *signal_fields,
             },
             "learner",
         )
@@ -219,6 +263,129 @@ class LearnerConfig:
                 value.get("popper_timeout_seconds", 120),
                 "learner.popper_timeout_seconds",
                 minimum=1,
+            ),
+            gate_mode=_string(value.get("gate_mode", "absolute_precision"), "learner.gate_mode"),
+            min_lift_lower_bound=_number(
+                value.get("min_lift_lower_bound", 3.0),
+                "learner.min_lift_lower_bound",
+                minimum=1,
+                maximum=1000,
+            ),
+            min_alert_rate=_number(value.get("min_alert_rate", 0.01), "learner.min_alert_rate"),
+            confidence_level=_number(
+                value.get("confidence_level", 0.95),
+                "learner.confidence_level",
+                minimum=0.500001,
+                maximum=0.999999,
+            ),
+            near_miss_limit=_integer(value.get("near_miss_limit", 10), "learner.near_miss_limit"),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class SignalProbeConfig:
+    """Train-only signal-availability probe that protects the temporal holdout."""
+
+    enabled: bool = False
+    folds: int = 4
+    min_train_examples: int = 20
+    min_validation_examples: int = 5
+    min_mcc: float = 0.25
+    min_lift_lower_bound: float = 3.0
+    min_alert_rate: float = 0.01
+    confidence_level: float = 0.95
+    tree_max_depth: int = 2
+    max_predicates: int = 256
+
+    def __post_init__(self) -> None:
+        if not 2 <= self.folds <= 20:
+            raise ModelError("signal_probe.folds must be between 2 and 20")
+        if self.min_train_examples < 4:
+            raise ModelError("signal_probe.min_train_examples must be >= 4")
+        if self.min_validation_examples < 2:
+            raise ModelError("signal_probe.min_validation_examples must be >= 2")
+        if not math.isfinite(self.min_mcc) or not -1 <= self.min_mcc <= 1:
+            raise ModelError("signal_probe.min_mcc must be between -1 and 1")
+        if (
+            not math.isfinite(self.min_lift_lower_bound)
+            or not 1 <= self.min_lift_lower_bound <= 1000
+        ):
+            raise ModelError("signal_probe.min_lift_lower_bound must be between 1 and 1000")
+        if not math.isfinite(self.min_alert_rate) or not 0 <= self.min_alert_rate <= 1:
+            raise ModelError("signal_probe.min_alert_rate must be between 0 and 1")
+        if not math.isfinite(self.confidence_level) or not 0.5 < self.confidence_level < 1:
+            raise ModelError("signal_probe.confidence_level must be strictly between 0.5 and 1")
+        if not 1 <= self.tree_max_depth <= 4:
+            raise ModelError("signal_probe.tree_max_depth must be between 1 and 4")
+        if not 1 <= self.max_predicates <= 1024:
+            raise ModelError("signal_probe.max_predicates must be between 1 and 1024")
+
+    def to_dict(self) -> JsonObject:
+        return {
+            "enabled": self.enabled,
+            "folds": self.folds,
+            "min_train_examples": self.min_train_examples,
+            "min_validation_examples": self.min_validation_examples,
+            "min_mcc": self.min_mcc,
+            "min_lift_lower_bound": self.min_lift_lower_bound,
+            "min_alert_rate": self.min_alert_rate,
+            "confidence_level": self.confidence_level,
+            "tree_max_depth": self.tree_max_depth,
+            "max_predicates": self.max_predicates,
+        }
+
+    @classmethod
+    def from_dict(cls, value: dict[str, object]) -> SignalProbeConfig:
+        _reject_unknown(
+            value,
+            {
+                "enabled",
+                "folds",
+                "min_train_examples",
+                "min_validation_examples",
+                "min_mcc",
+                "min_lift_lower_bound",
+                "min_alert_rate",
+                "confidence_level",
+                "tree_max_depth",
+                "max_predicates",
+            },
+            "signal_probe",
+        )
+        return cls(
+            enabled=_boolean(value.get("enabled", False), "signal_probe.enabled"),
+            folds=_integer(value.get("folds", 4), "signal_probe.folds", minimum=2),
+            min_train_examples=_integer(
+                value.get("min_train_examples", 20),
+                "signal_probe.min_train_examples",
+                minimum=4,
+            ),
+            min_validation_examples=_integer(
+                value.get("min_validation_examples", 5),
+                "signal_probe.min_validation_examples",
+                minimum=2,
+            ),
+            min_mcc=_number(value.get("min_mcc", 0.25), "signal_probe.min_mcc", minimum=-1),
+            min_lift_lower_bound=_number(
+                value.get("min_lift_lower_bound", 3.0),
+                "signal_probe.min_lift_lower_bound",
+                minimum=1,
+                maximum=1000,
+            ),
+            min_alert_rate=_number(
+                value.get("min_alert_rate", 0.01), "signal_probe.min_alert_rate"
+            ),
+            confidence_level=_number(
+                value.get("confidence_level", 0.95),
+                "signal_probe.confidence_level",
+                minimum=0.500001,
+                maximum=0.999999,
+            ),
+            tree_max_depth=_integer(
+                value.get("tree_max_depth", 2), "signal_probe.tree_max_depth", minimum=1
+            ),
+            max_predicates=_integer(
+                value.get("max_predicates", 256), "signal_probe.max_predicates", minimum=1
             ),
         )
 
@@ -699,12 +866,13 @@ class RuleLoomConfig:
     promotion: PromotionConfig = field(default_factory=PromotionConfig)
     schema_version: int = 2
     pack_config: ConfiguredPathsConfig | None = None
+    signal_probe: SignalProbeConfig = field(default_factory=SignalProbeConfig)
 
     def __post_init__(self) -> None:
         if (
             isinstance(self.schema_version, bool)
             or not isinstance(self.schema_version, int)
-            or self.schema_version not in {1, 2, 3}
+            or self.schema_version not in {1, 2, 3, 4}
         ):
             raise ModelError("unsupported config schema_version")
         if not self.project.strip():
@@ -741,6 +909,17 @@ class RuleLoomConfig:
             raise ModelError("schema-v2 configs cannot define pack_config")
         if self.schema_version < 3 and self.pack == "configured_paths":
             raise ModelError("configured_paths requires config schema_version 3")
+        if self.schema_version < 4 and self.signal_probe != SignalProbeConfig():
+            raise ModelError("signal_probe requires config schema_version 4")
+        if (
+            self.schema_version >= 4
+            and self.signal_probe.enabled
+            and self.evaluation.test_start_at is None
+        ):
+            raise ModelError(
+                "schema-v4 signal probing requires evaluation.test_start_at to freeze the "
+                "holdout before inspecting labels"
+            )
         descriptor = get_pack(
             self.pack,
             self.pack_version,
@@ -852,7 +1031,7 @@ class RuleLoomConfig:
             "deprecated_dir": self.deprecated_dir,
             "predictions": self.predictions,
             "protocol": self.protocol.to_dict(),
-            "learner": self.learner.to_dict(),
+            "learner": self.learner.to_dict(include_signal_gates=self.schema_version >= 4),
             "evaluation": self.evaluation.to_dict(),
             "promotion": self.promotion.to_dict(),
         }
@@ -861,6 +1040,8 @@ class RuleLoomConfig:
             value["evidence"] = self.evidence.to_dict()
         if self.schema_version >= 3:
             value["pack_config"] = self.pack_config_dict
+        if self.schema_version >= 4:
+            value["signal_probe"] = self.signal_probe.to_dict()
         return value
 
     @classmethod
@@ -871,6 +1052,8 @@ class RuleLoomConfig:
         version_fields = {"pack_version", "evidence"} if raw_version >= 2 else set()
         if raw_version >= 3:
             version_fields.add("pack_config")
+        if raw_version >= 4:
+            version_fields.add("signal_probe")
         _reject_unknown(
             value,
             {
@@ -897,6 +1080,7 @@ class RuleLoomConfig:
         raw_pack_config = _object(value.get("pack_config", {}), "pack_config")
         raw_learner = _object(value.get("learner", {}), "learner")
         raw_evaluation = _object(value.get("evaluation", {}), "evaluation")
+        raw_signal_probe = _object(value.get("signal_probe", {}), "signal_probe")
         raw_promotion = _object(value.get("promotion", {}), "promotion")
         if raw_version >= 2:
             _require_fields(
@@ -919,6 +1103,7 @@ class RuleLoomConfig:
                     "evaluation",
                     "promotion",
                     *({"pack_config"} if raw_version >= 3 else set()),
+                    *({"signal_probe"} if raw_version >= 4 else set()),
                 },
                 f"schema-v{raw_version} config",
             )
@@ -952,6 +1137,17 @@ class RuleLoomConfig:
                     "max_predicates",
                     "popper_dir",
                     "popper_timeout_seconds",
+                    *(
+                        {
+                            "gate_mode",
+                            "min_lift_lower_bound",
+                            "min_alert_rate",
+                            "confidence_level",
+                            "near_miss_limit",
+                        }
+                        if raw_version >= 4
+                        else set()
+                    ),
                 },
                 "schema-v2 learner",
             )
@@ -960,6 +1156,23 @@ class RuleLoomConfig:
                 {"test_fraction", "min_train_examples", "min_test_examples", "seed"},
                 "schema-v2 evaluation",
             )
+            if raw_version >= 4:
+                _require_fields(
+                    raw_signal_probe,
+                    {
+                        "enabled",
+                        "folds",
+                        "min_train_examples",
+                        "min_validation_examples",
+                        "min_mcc",
+                        "min_lift_lower_bound",
+                        "min_alert_rate",
+                        "confidence_level",
+                        "tree_max_depth",
+                        "max_predicates",
+                    },
+                    "schema-v4 signal_probe",
+                )
             _require_fields(
                 raw_promotion,
                 {
@@ -1016,8 +1229,13 @@ class RuleLoomConfig:
                 if raw_version >= 3 and raw_pack == "configured_paths"
                 else None
             ),
-            learner=LearnerConfig.from_dict(raw_learner),
+            learner=LearnerConfig.from_dict(raw_learner, include_signal_gates=raw_version >= 4),
             evaluation=EvaluationConfig.from_dict(raw_evaluation),
+            signal_probe=(
+                SignalProbeConfig.from_dict(raw_signal_probe)
+                if raw_version >= 4
+                else SignalProbeConfig()
+            ),
             promotion=PromotionConfig.from_dict(raw_promotion),
         )
 
@@ -1056,6 +1274,7 @@ def default_config(
     pack_version: int | None = None,
     pack_config: ConfiguredPathsConfig | None = None,
     schema_version: int = 2,
+    test_start_at: str | None = None,
 ) -> RuleLoomConfig:
     selected_pack = (
         pack
@@ -1064,7 +1283,8 @@ def default_config(
     )
     selected_version = (
         1
-        if schema_version == 1 and pack_version is None
+        if pack_version is None
+        and (schema_version == 1 or (schema_version < 4 and selected_pack == "generic_changes"))
         else latest_pack_version(selected_pack)
         if pack_version is None
         else pack_version
@@ -1084,4 +1304,9 @@ def default_config(
                 outcome_definition=outcome_definition,
             )
         ),
+        learner=(
+            LearnerConfig(gate_mode="relative_lift") if schema_version >= 4 else LearnerConfig()
+        ),
+        evaluation=EvaluationConfig(test_start_at=test_start_at),
+        signal_probe=SignalProbeConfig(enabled=schema_version >= 4),
     )

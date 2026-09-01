@@ -11,6 +11,7 @@ from typing import cast
 from ruleloom.config import RuleLoomConfig
 from ruleloom.gitfacts import (
     GitFactsError,
+    MissingPromisorObjectsError,
     SnapshotRepositoryContext,
     collect_snapshot,
     collect_snapshot_with_aggregate_stats,
@@ -60,6 +61,18 @@ class MaterializationReport:
     outcome_target: str
     weak_evidence_enabled: bool
     manifest_hash: str
+    eligible_positive: int
+    eligible_negative: int
+    eligible_unknown: int
+
+    @staticmethod
+    def _retention(eligible: int, retained: int) -> JsonObject:
+        return {
+            "eligible": eligible,
+            "retained": retained,
+            "skipped": eligible - retained,
+            "rate": None if eligible == 0 else retained / eligible,
+        }
 
     def to_dict(self) -> JsonObject:
         return {
@@ -76,6 +89,12 @@ class MaterializationReport:
             "outcome_target": self.outcome_target,
             "weak_evidence_enabled": self.weak_evidence_enabled,
             "manifest_hash": self.manifest_hash,
+            "retention_by_outcome": {
+                "positive": self._retention(self.eligible_positive, self.positive),
+                "negative": self._retention(self.eligible_negative, self.negative),
+                "unknown": self._retention(self.eligible_unknown, self.unknown),
+                "interpretation": ("descriptive_missingness_diagnostic_before_git_materialization"),
+            },
         }
 
 
@@ -340,6 +359,11 @@ def materialize_history(
     skipped_by_reason: dict[str, int] = defaultdict(int)
     skipped_manifest = hashlib.sha256()
     counts = {LabelValue.POSITIVE: 0, LabelValue.NEGATIVE: 0, LabelValue.UNKNOWN: 0}
+    eligible_counts = {
+        LabelValue.POSITIVE: 0,
+        LabelValue.NEGATIVE: 0,
+        LabelValue.UNKNOWN: 0,
+    }
     ordered_units = sorted(
         unit_values, key=lambda item: (parse_timestamp(item.prediction_at), item.id)
     )
@@ -377,6 +401,7 @@ def materialize_history(
             selected_target,
             include_weak=include_weak,
         )
+        eligible_counts[derivation.value] += 1
         unit_missing = tuple(
             object_id
             for object_id in (unit.base_sha, unit.prediction_sha)
@@ -404,6 +429,11 @@ def materialize_history(
                 aggregate_statistics=_aggregate_diff_statistics(unit, unit_events),
                 repository_context=repository_context,
             )
+        except MissingPromisorObjectsError:
+            # This is a cohort-level environment problem, not unit-level missingness.
+            # Failing the transaction prevents hundreds of one-object network fetches
+            # and avoids retaining a path-dependent subset of the history.
+            raise
         except GitFactsError as exc:
             reason = str(exc)
             skipped_by_reason[_skip_reason_code(reason)] += 1
@@ -427,6 +457,10 @@ def materialize_history(
         "unit_ids": [item.id for item in ordered_units],
         "observation_ids": [item.id for item in observations],
         "skipped_manifest_hash": skipped_manifest.hexdigest(),
+        "eligible_outcomes": {
+            value.value: eligible_counts[value]
+            for value in (LabelValue.POSITIVE, LabelValue.NEGATIVE, LabelValue.UNKNOWN)
+        },
     }
     return MaterializationReport(
         observations=tuple(observations),
@@ -441,4 +475,7 @@ def materialize_history(
         outcome_target=selected_target,
         weak_evidence_enabled=include_weak,
         manifest_hash=content_hash(manifest),
+        eligible_positive=eligible_counts[LabelValue.POSITIVE],
+        eligible_negative=eligible_counts[LabelValue.NEGATIVE],
+        eligible_unknown=eligible_counts[LabelValue.UNKNOWN],
     )

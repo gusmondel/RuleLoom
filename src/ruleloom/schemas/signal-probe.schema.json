@@ -1,0 +1,123 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ruleloom:schema:signal-probe:v1",
+  "title": "RuleLoom signal probe v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "created_at",
+    "version",
+    "status",
+    "dataset_hash",
+    "config_hash",
+    "holdout_start_at",
+    "training_observations",
+    "models",
+    "warnings",
+    "methodology"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"type": "string", "pattern": "^probe-[0-9a-f]{16}$"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "version": {"const": "ruleloom-signal-probe/1"},
+    "status": {"enum": ["pass", "fail", "inconclusive"]},
+    "dataset_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "config_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "holdout_start_at": {"type": "string", "format": "date-time"},
+    "training_observations": {"type": "integer", "minimum": 0},
+    "models": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/model"}
+    },
+    "warnings": {"type": "array", "items": {"type": "string"}},
+    "methodology": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "scope",
+        "validation",
+        "label_availability_enforced_at_each_fold",
+        "holdout_consulted",
+        "model_families_predeclared",
+        "interpretation"
+      ],
+      "properties": {
+        "scope": {"const": "strictly_pre_holdout_mature_labels"},
+        "validation": {"const": "expanding_window_rolling_origin"},
+        "label_availability_enforced_at_each_fold": {"const": true},
+        "holdout_consulted": {"const": false},
+        "model_families_predeclared": {
+          "const": ["logistic_regression_boolean_facts", "shallow_boolean_tree"]
+        },
+        "interpretation": {"const": "signal_availability_probe_not_a_theoretical_ceiling"}
+      }
+    }
+  },
+  "$defs": {
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "true_positive", "false_positive", "true_negative", "false_negative",
+        "precision", "recall", "f1", "accuracy", "balanced_accuracy",
+        "matthews_correlation", "prevalence", "predicted_positive_rate"
+      ],
+      "properties": {
+        "true_positive": {"type": "integer", "minimum": 0},
+        "false_positive": {"type": "integer", "minimum": 0},
+        "true_negative": {"type": "integer", "minimum": 0},
+        "false_negative": {"type": "integer", "minimum": 0},
+        "precision": {"type": "number", "minimum": 0, "maximum": 1},
+        "recall": {"type": "number", "minimum": 0, "maximum": 1},
+        "f1": {"type": "number", "minimum": 0, "maximum": 1},
+        "accuracy": {"type": "number", "minimum": 0, "maximum": 1},
+        "balanced_accuracy": {"type": "number", "minimum": 0, "maximum": 1},
+        "matthews_correlation": {"type": "number", "minimum": -1, "maximum": 1},
+        "prevalence": {"type": "number", "minimum": 0, "maximum": 1},
+        "predicted_positive_rate": {"type": "number", "minimum": 0, "maximum": 1}
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "family", "folds", "observations", "metrics", "average_precision",
+        "selective_risk", "lift", "gate_passed", "gate_reasons"
+      ],
+      "properties": {
+        "family": {
+          "enum": ["logistic_regression_boolean_facts", "shallow_boolean_tree"]
+        },
+        "folds": {"type": "integer", "minimum": 2},
+        "observations": {"type": "integer", "minimum": 1},
+        "metrics": {"$ref": "#/$defs/metrics"},
+        "average_precision": {"type": "number", "minimum": 0, "maximum": 1},
+        "selective_risk": {"type": "number", "minimum": 0, "maximum": 1},
+        "lift": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "confidence_level", "precision_wilson_lower", "precision_wilson_upper",
+            "prevalence_wilson_lower", "prevalence_wilson_upper", "point_lift",
+            "conservative_lift_lower", "interpretation"
+          ],
+          "properties": {
+            "confidence_level": {"type": "number", "exclusiveMinimum": 0.5, "exclusiveMaximum": 1},
+            "precision_wilson_lower": {"type": "number", "minimum": 0, "maximum": 1},
+            "precision_wilson_upper": {"type": "number", "minimum": 0, "maximum": 1},
+            "prevalence_wilson_lower": {"type": "number", "minimum": 0, "maximum": 1},
+            "prevalence_wilson_upper": {"type": "number", "minimum": 0, "maximum": 1},
+            "point_lift": {"type": "number", "minimum": 0},
+            "conservative_lift_lower": {"type": "number", "minimum": 0},
+            "interpretation": {"const": "descriptive_not_a_formal_post_selection_lift_interval"}
+          }
+        },
+        "gate_passed": {"type": "boolean"},
+        "gate_reasons": {"type": "array", "items": {"type": "string"}}
+      }
+    }
+  }
+}

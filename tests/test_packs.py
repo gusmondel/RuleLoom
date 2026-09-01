@@ -26,6 +26,7 @@ def test_registry_resolves_exact_pack_versions() -> None:
     assert get_pack("flutter_testing", 1).extractor == "ruleloom.flutter_testing.git.v1"
     assert get_pack("flutter_testing", 2).extractor == "ruleloom.flutter_testing.git.v2"
     assert get_pack("generic_changes", 1).content_path("service.py") is False
+    assert get_pack("generic_changes", 2).extractor == "ruleloom.generic_changes.git.v2"
     with pytest.raises(ModelError, match="available packs"):
         get_pack("python_testing", 1)
     for invalid in (True, 1.0, 0):
@@ -117,6 +118,44 @@ def test_aggregate_diff_statistics_are_complete_and_do_not_forge_file_churn() ->
             changes=(FileChange("src/service.py", 0, 0),),
             aggregate_additions=1,
         )
+
+
+def test_generic_v2_emits_language_neutral_ordinal_shape_and_diffusion_bands() -> None:
+    options = EvidenceConfig(large_change_churn=200, multi_file_count=4).pack_options
+    balanced = get_pack("generic_changes", 2).run(
+        DiffEvidence(
+            changes=(
+                FileChange("src/a.unknown", additions=60, deletions=0),
+                FileChange("src/b.unknown", additions=40, deletions=0),
+            )
+        ),
+        options,
+    )
+    extreme = get_pack("generic_changes", 2).run(
+        DiffEvidence(
+            changes=tuple(
+                FileChange(f"area/{index}.bin", additions=100, deletions=0) for index in range(16)
+            )
+        ),
+        options,
+    )
+
+    assert {
+        "churn_band_small",
+        "file_count_band_few",
+        "change_diffusion_high",
+    } <= balanced.facts
+    assert {
+        "churn_band_extreme",
+        "file_count_band_wide",
+        "change_diffusion_high",
+        "large_change",
+        "multi_file_change",
+    } <= extreme.facts
+    assert all(
+        evidence.extractor == "ruleloom.generic_changes.git.v2"
+        for evidence in extreme.provenance.values()
+    )
     with pytest.raises(ValueError, match="exact path manifest"):
         DiffEvidence(
             changes=(FileChange("src/service.py", 0, 0),),

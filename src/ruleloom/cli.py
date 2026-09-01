@@ -53,6 +53,7 @@ from ruleloom.history.storage import (
     upsert_history_batch,
 )
 from ruleloom.history.units import assemble_change_units
+from ruleloom.history_features import enrich_history_features
 from ruleloom.learners.popper import PopperError
 from ruleloom.lifecycle import (
     deprecate_candidate,
@@ -96,6 +97,7 @@ from ruleloom.repository_assertions import (
     load_repository_assertion_declaration,
     load_repository_assertion_manifest,
 )
+from ruleloom.signal_probe import run_signal_probe
 from ruleloom.storage import (
     _file_lock,
     append_prediction,
@@ -111,6 +113,8 @@ from ruleloom.storage import (
     predictions_path,
     project_path,
     save_candidate,
+    save_signal_probe,
+    signal_probe_path,
     write_json,
 )
 
@@ -197,7 +201,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         pack=args.pack,
         pack_version=args.pack_version,
         pack_config=pack_config,
-        schema_version=3 if pack_config is not None else 2,
+        schema_version=4,
         agents=selected,
     )
     print(f"Initialized RuleLoom in {result.root}")
@@ -334,7 +338,9 @@ def _cmd_collect_git(args: argparse.Namespace) -> int:
                 repository_id=config.protocol.repository_id,
             )
         ]
-    inserted, updated, observations = _persist_collected(dataset_path(root, config), observations)
+    inserted, updated, observations = _persist_collected(
+        root, dataset_path(root, config), observations, config
+    )
     if audit is None:
         audit = BackfillReport(
             observations=tuple(observations),
@@ -697,6 +703,8 @@ def _cmd_history_materialize(args: argparse.Namespace) -> int:
         dataset_path(root, config),
         list(report.observations),
         target=config.target,
+        config=config,
+        root=root,
     )
     validate_project(root, config)
     _json({**report.to_dict(), "inserted": inserted, "updated": updated})
@@ -915,7 +923,8 @@ def _cmd_learn(args: argparse.Namespace) -> int:
         _external_popper_checkout(root, config)
     observations = load_observations(dataset_path(root, config))
     validate_observations(observations, config)
-    candidate = learn_candidate(observations, config)
+    instant = datetime.now(UTC)
+    candidate = learn_candidate(observations, config, as_of=instant)
     path = save_learned_candidate(root, config, candidate)
     if args.json:
         _json(candidate.to_dict())
@@ -931,6 +940,32 @@ def _cmd_learn(args: argparse.Namespace) -> int:
         for warning in candidate.warnings:
             print(f"Warning: {warning}")
     return 0
+
+
+def _cmd_signal_probe(args: argparse.Namespace) -> int:
+    root, config = _project(args)
+    validate_project(root, config)
+    observations = load_observations(dataset_path(root, config))
+    validate_observations(observations, config)
+    report = run_signal_probe(observations, config)
+    path = signal_probe_path(root, report.id)
+    save_signal_probe(path, report)
+    if args.json:
+        _json(report.to_dict())
+    else:
+        print(f"Signal probe: {report.id}; status: {report.status}")
+        print(f"Pre-holdout observations: {report.training_observations}")
+        for model in report.models:
+            lift = model.lift["conservative_lift_lower"]
+            print(
+                f"{model.family}: MCC {model.metrics.matthews_correlation:.3f}, "
+                f"AP {model.average_precision:.3f}, lift lower {lift:.3f}, "
+                f"alert rate {model.metrics.predicted_positive_rate:.3f}"
+            )
+        print(f"Manifest: {path}")
+        for warning in report.warnings:
+            print(f"Warning: {warning}")
+    return 0 if report.status == "pass" else 2
 
 
 def _cmd_rules_import(args: argparse.Namespace) -> int:
@@ -1098,9 +1133,19 @@ def _merge_collected_prior(
 
 
 def _persist_collected(
-    path: Path, collected: list[Observation]
+    root: Path,
+    path: Path,
+    collected: list[Observation],
+    config: RuleLoomConfig,
 ) -> tuple[int, int, list[Observation]]:
     with edit_observations(path) as existing:
+        if config.pack == "generic_changes" and config.pack_version >= 2:
+            collected = enrich_history_features(
+                existing,
+                collected,
+                extractor=config.resolved_pack.extractor,
+                root=root,
+            )
         by_id = {item.id: item for item in existing}
         merged = [_merge_collected_prior(by_id.get(item.id), item) for item in collected]
         inserted = 0
@@ -1196,8 +1241,17 @@ def _persist_historical(
     collected: list[Observation],
     *,
     target: str,
+    config: RuleLoomConfig,
+    root: Path,
 ) -> tuple[int, int, list[Observation]]:
     with edit_observations(path) as existing:
+        if config.pack == "generic_changes" and config.pack_version >= 2:
+            collected = enrich_history_features(
+                existing,
+                collected,
+                extractor=config.resolved_pack.extractor,
+                root=root,
+            )
         by_id = {item.id: item for item in existing}
         merged = [
             _merge_historical_observation(by_id.get(item.id), item, target=target)
@@ -1262,7 +1316,9 @@ def _cmd_assess(args: argparse.Namespace) -> int:
         policies = [policies_by_id[key] for key in sorted(policies_by_id)]
     prediction = make_prediction(observation, policies, config)
     if not args.no_record:
-        _, _, persisted = _persist_collected(dataset_path(root, config), [observation])
+        _, _, persisted = _persist_collected(
+            root, dataset_path(root, config), [observation], config
+        )
         canonical = persisted[0]
         prediction_snapshot = replace(
             canonical,
@@ -1905,6 +1961,14 @@ def build_parser() -> argparse.ArgumentParser:
     learn.add_argument("--engine", choices=["horn", "popper"])
     learn.add_argument("--json", action="store_true")
     learn.set_defaults(handler=_cmd_learn)
+
+    signal = subparsers.add_parser(
+        "signal-probe",
+        help="estimate train-only signal without consulting the frozen temporal holdout",
+    )
+    _add_root(signal)
+    signal.add_argument("--json", action="store_true")
+    signal.set_defaults(handler=_cmd_signal_probe)
 
     promote = subparsers.add_parser("promote", help="human-reviewed lifecycle transition")
     _add_root(promote)

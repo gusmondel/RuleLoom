@@ -28,8 +28,10 @@ from ruleloom.gitfacts import GitFactsError, repository_identity
 from ruleloom.learners.horn import (
     HORN_ENGINE_VERSION,
     HornBudget,
+    HornLearningResult,
     HornSettings,
     learn_horn,
+    learn_horn_diagnostics,
     select_train_predicates,
 )
 from ruleloom.manual_rules import (
@@ -60,6 +62,7 @@ from ruleloom.packs import (
     validate_persisted_extraction,
     validate_policy_pack_contract,
 )
+from ruleloom.signal_probe import SignalProbeReport, run_signal_probe
 from ruleloom.storage import (
     approved_path,
     candidate_path,
@@ -258,6 +261,11 @@ def _horn_settings(config: RuleLoomConfig) -> HornSettings:
         min_support=learner.min_support,
         false_positive_cost=learner.false_positive_cost,
         max_predicates=learner.max_predicates,
+        gate_mode=learner.gate_mode,
+        min_lift_lower_bound=learner.min_lift_lower_bound,
+        min_alert_rate=learner.min_alert_rate,
+        confidence_level=learner.confidence_level,
+        near_miss_limit=learner.near_miss_limit,
     )
 
 
@@ -450,6 +458,15 @@ def learn_candidate(
             "learning data must come from configured repository "
             f"{config.protocol.repository_id!r}; observed: " + ", ".join(sorted(repositories))
         )
+    signal_report: SignalProbeReport | None = None
+    if config.signal_probe.enabled:
+        signal_report = run_signal_probe(list(observations), config, as_of=cutoff)
+        if signal_report.status != "pass":
+            raise ModelError(
+                f"signal probe {signal_report.id} is {signal_report.status}; the frozen "
+                "holdout was not evaluated. Enrich the prediction-time vocabulary or "
+                "collect more pre-holdout evidence under a new preregistered experiment."
+            )
     split = temporal_split(
         observations,
         target,
@@ -488,9 +505,17 @@ def learn_candidate(
 
     if config.learner.engine == "horn":
         horn_budget = HornBudget(_MAX_HORN_BITSET_WORK_UNITS)
-        rules = _run_horn(train, target, config, budget=horn_budget)
+        learned_horn = learn_horn_diagnostics(
+            train,
+            target,
+            _horn_settings(config),
+            budget=horn_budget,
+        )
+        horn_result: HornLearningResult | None = learned_horn
+        rules = learned_horn.rules
         engine_version = HORN_ENGINE_VERSION
     else:
+        horn_result = None
         from ruleloom.learners.popper import learn_popper
 
         with tempfile.TemporaryDirectory(prefix="ruleloom-popper-") as temporary:
@@ -631,6 +656,10 @@ def learn_candidate(
             "duplicate_groups": duplicate_groups,
         },
     }
+    if signal_report is not None:
+        metadata["signal_probe"] = signal_report.to_dict()
+    if horn_result is not None:
+        metadata["horn_diagnostics"] = horn_result.diagnostics_dict()
     if historical_unit == "historical_change":
         evidence_qualities = sorted(
             {

@@ -7,6 +7,61 @@ always require a new explicit schema, adapter, pack, or experiment version.
 
 ## Unreleased
 
+## 0.9.0 - 2026-09-01
+
+### Added
+
+- Configuration schema v4 with a frozen future holdout, preregistered
+  signal-probe settings, and relative Horn learner gates.
+- `ruleloom signal-probe`, which evaluates class-balanced Boolean logistic and
+  shallow-tree families in label-availability-aware rolling-origin folds over
+  pre-holdout data only.
+- Content-addressed signal-probe artifacts with MCC, average precision,
+  selective risk, alert rate, Wilson proportion intervals, and an explicitly
+  descriptive conservative lift diagnostic.
+- Train-only Horn near-miss reports containing top rejected clauses, confusion
+  counts, support, rejection reasons, and hypotheses examined with a
+  multiple-testing warning.
+- `generic_changes@2`, adding language-neutral ordinal churn/file-count bands,
+  change diffusion, strictly prior path hotspots and dormancy, bounded missing
+  co-change partners, and prior-snapshot CODEOWNERS boundary facts.
+- Outcome-stratified materialization retention counts and rates, exposing when
+  missing Git evidence preferentially removes one class.
+- A signal-first protocol and expanded research matrix covering temporal
+  validation, delayed labels, selective classification, Wilson intervals,
+  multiple testing, co-change, ownership, SZZ noise, drift, and cross-project
+  cold start.
+
+### Changed
+
+- New projects initialize with schema v4 and `generic_changes@2`; legacy config
+  schemas and pack versions retain their exact hashes and semantics.
+- Horn v0.5 may gate selective clauses relative to cohort prevalence and stores
+  diagnostic near-misses without using them as confirmatory evidence.
+- CODEOWNERS history uses bounded native `git cat-file` batches and deduplicated
+  blob reads instead of one Git process per commit; owner identities are never
+  persisted.
+- Time-window historical facts abstain after non-monotonic timestamps, exact-path
+  facts abstain on truncated manifests, and co-change work has explicit path and
+  pair budgets.
+- Exact diff and content reads disable hidden partial-clone lazy fetching;
+  missing promisor blobs abort materialization transactionally with an explicit
+  hydration/full-clone remedy.
+- A pinned Flask/ripgrep/Express portability smoke result records extraction,
+  retention, timings, predicate prevalence, and the expected no-label
+  abstention.
+
+### Scientific integrity
+
+- The signal stage is named a signal-availability probe rather than a ceiling;
+  passing it does not establish that Horn or RuleLoom is useful.
+- The Wilson-endpoint lift ratio is labeled descriptive, not a formal
+  post-selection confidence interval.
+- Fix keywords, SZZ links, and approximate merge-base snapshots remain weak or
+  abstaining evidence; they are not promoted to strong predictor truth.
+- A failed or inconclusive signal probe blocks holdout evaluation so repeated
+  vocabulary iteration cannot silently consume the deployment holdout.
+
 ## 0.8.0 - 2026-09-01
 
 ### Added
@@ -26,8 +81,9 @@ always require a new explicit schema, adapter, pack, or experiment version.
 ### Changed
 
 - Historical materialization validates repository identity and required Git
-  objects once per cohort, disables hidden lazy fetches, classifies every skip,
-  and supports exact tree paths with complete provider aggregate statistics.
+  objects once per cohort, disables hidden lazy fetches on the aggregate
+  tree-path route, classifies every skip, and supports exact tree paths with
+  complete provider aggregate statistics.
 - Root commits accept only Git's canonical empty-tree object as their base,
   fixing the lost-root-unit bug without weakening commit validation.
 - The Horn learner evaluates Boolean bodies with bitsets and accounts work in

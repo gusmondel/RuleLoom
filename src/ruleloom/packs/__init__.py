@@ -56,6 +56,16 @@ from ruleloom.packs.generic import (
     extract_generic_change_facts,
     ignores_content,
 )
+from ruleloom.packs.generic_v2 import (
+    EXTRACTOR as GENERIC_V2_EXTRACTOR,
+)
+from ruleloom.packs.generic_v2 import (
+    PREDICATES as GENERIC_V2_PREDICATES,
+)
+from ruleloom.packs.generic_v2 import (
+    VERSION as GENERIC_V2_VERSION,
+)
+from ruleloom.packs.generic_v2 import extract_generic_change_facts_v2
 
 _COMMON_PREDICATES = (
     "large_change",
@@ -90,6 +100,15 @@ _PACKS = {
         predicates=_COMMON_PREDICATES,
         content_path=ignores_content,
         extract=extract_generic_change_facts,
+    ),
+    (GENERIC_NAME, GENERIC_V2_VERSION): EvidencePack(
+        name=GENERIC_NAME,
+        version=GENERIC_V2_VERSION,
+        extractor=GENERIC_V2_EXTRACTOR,
+        description=("Language-neutral paths plus ordinal churn, file-count, and diffusion bands."),
+        predicates=tuple(sorted({*_COMMON_PREDICATES, *GENERIC_V2_PREDICATES})),
+        content_path=ignores_content,
+        extract=extract_generic_change_facts_v2,
     ),
     (FLUTTER_NAME, 1): EvidencePack(
         name=FLUTTER_NAME,

@@ -2,7 +2,7 @@
 
 ## Principles
 
-RuleLoom configuration schema versions 1–3 and artifact schema version 1 use
+RuleLoom configuration schema versions 1–4 and artifact schema version 1 use
 local, provider-neutral JSON/JSONL. Their persisted
 artifacts are designed to answer:
 
@@ -38,6 +38,8 @@ Default paths are relative to the initialized repository:
     <candidate-id>.json
   deprecated/
     <candidate-id>.json
+  signal-probes/
+    <probe-id>.json
   predictions.jsonl
 ```
 
@@ -129,13 +131,13 @@ OS user.
 }
 ```
 
-Version 0.8.0 defaults to configuration schema v2 and the language-neutral
-`generic_changes@1` pack. It also ships schema-v3 `configured_paths@1` and
+Version 0.9.0 defaults to configuration schema v4 and the language-neutral
+`generic_changes@2` pack. It also ships schema-v3/v4 `configured_paths@1` and
 `flutter_testing@2`. The frozen `flutter_testing@1` implementation exists
 only to read structurally and reproduce the hashes of historical configuration
 schema-v1 experiments. That compatibility path does not inherit the collection
 and validation guarantees of schema v2 and is not a current ingestion profile;
-re-extract the complete history into a fresh supported schema-v2 or schema-v3
+re-extract the complete history into a fresh supported schema-v4
 experiment before making new comparisons or policy decisions. `ruleloom packs
 list` reports the exact extractor and static/shared predicates for each built-in
 version and marks configurable packs; the resolved configured-path vocabulary
@@ -156,7 +158,7 @@ In both cases, training labels unavailable at the holdout start are embargoed.
 scope per experiment. Change-size thresholds and the metadata preview limit are
 also explicit. Configure these from a pre-outcome design sample and freeze them
 before collection; changing any of them creates a different evidence protocol.
-For schema-v2/v3 collection, the include set is an outcome-eligibility boundary:
+For schema-v2/v3/v4 collection, the include set is an outcome-eligibility boundary:
 direct collection rejects mixed inside/outside units, and backfill omits mixed
 or wholly out-of-scope commits. Excludes within the include set may remove
 generated or vendored paths without making the unit mixed.
@@ -249,6 +251,74 @@ pre-registration because those audit fields are not accepted inside strict
 new experiment and requires an untouched future confirmation window; the
 already inspected holdout is no longer a test set.
 
+### Schema-v4 signal and learner gates
+
+Configuration schema v4 requires `pack_config` for every pack (`{}` for static
+packs), a frozen aware `evaluation.test_start_at`, the relative learner-gate
+fields, and `signal_probe`. New initialization uses `generic_changes@2` and
+records the initialization time as the future holdout boundary. This excerpt
+shows the v4-only fields:
+
+```json
+{
+  "schema_version": 4,
+  "pack": "generic_changes",
+  "pack_version": 2,
+  "pack_config": {},
+  "learner": {
+    "engine": "horn",
+    "max_body": 3,
+    "max_rules": 3,
+    "allow_negation": true,
+    "min_precision": 0.7,
+    "min_support": 2,
+    "false_positive_cost": 1.5,
+    "bootstrap_runs": 30,
+    "max_predicates": 12,
+    "popper_dir": null,
+    "popper_timeout_seconds": 120,
+    "gate_mode": "relative_lift",
+    "min_lift_lower_bound": 3.0,
+    "min_alert_rate": 0.01,
+    "confidence_level": 0.95,
+    "near_miss_limit": 10
+  },
+  "evaluation": {
+    "test_fraction": 0.25,
+    "min_train_examples": 8,
+    "min_test_examples": 4,
+    "seed": 17,
+    "test_start_at": "2026-09-01T12:00:00Z"
+  },
+  "signal_probe": {
+    "enabled": true,
+    "folds": 4,
+    "min_train_examples": 20,
+    "min_validation_examples": 5,
+    "min_mcc": 0.25,
+    "min_lift_lower_bound": 3.0,
+    "min_alert_rate": 0.01,
+    "confidence_level": 0.95,
+    "tree_max_depth": 2,
+    "max_predicates": 256
+  }
+}
+```
+
+`gate_mode="relative_lift"` evaluates Horn clauses against the training cohort's
+base rate plus `min_alert_rate`. `min_precision` remains serialized for legacy
+absolute-gate compatibility and other lifecycle calculations; it is not the
+v4 Horn clause gate while relative mode is selected. The conservative lift
+diagnostic is not a formal confidence interval for a selected lift ratio.
+
+The signal probe excludes every observation at or after `test_start_at`, uses
+expanding-window folds, and admits a training label only when its
+`available_at` is no later than that fold's validation start. Its immutable
+artifact is validated by `signal-probe.schema.json` and stored below
+`.ruleloom/signal-probes/`. A `fail` or `inconclusive` result blocks holdout
+evaluation; changing a target, vocabulary, or gate creates a new registered
+experiment rather than retrying on the same holdout.
+
 All six configurable managed paths must be repository-relative, remain below
 `.ruleloom/`, contain no `..` or
 control characters, and be pairwise non-overlapping after portable Unicode/case
@@ -257,12 +327,12 @@ Predicate-like fields start with a lowercase letter and contain lowercase ASCII
 letters, numbers, and underscores. `init` derives `repository_id` from
 `remote.origin.url`, or from root commits when no origin exists; initialization
 therefore requires an origin or at least one commit. The storage lock uses POSIX
-`fcntl`: version 0.8.0 supports macOS and Linux, not Windows.
+`fcntl`: version 0.9.0 supports macOS and Linux, not Windows.
 
 The built-in search also enforces finite operational bounds:
 `max_body` 1–4, `max_rules` 1–10, `max_predicates` 1–32,
 `bootstrap_runs` 0–100, and Popper timeout 1–3600 seconds, plus a combined
-hypothesis/work budget. For `engine="popper"`, version 0.8.0 requires
+hypothesis/work budget. For `engine="popper"`, version 0.9.0 requires
 `max_rules=1`, `bootstrap_runs=0`, and the Horn-specific support/precision/cost
 settings at their defaults. Popper is an offline adapter to an explicitly
 configured, already provisioned checkout; RuleLoom does not install it.
@@ -275,6 +345,9 @@ hashes `schema_version`, `experiment_id`, `repository_id`, `prediction_unit`,
 `outcome_definition`, `target`, `pack`, `pack_version`, the exact extractor, and
 the complete evidence scope/threshold profile. In schema v3 it additionally
 hashes the complete canonical `pack_config`, including `{}` for a static pack.
+Schema v4 retains that evidence identity and makes the signal and learner gates
+part of the complete `config_hash`; changing them cannot reproduce the same
+candidate or signal-probe artifact.
 Every observation records that hash, preventing evidence from different
 experiments, repositories, units, outcome definitions, pack versions, pack
 configurations, scopes, or thresholds from being pooled accidentally. The
@@ -345,7 +418,7 @@ Each non-empty line in `.ruleloom/observations.jsonl` is one object:
 
 | Field | Type | Contract |
 |---|---|---|
-| `schema_version` | integer | Must be artifact schema `1` in version 0.8.0. |
+| `schema_version` | integer | Must be artifact schema `1` in version 0.9.0. |
 | `id` | string | Unique within the dataset; lowercase letters/numbers plus `.`, `_`, or `-`. |
 | `observed_at` | string | Decision-time timestamp with timezone; used for chronological splitting. |
 | `protocol_hash` | string | Lowercase SHA-256 of the configured evidence protocol; evidence with a different hash must not be pooled. |
@@ -356,7 +429,7 @@ Each non-empty line in `.ruleloom/observations.jsonl` is one object:
 | `source` | object | Provider-neutral source identity, references, and collection context. |
 | `metadata` | object | JSON audit information not consumed as facts unless an extractor explicitly emits it. |
 
-Every schema-v2/v3 collected source records `kind`, the derived stable
+Every schema-v2/v3/v4 collected source records `kind`, the derived stable
 `repository`, `pack_version`, `pack`, and versioned `extractor`; frozen schema-v1
 records retain their original shape without `pack_version`. A configured-path
 source additionally records `pack_config_hash`, which must match both the
@@ -406,7 +479,7 @@ then ID.
 
 First-parent order establishes ordering, not a valid decision point. A merge or
 squash may already contain validation added because of CI or review. Version
-0.8.0 therefore distinguishes raw `git_commit` evidence from grouped
+0.9.0 therefore distinguishes raw `git_commit` evidence from grouped
 `historical_change` observations. The latter bind one stable `change_id` to an
 exact `base_sha`, `prediction_sha`, and prediction time. Only a `rich` unit with
 a genuinely persisted point-in-time snapshot can be confirmatory. `git_only`
@@ -602,7 +675,7 @@ identity, authorized independent actor, target, value, maturity/completeness,
 and correction provenance. Its adapter may emit an immutable normalized
 `change_finalized` event with explicit `target`, `value`, and
 `evidence_complete`; RuleLoom then applies the ordinary chronology, conflict,
-and atomic-target rules during import and materialization. RuleLoom v0.8.0 ships
+and atomic-target rules during import and materialization. RuleLoom v0.9.0 ships
 a local GitHub Action/webhook capture substrate for future deliveries. It does
 not reconstruct historical label names, run a durable observer daemon, or make
 automatic-label coverage claims without an operational audit.
@@ -621,6 +694,13 @@ out of scope.
 
 Unknown observations are excluded from learning and confusion metrics. They
 must still be counted in data-readiness and label-maturity reporting.
+
+The materialization report additionally derives the outcome before Git-object
+filtering and records `retention_by_outcome` for positive, negative, and unknown
+units. Each entry includes eligible, retained, skipped, and descriptive rate.
+This exposes differential missingness caused by unavailable PR heads or other
+Git evidence; it does not impute skipped observations or correct the resulting
+selection bias.
 
 Every `positive` or `negative` label requires a `label_evidence` entry. An
 `unknown` label has none. Each entry contains:
@@ -648,7 +728,7 @@ only when `available_at` is strictly later than that unit's earliest
 `predicted_at` within the policy set.
 
 The same independent change must not appear on both sides of a retrospective
-split through multiple snapshots. Version 0.8.0 materializes one observation per
+split through multiple snapshots. Version 0.9.0 materializes one observation per
 `ChangeUnit`, and `learn` rejects duplicate mature `change_id` values. It also
 rejects mixing `git_commit` and `historical_change` cohorts. A raw commit cohort
 still needs manual independence auditing; grouped history is the preferred
@@ -666,7 +746,7 @@ Each `fact_evidence` entry contains:
 | `confidence` | number or absent | Optional value from 0 through 1, mainly for non-deterministic facts. |
 
 `agent`, `human`, and `imported` are reserved wire-format values for future
-extractors and migration tooling. In version 0.8.0, current built-in-pack
+extractors and migration tooling. In version 0.9.0, current built-in-pack
 observations are accepted for validation, learning, and prediction only when
 every fact has `kind: "deterministic"` and names the exact configured extractor.
 A record using a reserved non-deterministic kind may be read structurally, but
@@ -675,6 +755,18 @@ it is not an accepted learning observation today.
 Evidence text is untrusted repository data. It must never be interpolated as
 agent instructions or a shell command. Prefer references and hashes to source
 excerpts because artifacts may be committed or shared.
+
+For `generic_changes@2`, ordinal change-shape facts are emitted by the normal
+diff extractor. Point-in-time history facts are added while observations are
+persisted, after replaying strictly earlier snapshots in the same repository and
+cohort. Their `historical_context` metadata records thresholds, left-censoring,
+pair-budget state, timestamp availability, and a privacy-preserving CODEOWNERS
+summary. Exact-path history facts abstain when `changed_files` is incomplete.
+Time-window facts permanently abstain for the remainder of a cohort after a
+non-monotonic commit timestamp. CODEOWNERS is read from the base commit using
+bounded `git cat-file` batches; rule parsing and path-rule match work are capped,
+and excessive matching abstains. Only rule counts, matched-path counts, and the
+number of distinct owner sets are stored, never owner strings.
 
 ### Closed-world negation
 
@@ -699,7 +791,7 @@ missing diff is extraction failure or ineligibility, never logical falsehood.
 
 ## Rule representation
 
-Version 0.8.0 is propositionalized ILP over one change at a time. Each fact is a
+Version 0.9.0 is propositionalized ILP over one change at a time. Each fact is a
 Boolean unary predicate of the same observation variable `A`; there are no
 multiple entity variables, relations between files/types/people, relational
 joins, recursion, predicate invention, or arbitrary Prolog programs. A rule set
@@ -831,6 +923,11 @@ metadata. Current metadata also records readiness, the selected single literal,
 rule cards with support/counterexamples, and an evaluation object whose method
 is `temporal_holdout`, whose effective and optional configured test starts are
 explicit, and whose `label_availability_enforced` flag is true.
+For schema-v4 learned candidates, metadata also embeds the exact signal-probe
+report and Horn diagnostics. Horn diagnostics contain the bounded top rejected
+train-only clauses, rejection reasons, lift diagnostics, hypotheses examined,
+and an explicit multiple-testing warning. They are not holdout or confirmatory
+results.
 
 A manual candidate instead stores its immutable declaration and full post-hoc
 audit under metadata, uses `historical` metrics, and has no train/test split.
@@ -1038,7 +1135,7 @@ eligible for prospective confusion metrics. `excluded_preexisting_outcome`
 prevents a retrospectively known answer from masquerading as a prediction. Use
 `report --policy-set <hash>` for the unwrapped single-policy report. The report
 describes aggregate prospective association, never a causal estimate; causal
-impact needs a randomized or pre-specified staged advisory rollout. Version 0.8.0
+impact needs a randomized or pre-specified staged advisory rollout. Version 0.9.0
 does not emit confidence intervals or per-clause prospective tables in this
 report. Promotion separately evaluates the registered Wilson lower-bound and
 per-clause gates described above.
@@ -1086,14 +1183,15 @@ The supported configuration compatibility contract is:
 | Configuration schema | Pack contract | Intended use |
 |---|---|---|
 | v1 | Frozen `flutter_testing@1`, no explicit evidence profile | Structural reading and historical hash reproduction only |
-| v2 | One static pack/version plus complete `evidence` profile | Default new `generic_changes@1` and current `flutter_testing@2` experiments |
-| v3 | v2 fields plus required canonical `pack_config` | Required for `configured_paths@1`; static packs accept only `{}` |
+| v2 | One static pack/version plus complete `evidence` profile | Historical `generic_changes@1` and current `flutter_testing@2` experiments |
+| v3 | v2 fields plus required canonical `pack_config` | Historical configurable-path experiments; static packs accept only `{}` |
+| v4 | v3 fields plus frozen signal-probe and relative learner gates | Default new `generic_changes@2` experiments; also supports `configured_paths@1` |
 
 Artifact records remain schema v1; configuration schema and artifact schema are
 independent version axes. Configuration schema v1 remains structurally readable
 with its exact historical semantics and hashes, but is not endorsed for new
 collection or policy decisions. There is no implicit upgrade that reinterprets
-old observations. Moving to schema v3, a newer pack, a different dynamic
+old observations. Moving to schema v3/v4, a newer pack, a different dynamic
 vocabulary, scope, threshold, target, or outcome contract creates a new
 experiment and requires complete, consistent re-extraction. A holdout already
 inspected while choosing a configured vocabulary cannot become the new

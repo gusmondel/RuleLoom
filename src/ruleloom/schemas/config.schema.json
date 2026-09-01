@@ -1,7 +1,7 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "urn:ruleloom:schema:config:v1-v3",
-  "title": "RuleLoom configuration v1/v2/v3",
+  "$id": "urn:ruleloom:schema:config:v1-v4",
+  "title": "RuleLoom configuration v1/v2/v3/v4",
   "type": "object",
   "additionalProperties": false,
   "required": [
@@ -21,7 +21,7 @@
     "promotion"
   ],
   "properties": {
-    "schema_version": {"enum": [1, 2, 3]},
+    "schema_version": {"enum": [1, 2, 3, 4]},
     "project": {
       "type": "string",
       "minLength": 1,
@@ -129,7 +129,12 @@
         "bootstrap_runs": {"type": "integer", "minimum": 0, "maximum": 100},
         "max_predicates": {"type": "integer", "minimum": 1, "maximum": 32},
         "popper_dir": {"type": ["string", "null"]},
-        "popper_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600}
+        "popper_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 3600},
+        "gate_mode": {"enum": ["absolute_precision", "relative_lift"]},
+        "min_lift_lower_bound": {"type": "number", "minimum": 1, "maximum": 1000},
+        "min_alert_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "confidence_level": {"type": "number", "exclusiveMinimum": 0.5, "exclusiveMaximum": 1},
+        "near_miss_limit": {"type": "integer", "minimum": 0, "maximum": 100}
       },
       "allOf": [
         {
@@ -165,6 +170,34 @@
         "min_test_examples": {"type": "integer", "minimum": 1},
         "seed": {"type": "integer", "minimum": 0},
         "test_start_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "signal_probe": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "enabled",
+        "folds",
+        "min_train_examples",
+        "min_validation_examples",
+        "min_mcc",
+        "min_lift_lower_bound",
+        "min_alert_rate",
+        "confidence_level",
+        "tree_max_depth",
+        "max_predicates"
+      ],
+      "properties": {
+        "enabled": {"type": "boolean"},
+        "folds": {"type": "integer", "minimum": 2, "maximum": 20},
+        "min_train_examples": {"type": "integer", "minimum": 4},
+        "min_validation_examples": {"type": "integer", "minimum": 2},
+        "min_mcc": {"type": "number", "minimum": -1, "maximum": 1},
+        "min_lift_lower_bound": {"type": "number", "minimum": 1, "maximum": 1000},
+        "min_alert_rate": {"type": "number", "minimum": 0, "maximum": 1},
+        "confidence_level": {"type": "number", "exclusiveMinimum": 0.5, "exclusiveMaximum": 1},
+        "tree_max_depth": {"type": "integer", "minimum": 1, "maximum": 4},
+        "max_predicates": {"type": "integer", "minimum": 1, "maximum": 1024}
       }
     },
     "promotion": {
@@ -217,7 +250,15 @@
           "anyOf": [
             {"required": ["pack_version"]},
             {"required": ["evidence"]},
-            {"required": ["pack_config"]}
+            {"required": ["pack_config"]},
+            {"required": ["signal_probe"]},
+            {"properties": {"learner": {"anyOf": [
+              {"required": ["gate_mode"]},
+              {"required": ["min_lift_lower_bound"]},
+              {"required": ["min_alert_rate"]},
+              {"required": ["confidence_level"]},
+              {"required": ["near_miss_limit"]}
+            ]}}}
           ]
         }
       }
@@ -226,12 +267,68 @@
       "if": {"properties": {"schema_version": {"const": 2}}},
       "then": {
         "required": ["pack_version", "evidence"],
-        "not": {"required": ["pack_config"]}
+        "not": {
+          "anyOf": [
+            {"required": ["pack_config"]},
+            {"required": ["signal_probe"]},
+            {"properties": {"learner": {"anyOf": [
+              {"required": ["gate_mode"]},
+              {"required": ["min_lift_lower_bound"]},
+              {"required": ["min_alert_rate"]},
+              {"required": ["confidence_level"]},
+              {"required": ["near_miss_limit"]}
+            ]}}}
+          ]
+        }
       }
     },
     {
       "if": {"properties": {"schema_version": {"const": 3}}},
-      "then": {"required": ["pack_version", "evidence", "pack_config"]}
+      "then": {
+        "required": ["pack_version", "evidence", "pack_config"],
+        "not": {
+          "anyOf": [
+            {"required": ["signal_probe"]},
+            {"properties": {"learner": {"anyOf": [
+              {"required": ["gate_mode"]},
+              {"required": ["min_lift_lower_bound"]},
+              {"required": ["min_alert_rate"]},
+              {"required": ["confidence_level"]},
+              {"required": ["near_miss_limit"]}
+            ]}}}
+          ]
+        }
+      }
+    },
+    {
+      "if": {"properties": {"schema_version": {"const": 4}}},
+      "then": {
+        "required": ["pack_version", "evidence", "pack_config", "signal_probe"],
+        "properties": {
+          "learner": {
+            "required": [
+              "gate_mode",
+              "min_lift_lower_bound",
+              "min_alert_rate",
+              "confidence_level",
+              "near_miss_limit"
+            ]
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "signal_probe": {
+                  "properties": {"enabled": {"const": true}},
+                  "required": ["enabled"]
+                }
+              }
+            },
+            "then": {"properties": {"evaluation": {"required": ["test_start_at"]}}}
+          }
+        ]
+      }
     },
     {
       "if": {
@@ -240,7 +337,7 @@
       },
       "then": {
         "properties": {
-          "schema_version": {"const": 3},
+          "schema_version": {"enum": [3, 4]},
           "pack_version": {"const": 1},
           "pack_config": {"$ref": "#/$defs/configuredPathsConfig"}
         }

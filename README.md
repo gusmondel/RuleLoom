@@ -12,7 +12,7 @@ claim keeps its point-in-time facts, later outcomes, chronological evaluation,
 and review state attached as evidence.
 
 > [!WARNING]
-> RuleLoom v0.8.0 is alpha research software. Start in blinded shadow mode. Do
+> RuleLoom v0.9.0 is alpha research software. Start in blinded shadow mode. Do
 > not use it as a merge gate, security control, or autonomous policy publisher.
 
 The core is language- and provider-neutral. Programming-language knowledge
@@ -32,6 +32,7 @@ only on persisted Boolean facts, timestamps, provenance, and stable change IDs.
 - [Decision-time MCP integration](#decision-time-mcp-integration)
 - [Normalized history JSONL](#normalized-history-jsonl)
 - [Evidence grades and promotion gates](#evidence-grades-and-promotion-gates)
+- [Signal-first learning](#signal-first-learning)
 - [What RuleLoom can learn](#what-ruleloom-can-learn)
 - [Evidence packs and adapters](#evidence-packs-and-adapters)
 - [Command reference](#command-reference)
@@ -90,6 +91,14 @@ and negative units. Read the protocol, cohort flow, exact hashes, metrics, and
 limitations in the
 [Apache Airflow case study](case-studies/apache-airflow/README.md).
 
+A separate v0.9 smoke test ran the same language-neutral cold-start pipeline on
+500 commits each from Flask, ripgrep, and Express. It retained `99.2–100%` of
+the selected units and produced different prior-history feature distributions,
+but correctly stopped as inconclusive because Git alone supplied no mature
+labels. See the pinned revisions, timings, predicate prevalences, and
+partial-clone safeguard in the
+[portability result](case-studies/portability-v09/RESULTS.md).
+
 ## First-five-minute structural audit
 
 From any Git checkout, before initialization or labels:
@@ -146,6 +155,10 @@ RuleLoom does:
 - keep unknown outcomes unknown instead of silently treating absence as a
   negative;
 - learn non-recursive unary Horn rules and compare them with simple baselines;
+- probe pre-holdout signal with rolling-origin logistic and shallow-tree models
+  before allowing the learner to spend the frozen holdout;
+- report train-only near-miss clauses and relative-to-base-rate diagnostics when
+  no rule clears the frozen gates;
 - split evidence chronologically and record the exact train/holdout IDs;
 - assess reviewed rules prospectively, expose approved-only guidance through a
   local stdio MCP server, and render approved rules for supported agents.
@@ -159,7 +172,8 @@ RuleLoom does not:
 - infer a negative outcome merely because no failure was recorded;
 - interpret `AGENTS.md`, `CLAUDE.md`, issue text, review prose, or ordinary
   GitHub labels as rules or outcomes;
-- invent or activate new predicates in v0.8.0;
+- invent or activate new predicates in v0.9.0;
+- pool training evidence across repositories automatically;
 - implement full relational ILP with joins, recursion, entity variables, or
   unrestricted predicate invention;
 - automatically fetch data from every forge or project-management provider.
@@ -177,7 +191,11 @@ flowchart LR
     H --> O[Delayed atomic outcome]
     F --> I[ILP learner]
     O --> I
-    I --> T[Chronological evaluation + baselines]
+    F --> P[Pre-holdout signal probe]
+    O --> P
+    P -->|pass| I
+    P -->|fail or inconclusive| Z[Protect holdout and redesign]
+    I --> T[One chronological holdout + baselines]
     T --> C[Immutable candidate]
     M[Reviewed manual Horn manifest] --> C
     C --> R{Human review}
@@ -217,7 +235,7 @@ Requirements:
 - Git;
 - the authenticated GitHub CLI (`gh`) only when using
   `history import-github`;
-- macOS or Linux. v0.8.0 uses POSIX `fcntl` locking and does not support
+- macOS or Linux. v0.9.0 uses POSIX `fcntl` locking and does not support
   Windows.
 
 From a checkout:
@@ -407,7 +425,7 @@ An LLM may inspect outcome-blind repository structure, architecture documents,
 and this audit to propose candidate concepts. It cannot activate them: a human
 must review the semantics, deterministic extraction must verify them, and the
 new vocabulary must be frozen before outcomes are opened. RuleLoom does not
-perform automatic predicate invention in v0.8.0.
+perform automatic predicate invention in v0.9.0.
 
 If an existing convention can already be expressed using the frozen predicate
 vocabulary, encode it explicitly rather than asking RuleLoom to parse prose.
@@ -465,7 +483,7 @@ or SCP-style `remote.origin.url`. A reviewed mirror or checkout whose origin
 cannot establish that equality requires the explicit
 `--allow-unverified-repository` override;
 the report records `repository_binding` and the manifest hash binds that choice.
-The archive adapter does not support a GitHub Enterprise host in v0.8.0.
+The archive adapter does not support a GitHub Enterprise host in v0.9.0.
 
 `--since` filters PRs by `created_at` and also bounds the repository-commit scan.
 `--until` is an inclusive as-of cutoff for PR creation and finalization and for
@@ -526,7 +544,7 @@ or append-only adjudication ledger captured the label application point-in-time
 and can emit a normalized immutable outcome event with its original timestamp,
 target, value, evidence completeness, and independent provenance. Import that
 event through `ruleloom history import`; retain and audit the external source.
-RuleLoom v0.8.0 ships the local point-in-time Action/webhook capture substrate
+RuleLoom v0.9.0 ships the local point-in-time Action/webhook capture substrate
 described above. The archive adapter itself still produces no strong outcome
 from label names and cannot upgrade an existing exploratory `git_only` unit;
 start a clean experiment for point-in-time capture of that change.
@@ -613,6 +631,12 @@ evidence pack. The default historical outcome is
 `validation_rework_required`; the legacy configured target
 `needs_extra_validation` maps to it automatically.
 
+Exact churn and content evidence requires the corresponding blobs to exist
+locally. RuleLoom disables partial-clone lazy fetching so this command cannot
+silently make one network request per missing blob. Hydrate the selected history
+explicitly in a trusted observer clone—using `git backfill` when the installed
+Git supports it—or use a full clone.
+
 `--outcome-target` may explicitly assert the registered mapping, but cannot
 override or reinterpret the frozen target:
 
@@ -634,9 +658,20 @@ exploratory opt-in and makes dependent cases non-confirmatory.
 
 ### 6. Learn a candidate—or seed one explicit existing rule
 
-Continue only after `readiness` reports both mature classes. The `learn` command
-then constructs the chronological split and enforces the configured minimum
-train and holdout sizes:
+Continue only after `readiness` reports both mature classes. Schema v4 first
+runs the registered signal-availability probe over pre-holdout observations:
+
+```bash
+ruleloom signal-probe --json
+```
+
+The probe uses expanding-window logistic and shallow Boolean-tree models. Every
+fold sees only labels available by that fold's validation start, and nothing at
+or after `evaluation.test_start_at` contributes to its identity or metrics. A
+failed or inconclusive probe blocks `learn` without evaluating the holdout.
+
+After a passing probe, `learn` constructs the chronological split and enforces
+the configured minimum train and holdout sizes:
 
 ```bash
 ruleloom learn --engine horn
@@ -644,11 +679,12 @@ ruleloom candidate list
 ruleloom candidate show <candidate-id>
 ```
 
-By default the holdout is the latest configured fraction. A preregistered
-experiment can instead set the optional aware timestamp
-`evaluation.test_start_at` in `.ruleloom/config.json`; observations before it
-form training and observations at or after it form holdout. Labels unavailable
-at the holdout boundary are embargoed from training.
+New schema-v4 projects freeze `evaluation.test_start_at` at initialization;
+existing evidence is pre-holdout and later observations form the untouched
+prospective holdout. A retrospective public experiment may set a different
+aware boundary only before collection or outcome access, then preserve that
+configuration and every later attempt. Labels unavailable at the holdout
+boundary are embargoed from training.
 
 Learning from `git_commit` and `historical_change` observations cannot be mixed
 in one candidate. Historical learning enforces one labeled observation per
@@ -659,6 +695,15 @@ observed excluded constant and alias. Declared predicates that never occur are
 reported by the separate outcome-blind audit. The later chronological holdout
 evaluates that frozen selection—even if aliases diverge there—and never chooses
 predicates, thresholds, or rules.
+
+Schema v4 defaults Horn gates to lift relative to the training prevalence plus
+a minimum alert rate. The stored “lift lower” is a deliberately conservative
+descriptive diagnostic made from Wilson endpoints, not a formal post-selection
+confidence interval. If Horn finds no qualifying clause after a passing probe,
+the candidate records the top rejected train-only clauses, their support and
+confusion counts, rejection reasons, and total hypotheses examined. These
+near-misses guide a separately registered redesign; they are never
+confirmatory evidence or permission to relax the current gates.
 
 Every learned candidate is compared on the same holdout with never alert,
 always alert, train-majority, the best train-selected literal, a fixed
@@ -891,6 +936,38 @@ per-clause support, and configured precision/recall/MCC gates. These are
 configurable operating thresholds—not universal statistical guarantees—and
 cannot repair biased sampling or incorrect labels.
 
+## Signal-first learning
+
+The deployment holdout is a scarce resource. RuleLoom schema v4 protects it
+with a train-only stage before Horn learning:
+
+```mermaid
+flowchart LR
+    A[Frozen pre-holdout facts + mature labels] --> L[Boolean logistic]
+    A --> T[Shallow Boolean tree]
+    L --> G{MCC or relative-lift gate}
+    T --> G
+    G -->|pass| H[Horn search + one holdout]
+    G -->|fail / inconclusive| R[Retain null; register a new design]
+```
+
+The two model families estimate signal availability rather than a mathematical
+ceiling. Reports include average precision, MCC, alert rate, selective risk,
+Wilson precision/prevalence intervals, fold warnings, and a content-addressed
+pre-holdout manifest. Low-prevalence rule gates are relative to the cohort base
+rate, but the Wilson-endpoint ratio is explicitly descriptive rather than a
+formal confidence interval.
+
+`generic_changes@2` supplies language-neutral ordinal size and diffusion facts,
+strictly prior path hotspots and dormancy, bounded missing co-change partners,
+and prior-snapshot ownership-boundary facts. Exact-path predicates abstain when
+the file manifest is truncated; time-window predicates abstain after timestamp
+disorder; ownership identities are counted transiently but never stored.
+
+The full statistical rationale, defaults, failure interpretation, and
+multi-repository protocol are in
+[docs/SIGNAL-PROTOCOL.md](https://github.com/gusmondel/RuleLoom/blob/main/docs/SIGNAL-PROTOCOL.md).
+
 ## What RuleLoom can learn
 
 The built-in learner searches for small rules over the predicates declared by
@@ -929,8 +1006,10 @@ ruleloom packs list
 ruleloom packs list --json
 ```
 
-The default `generic_changes@1` reads change shape and well-known path roles; it
-does not parse programming-language syntax. `configured_paths@1` adds a frozen,
+The schema-v4 default `generic_changes@2` reads change shape, well-known path
+roles, ordinal size/diffusion, and bounded point-in-time history; it does not
+parse programming-language syntax. `generic_changes@1` remains available for
+old experiment reproducibility. `configured_paths@1` adds a frozen,
 repository-specific component vocabulary while remaining language-neutral:
 
 ```bash
@@ -983,6 +1062,7 @@ derived artifacts and should be reviewed like source code.
 | `ruleloom collect git` | Collect curated retrospective or prospective Git facts |
 | `ruleloom label` / `import-labels` | Attach outcomes to non-derived observations; historical changes use events |
 | `ruleloom validate` | Validate schemas, identity, provenance, and temporal invariants |
+| `ruleloom signal-probe` | Estimate pre-holdout signal with rolling-origin models without consulting the frozen holdout |
 | `ruleloom readiness` | Report sample stage, classes, unknowns, and evidence coverage |
 | `ruleloom rules import` | Freeze an explicit manual Horn manifest and audit its historical coverage |
 | `ruleloom learn` | Learn and chronologically evaluate a candidate |
@@ -1084,6 +1164,7 @@ before opening a change.
 
 - [Product thesis and falsification criteria](https://github.com/gusmondel/RuleLoom/blob/main/docs/THESIS.md)
 - [Research evidence matrix](https://github.com/gusmondel/RuleLoom/blob/main/docs/RESEARCH.md)
+- [Signal-first learning protocol](https://github.com/gusmondel/RuleLoom/blob/main/docs/SIGNAL-PROTOCOL.md)
 - [Shadow-pilot protocol](https://github.com/gusmondel/RuleLoom/blob/main/docs/PILOT-PROTOCOL.md)
 - [Versioned data schema](https://github.com/gusmondel/RuleLoom/blob/main/docs/DATA-SCHEMA.md)
 - [Git history performance and storage](https://github.com/gusmondel/RuleLoom/blob/main/docs/PERFORMANCE.md)

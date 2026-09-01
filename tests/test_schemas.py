@@ -24,6 +24,12 @@ from ruleloom.models import (
     content_hash,
 )
 from ruleloom.packs import ConfiguredPathsConfig, PathPredicateConfig
+from ruleloom.signal_probe import (
+    SIGNAL_PROBE_VERSION,
+    SignalModelReport,
+    SignalProbeReport,
+    conservative_lift_diagnostic,
+)
 
 TARGET = "needs_extra_validation"
 EXPERIMENT_ID = "ruleloom-pilot-v1"
@@ -206,6 +212,32 @@ def test_public_schemas_accept_every_persisted_model_shape() -> None:
     _validate("prediction", prediction.to_dict())
     _validate("historical-event", _historical_event().to_dict())
     _validate("change-unit", _change_unit().to_dict())
+    probe_metrics = Metrics.from_counts(3, 1, 12, 2)
+    probe = SignalProbeReport(
+        id="probe-pending",
+        created_at="2026-08-31T12:00:00Z",
+        status="pass",
+        version=SIGNAL_PROBE_VERSION,
+        dataset_hash="d" * 64,
+        config_hash="c" * 64,
+        holdout_start_at="2026-08-01T00:00:00Z",
+        training_observations=18,
+        models=(
+            SignalModelReport(
+                family="logistic_regression_boolean_facts",
+                folds=3,
+                observations=18,
+                metrics=probe_metrics,
+                average_precision=0.75,
+                selective_risk=0.25,
+                lift=conservative_lift_diagnostic(probe_metrics, 0.95),
+                gate_passed=True,
+                gate_reasons=(),
+            ),
+        ),
+        warnings=(),
+    ).with_identity()
+    _validate("signal-probe", probe.to_dict())
 
 
 def test_candidate_schema_accepts_manual_audit_metrics_without_learned_split() -> None:
@@ -277,6 +309,25 @@ def test_config_schema_enforces_v3_pack_configuration_contract() -> None:
     static["pack_config"] = configured["pack_config"]
     with pytest.raises(ValidationError):
         _validate("config", static)
+
+
+@pytest.mark.parametrize("schema_version", [1, 2, 3])
+def test_legacy_config_schemas_reject_v4_signal_fields(schema_version: int) -> None:
+    payload = RuleLoomConfig(
+        schema_version=schema_version,
+        project="ExampleProject",
+        pack="flutter_testing" if schema_version == 1 else "generic_changes",
+        pack_version=1,
+    ).to_dict()
+    payload["signal_probe"] = {"enabled": False}
+
+    with pytest.raises(ValidationError):
+        _validate("config", payload)
+
+    payload.pop("signal_probe")
+    payload["learner"]["gate_mode"] = "relative_lift"
+    with pytest.raises(ValidationError):
+        _validate("config", payload)
 
 
 @pytest.mark.parametrize(

@@ -15,6 +15,7 @@ from ruleloom.config import (
     PromotionConfig,
     ProtocolConfig,
     RuleLoomConfig,
+    SignalProbeConfig,
 )
 from ruleloom.lifecycle import (
     ShadowEvidence,
@@ -663,10 +664,12 @@ def test_initialize_creates_portable_agent_skills_and_refuses_reinitialization(
 
     assert result.config.project == "ExampleProject"
     assert (result.config.schema_version, result.config.pack, result.config.pack_version) == (
-        2,
+        4,
         "generic_changes",
-        1,
+        2,
     )
+    assert result.config.evaluation.test_start_at is not None
+    assert result.config.signal_probe.enabled
     assert (root / ".ruleloom/config.json").is_file()
     assert (root / ".ruleloom/observations.jsonl").read_text(encoding="utf-8") == ""
     assert (root / ".ruleloom/predictions.jsonl").read_text(encoding="utf-8") == ""
@@ -813,6 +816,7 @@ def test_promote_candidate_records_human_review_and_syncs_approved_rules(
             min_test_examples=2,
             seed=7,
         ),
+        signal_probe=SignalProbeConfig(enabled=False),
         promotion=PromotionConfig(
             min_positive_for_shadow=1,
             min_positive_for_approval=1,
@@ -1005,6 +1009,7 @@ def test_failed_promotion_requires_explicit_override_with_note(tmp_path: Path) -
             min_test_examples=2,
             seed=7,
         ),
+        signal_probe=SignalProbeConfig(enabled=False),
     )
     observations = [
         _observation(

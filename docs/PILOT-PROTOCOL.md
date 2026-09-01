@@ -35,7 +35,7 @@ record with the pilot artifacts if the repository owner's data policy permits it
 | Independent-unit/group key | Stable PR/task/change ID. Materialization emits one observation per `ChangeUnit`; `learn` rejects duplicate mature `change_id` values. Evidence-source `independent_group` prevents dependent votes from masquerading as corroboration. |
 | Prediction time | Exact workflow point and immutable commit SHA for retrospective training, or base/head/worktree snapshot for prospective prediction |
 | Target | One outcome with a single operational definition |
-| Evidence profile | Schema version plus one exact `pack@version`; use schema-v2 `generic_changes@1` unless the experiment has pre-registered a supported specialized or schema-v3 configurable pack |
+| Evidence profile | Schema version plus one exact `pack@version`; use schema-v4 `generic_changes@2` unless the experiment has pre-registered a supported specialized or configurable pack |
 | Included paths | Repository-relative `evidence.include_paths` globs defining the eligible component(s) |
 | Excluded paths | Repository-relative `evidence.exclude_paths` globs defining generated, vendored, or otherwise ineligible material |
 | Configured feature library | For `configured_paths@1`, the complete canonical `pack_config`, resolved predicate list, `pack_config_hash`, outcome-blind design source/revision, author, and rationale |
@@ -51,7 +51,9 @@ record with the pilot artifacts if the repository owner's data policy permits it
 | Candidate origin | Learned from the locked training partition, or one explicit reviewed manual Horn seed; never describe the latter as learned |
 | Retrospective window | Oldest and newest eligible historical change |
 | Holdout rule | Latest chronological grouped changes, never random. In a raw-commit fallback, admit only one independently audited commit per real-world change or classify it as exploratory. |
-| Fixed holdout boundary | Optional aware `evaluation.test_start_at`; when preregistered, observations before it train and observations at/after it form holdout. Labels unavailable at that instant are embargoed from training. |
+| Fixed holdout boundary | Required aware `evaluation.test_start_at` for schema v4; observations before it are eligible for probe/train and observations at/after it form the untouched holdout. Labels unavailable at that instant are embargoed from training. |
+| Signal probe | Frozen model families, folds, minimum train/validation sizes, MCC/lift/alert-rate thresholds, confidence level, tree depth, and predicate cap. Fail/inconclusive blocks holdout access. |
+| Horn gate | Absolute precision for legacy schemas or schema-v4 relative lift plus alert-rate threshold; preserve near-miss limit and hypotheses examined. |
 | Confirmation window | Untouched future interval reserved for any design selected after exploratory analysis |
 | Primary predictive metric | Suggested: MCC for the promotion comparison; precision may be the operational priority when false prompts dominate cost |
 | Secondary metrics | Precision, recall, F1, balanced accuracy, prevalence, predicted-positive rate, coverage, confusion counts |
@@ -193,7 +195,7 @@ pack version and without agent integration:
 ```bash
 cd /absolute/path/to/observer-checkout
 ruleloom init . --project example-project \
-  --pack generic_changes --pack-version 1 --agents none
+  --pack generic_changes --pack-version 2 --agents none
 ruleloom doctor
 ruleloom readiness
 ```
@@ -201,17 +203,19 @@ ruleloom readiness
 `ruleloom init` requires an existing Git repository with either
 `remote.origin.url` configured or at least one commit; establish one of those
 identity anchors first. The current release supports macOS and Linux, not
-Windows, because its storage lock uses POSIX `fcntl`. `generic_changes@1` is the
-schema-v2 default and provides language-neutral change-shape, test-path,
-documentation, CI, and dependency-file facts. Passing no `--pack-version`
+Windows, because its storage lock uses POSIX `fcntl`. `generic_changes@2` is the
+schema-v4 default and provides language-neutral change-shape, path-role,
+ordinal, diffusion, hotspot, dormancy, co-change, and ownership-boundary facts.
+Passing no `--pack-version`
 selects the latest registered version, but a pre-registered pilot should always
 pin it explicitly.
 
-Inspect `.ruleloom/config.json` before collection. Static-pack pilots use
-`schema_version: 2` by default; `configured_paths@1` uses schema v3. Freeze its
+Inspect `.ruleloom/config.json` before collection. New pilots use
+`schema_version: 4`; `configured_paths@1` is also supported under schema v4. Freeze its
 `experiment_id`, derived `repository_id`,
 `prediction_unit`, `outcome_definition`, target, `pack`, `pack_version`, and the
-entire `evidence` object plus `pack_config` when schema v3 applies. RuleLoom
+entire `evidence`, `pack_config`, `signal_probe`, learner-gate, and holdout
+objects. RuleLoom
 includes the resolved extractor and all these fields in the evidence-protocol
 hash recorded on every observation. A typical
 language-neutral evidence profile is:
@@ -375,7 +379,7 @@ ruleloom history materialize
 ruleloom history status
 ```
 
-The v0.8.0 archive adapter supports the explicit `github.com` host. By default it
+The v0.9.0 archive adapter supports the explicit `github.com` host. By default it
 requires `OWNER/NAME` to equal the repository parsed from an unambiguous
 public-GitHub HTTPS, SSH, or SCP-style `remote.origin.url`. A reviewed mirror or
 checkout without a verifiable matching origin requires
@@ -559,7 +563,7 @@ Export that record as an immutable normalized outcome event and import it with
 at least one positive, one mature negative, one conflict, and one correction
 against the source ledger.
 
-RuleLoom v0.8.0 ships a local GitHub Action/webhook capture substrate and bounded
+RuleLoom v0.9.0 ships a local GitHub Action/webhook capture substrate and bounded
 inbox ingestion, not a hosted App or durable observer daemon. Follow
 [`integrations/GITHUB-CAPTURE.md`](integrations/GITHUB-CAPTURE.md), preregister
 the strict label policy, and measure delivery and maturity coverage. Until a
@@ -627,6 +631,13 @@ that response is not a predictor observation. If provider history cannot supply
 a point-in-time snapshot and reliable order, RuleLoom retains the case as
 exploratory or unknown; it does not upgrade Git topology into ground truth.
 
+Preserve `retention_by_outcome` from every materialization run. It compares the
+positive, negative, and unknown outcomes derivable before Git-object filtering
+with the units actually materialized. A class-specific retention gap is a
+missing-data threat and must be reported. Do not impute a negative or silently
+substitute a merge-base snapshot; capture future opening/synchronization SHAs
+continuously so the missing-object mechanism does not recur.
+
 Audit at least one positive and one negative against their independent sources,
 including the predictor SHA, event timestamp, response commit, maturity event,
 and stable PR/change identity. Ensure `available_at` is when the outcome first
@@ -641,6 +652,7 @@ Validate and learn:
 ```bash
 ruleloom validate
 ruleloom readiness
+ruleloom signal-probe --json
 ruleloom learn --engine horn
 ruleloom candidate list
 ruleloom candidate show <candidate-id>
@@ -651,6 +663,13 @@ candidate manifests, active shadow/approved artifacts, deprecation tombstones,
 local transition attestations, and locally attested prediction records. A
 successful result establishes structural/provenance consistency, not label
 truth or predictive value.
+
+The schema-v4 signal probe is a train-only gate, not a candidate model or a
+theoretical ceiling. It uses expanding-window logistic and shallow-tree models,
+enforces label availability at each fold, and excludes the fixed holdout
+completely. Preserve its content-addressed report. A `fail` or `inconclusive`
+result ends this experiment before `learn`; revise the target or vocabulary only
+under a new registered design and future confirmation window.
 
 There is a separate, prospective-only track for one already-reviewed manual
 risk assertion. A human must translate it into the strict manifest documented
@@ -700,6 +719,12 @@ the prospective promotion gate separately computes Wilson 95% lower confidence
 bounds for precision and recall. If the pilot needs broader uncertainty
 analysis, pre-register and run it separately. If one class is absent from train
 or test, stop and collect more evidence.
+
+Schema-v4 Horn search uses the preregistered relative-lift and alert-rate gates.
+Its ratio of Wilson endpoints is a descriptive conservative diagnostic, not a
+formal confidence interval for post-selection lift. When no clause qualifies,
+preserve the top train-only near-misses, rejection reasons, and hypotheses
+examined; do not tune the current gates to rescue one of them.
 
 All target-aware selection is confined to the temporally eligible training
 partition. The built-in learner excludes training-constant columns, collapses

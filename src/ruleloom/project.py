@@ -61,7 +61,7 @@ def initialize_project(
     pack: str | None = None,
     pack_version: int | None = None,
     pack_config: ConfiguredPathsConfig | None = None,
-    schema_version: int = 2,
+    schema_version: int = 4,
     agents: Sequence[str] = (),
 ) -> InitResult:
     root = root.resolve()
@@ -80,6 +80,9 @@ def initialize_project(
         pack_version=pack_version,
         pack_config=pack_config,
         schema_version=schema_version,
+        test_start_at=(
+            datetime.now(UTC).isoformat().replace("+00:00", "Z") if schema_version >= 4 else None
+        ),
     )
     managed_paths = [
         config_path,
@@ -90,6 +93,7 @@ def initialize_project(
         project_path(root, config.shadow_dir),
         project_path(root, config.approved_dir),
         project_path(root, config.deprecated_dir),
+        project_path(root, ".ruleloom/signal-probes"),
         events_path(root),
         change_units_path(root),
     ]
@@ -129,6 +133,7 @@ def initialize_project(
         config.shadow_dir,
         config.approved_dir,
         config.deprecated_dir,
+        ".ruleloom/signal-probes",
     ):
         project_path(root, directory).mkdir(parents=True, exist_ok=True)
     write_text(

@@ -269,6 +269,20 @@ def test_constructor_defaults_to_schema_v2_generic_changes() -> None:
     assert "evidence" in config.to_dict()
 
 
+def test_schema_v4_defaults_to_relative_gates_and_generic_v2() -> None:
+    config = default_config(
+        "ExampleProject",
+        schema_version=4,
+        test_start_at="2026-09-01T00:00:00Z",
+    )
+
+    assert config.pack_version == 2
+    assert config.learner.gate_mode == "relative_lift"
+    assert config.signal_probe.enabled is True
+    assert config.evaluation.test_start_at == "2026-09-01T00:00:00Z"
+    assert RuleLoomConfig.from_dict(config.to_dict()) == config
+
+
 def test_schema_v2_binds_pack_version_scope_and_thresholds_to_protocol() -> None:
     baseline = default_config("ExampleProject")
     scoped = replace(

@@ -21,7 +21,7 @@ specific repository.
 The exact RuleLoom integration therefore remains a new product hypothesis even
 when each component has supporting evidence.
 
-The term ILP is deliberately scoped: RuleLoom 0.8.0 propositionalizes each change
+The term ILP is deliberately scoped: RuleLoom 0.9.0 propositionalizes each change
 into Boolean unary predicates over one variable and learns bounded Horn
 conjunctions. It is not a full relational ILP implementation with multiple
 entities, joins, recursion, predicate invention, or arbitrary logic programs.
@@ -30,10 +30,10 @@ The implementation now separates that ILP and the entire policy lifecycle from
 language-specific extraction. One versioned evidence pack maps normalized Git
 evidence to facts for an experiment; learning, evaluation, promotion, reporting,
 and agent synchronization consume the persisted Boolean vocabulary without
-language branches. New schema-v2 initializations default to
-`generic_changes@1`; schema-v3 `configured_paths@1` adds a canonical
+language branches. New schema-v4 initializations default to
+`generic_changes@2`; schema-v3/v4 `configured_paths@1` adds a canonical
 repository-defined path vocabulary. The built-in registry contains only three
-pack families: `generic_changes@1`, `configured_paths@1`, frozen compatibility
+pack families: `generic_changes@1/@2`, `configured_paths@1`, frozen compatibility
 pack `flutter_testing@1`, and current `flutter_testing@2`. External pack plugins
 and multi-pack experiments are not supported. This is an implemented
 architectural boundary, not research evidence that predicates or learned rules
@@ -58,6 +58,14 @@ positive and negative archive units, limiting generalization. The complete
 protocol and null result are in
 [`case-studies/apache-airflow`](../case-studies/apache-airflow/README.md).
 
+The subsequent bounded
+[v0.9 portability smoke run](../case-studies/portability-v09/RESULTS.md) executed
+`generic_changes@2` on Flask, ripgrep, and Express. Historical feature
+prevalences differed across the repositories, while every signal probe
+abstained because Git-only history supplied no mature classes. This supports
+implementation portability and the cold-start safety boundary; it is not new
+evidence that RuleLoom predicts any engineering outcome.
+
 ## Evidence-to-design matrix
 
 | Source | Status | Reported evidence | RuleLoom implication | Important limit |
@@ -67,12 +75,18 @@ protocol and null result are in
 | Cropper & Morel, *Learning Programs by Learning from Failures* | Peer-reviewed, Machine Learning, 2021 | Popper's generate-test-constrain loop prunes failed hypothesis regions and learns textually minimal logic programs in its evaluated domains. | Offer Popper as an optional serious ILP engine; bound and record its hypothesis bias. | The original clean-example objective is not a license to treat repository labels as noise-free. |
 | Cropper & Cerna, *Efficient Rule Induction by Ignoring Pointless Rules* (REDUCER) | Peer-reviewed, AAAI 2026 | REDUCER identifies reducible rules containing redundant literals and indiscriminate rules that cannot distinguish negative training examples, then soundly prunes their specializations under its formal assumptions. Across the evaluated visual-reasoning, game-playing, and other domains, the authors report learning-time reductions up to 99% while maintaining predictive accuracy. | Flag observed equivalence and implication as candidates for redundancy review, exclude constant facts from the bounded search, and assess outcome discrimination only on training data. | RuleLoom's finite-sample co-occurrence relations are empirical diagnostics, not REDUCER's semantic entailments or sound pruning constraints. REDUCER's indiscrimination test reads negative training examples; it cannot justify outcome-blind deletion or automatic activation. |
 | Hocquette et al., *Learning MDL Logic Programs from Noisy Data* | Peer-reviewed, AAAI 2024 | MAXSYNTH trades program size against fit and outperformed compared approaches in several domains under moderate label noise. | Prefer an MDL/noisy mode when labels are imperfect; record engine revision and cost assumptions. | The evaluated domains were not coding-agent policy learning. Current Popper behavior must be tested against a pinned revision rather than inferred from the paper artifact. |
-| Law et al., *FastLAS* | Peer-reviewed, AAAI 2020 | FastLAS supports user-defined hypothesis scoring; the evaluated access-control tasks showed that scoring can target domain-specific objectives and that the system was faster and more scalable than compared ILP systems. | A future engine could encode asymmetric interruption and missed-risk costs explicitly. | RuleLoom 0.8.0 does not implement FastLAS, and access-control results do not establish coding-agent value. |
+| Law et al., *FastLAS* | Peer-reviewed, AAAI 2020 | FastLAS supports user-defined hypothesis scoring; the evaluated access-control tasks showed that scoring can target domain-specific objectives and that the system was faster and more scalable than compared ILP systems. | A future engine could encode asymmetric interruption and missed-risk costs explicitly. | RuleLoom 0.9.0 does not implement FastLAS, and access-control results do not establish coding-agent value. |
 | Law, *Conflict-driven ILP* | Peer-reviewed, TPLP 2023 | Formalizes conflict-driven ILP and reports ILASP3/4 scalability gains over earlier ILASP systems, particularly with noise. | Constraint learning from failed hypotheses is a credible route beyond exhaustive rule enumeration. | It learns answer-set programs, not RuleLoom's current bounded Horn model. |
 | Ma et al., *AutoSpec* | arXiv preprint v3, 7 July 2026 | ILP-guided CEGIS evolves expert LLM-agent safety rules from safe/unsafe trace annotations. Across 291 code-execution and embodied-agent traces, the authors report F1 0.98 and 0.933, up to 94% false-positive reduction, and convergence in 4–5 iterations. | This is the closest direct evidence that ILP can turn agent feedback into readable, auditable rule revisions. Counterexamples, review, and selective rule lifecycle are well-motivated. | It covers two safety domains, assumes fixed domain predicate libraries and usually an expert seed rule, and relies on human labels. Its RQ3 generalization analysis uses a random 70/30 split, not temporal validation. Its 10-practitioner study evaluates four supplied scenarios rather than field maintenance. Candidate evaluation against labeled traces is not formal verification. Web/database agents and native temporal operators remain untested; it is a preprint and does not test coding-quality guidance. |
-| Yu et al., *ADVENT: LLM-Driven Automatic Predicate Invention for ILP* | arXiv preprint v1, 2 July 2026 | ADVENT couples LLM predicate proposals with Prolog execution and refinement. On nine transformed poker-hand concepts across seven LLMs, the authors report 58% success without verification, 80% with formal deductive feedback, and cross-task gains up to 31 percentage points for some compositional concepts. | LLM-assisted predicate invention is a credible future research direction only when proposals are deterministically executable, reviewed, versioned, and evaluated as a new experiment. An LLM should be a proposer, never an activator. | The study is a preprint on one transformed poker domain. Its verifier exposes labeled positive/negative examples, its unfiltered knowledge pool hurt a simpler task, and neither its relational predicates nor results validate repository-path concepts, temporal evaluation, or autonomous policy publication. RuleLoom v0.8.0 does not implement ADVENT or predicate invention. |
+| Yu et al., *ADVENT: LLM-Driven Automatic Predicate Invention for ILP* | arXiv preprint v1, 2 July 2026 | ADVENT couples LLM predicate proposals with Prolog execution and refinement. On nine transformed poker-hand concepts across seven LLMs, the authors report 58% success without verification, 80% with formal deductive feedback, and cross-task gains up to 31 percentage points for some compositional concepts. | LLM-assisted predicate invention is a credible future research direction only when proposals are deterministically executable, reviewed, versioned, and evaluated as a new experiment. An LLM should be a proposer, never an activator. | The study is a preprint on one transformed poker domain. Its verifier exposes labeled positive/negative examples, its unfiltered knowledge pool hurt a simpler task, and neither its relational predicates nor results validate repository-path concepts, temporal evaluation, or autonomous policy publication. RuleLoom v0.9.0 does not implement ADVENT or predicate invention. |
 | Mehta et al., *Rex* | Peer-reviewed, NSDI 2020 | Rex learns correlated file-change rules using machine learning and program analysis. In a 14-month deployment over 360 Microsoft repositories, the authors counted 4,926 suggestions as true positives when engineers added the suggested related change. | Repository-specific change suggestions can be learned and surfaced at change time. | Suggestion acceptance is a dependent operational outcome, not independent ground truth that a bug was prevented. The proprietary, non-randomized deployment is not outcome-labeled ILP or a causal estimate. |
 | Kamei et al., *A Large-Scale Empirical Study of Just-in-Time Quality Assurance* | Peer-reviewed, IEEE TSE 2013 | Establishes change-level, effort-aware defect prediction as a practical quality-assurance setting across a large empirical study. | The observation unit and decision point should be a change, and evaluation should reflect review effort rather than accuracy alone. | Defect-inducing labels and conventional change metrics are not RuleLoom's `needs_extra_validation` target or an agent intervention. |
+| Zimmermann et al., *Mining Version Histories to Guide Software Changes* | Peer-reviewed, ICSE 2004 | Mining prior change transactions recovered evolutionary coupling and produced useful suggestions for additional locations to change in the evaluated systems. | Compute strictly prior co-change support and expose a missing usual partner as a bounded unary predicate the current Horn learner can consume. | Co-change is an empirical association, not a declared dependency or proof that omitting the partner causes a defect. |
+| Bird et al., *Don't Touch My Code! Examining the Effects of Ownership on Software Quality* | Peer-reviewed, ESEC/FSE 2011 | Contribution-based ownership measures were associated with faults/failures in the studied Windows systems and supported ownership-aware review recommendations. | Test whether a change crosses multiple ownership areas using the prior repository snapshot, while suppressing owner identities from persisted evidence. | `CODEOWNERS` assignment is not the same construct as contribution ownership, and the paper does not validate RuleLoom's predicate or threshold. |
+| Brown, Cai & DasGupta, *Interval Estimation for a Binomial Proportion* | Peer-reviewed, Statistical Science 2001 | Demonstrates erratic coverage of the Wald interval and recommends Wilson or Jeffreys alternatives for binomial proportions. | Use Wilson endpoints for sparse alert precision and prevalence diagnostics instead of Wald intervals. | Dividing two Wilson endpoints is a conservative descriptive diagnostic, not a formal post-selection confidence interval for lift. |
+| El-Yaniv & Wiener, *On the Foundations of Noise-free Selective Classification* | Peer-reviewed, JMLR 2010 | Formalizes classification with a reject option and the risk-coverage trade-off. | Treat abstention and alert coverage as first-class outcomes; report selective risk rather than optimizing accuracy alone. | The theory's noise-free settings do not validate RuleLoom's noisy delayed outcomes or its selected thresholds. |
+| Liu, Zhang & Wong, *Controlling False Positives in Association Rule Mining* | Peer-reviewed, PVLDB 2011 | Shows that searching many candidate associations inflates false discoveries and evaluates direct, permutation, and holdout controls. | Mark top rejected clauses as train-only exploratory, report hypotheses examined, and reserve an untouched holdout for confirmation. | RuleLoom does not yet implement formal family-wise or false-discovery-rate correction over Horn clauses. |
+| Tantithamthavorn et al., *An Empirical Comparison of Model Validation Techniques for Defect Prediction Models* | Peer-reviewed, IEEE TSE 2017 | Across public defect datasets and systems, validation choices produced materially different bias/variance; single holdout was unstable in the studied component-prediction setting. | Use repeated rolling-origin train-only folds for the signal diagnostic and keep the deployment holdout separate. | Their best-performing out-of-sample bootstrap result is not directly transferable to non-stationary, delayed-label change streams. |
 | Falessi et al., *On the Need of Preserving Order of Data* | Peer-reviewed, Empirical Software Engineering 2020 | Across nine classifiers and 15 projects, walk-forward statistically outperformed 10-fold cross-validation and bootstrap in the reported classifier-selection AUC, bias, and absolute-bias metrics. | Preserve chronological order; a random split can answer the wrong deployment question. | Component-defect classification is not RuleLoom, and temporal splitting alone does not remove label leakage or drift. |
 | Zeng et al., *Deep Just-in-Time Defect Prediction: How Far Are We?* | Peer-reviewed, ISSTA 2021 | On 310,370 changes, the study found deep JIT approaches did not consistently outperform traditional models; a simple added-lines logistic baseline outperformed DeepJIT and CC2Vec in the reported comparison and was far faster. | Always compare learned clauses with trivial and single-feature baselines before crediting ILP complexity. | The size baseline predicts defect-inducing changes, not missing validation or agent benefit. |
 | Herbold et al., *Problems with SZZ and Features* | Peer-reviewed, Empirical Software Engineering 2022 | Manual/heuristic analysis of 398 releases from 38 Apache projects found severe SZZ label problems; only about half of commits labeled bug-fixing were actually bug-fixing, with substantial false and missed defect labels. | Outcome provenance, availability time, `unknown`, and manual audit—especially of evaluation labels—are central validity controls. | The findings concern SZZ-derived defect data; they do not quantify noise in a target repository's review labels. |
@@ -88,6 +102,8 @@ protocol and null result are in
 | Shen et al., *Structurally Aligned Subtask-Level Memory* | arXiv preprint, 2026 | Subtask-aligned memory improved mean SWE-bench Verified Pass@1 by 4.7 percentage points over vanilla agents in the reported experiments. | Match rule granularity to a concrete decision such as extra validation, rather than maintaining a monolithic “repository memory.” | Recent preprint; no evidence yet for any RuleLoom evidence pack or ILP. |
 | Xu et al., *STAIR* | arXiv preprint, 2026 | Hierarchical trajectory abstraction transferred better than raw trajectories and improved reported Pass@1 across agent integrations. | Render compact abstractions, not raw traces; keep the canonical policy independent of the agent adapter. | Repair-plan retrieval is not the same intervention as Horn-rule guidance. |
 | Song, Minku & Yao, *Validity of Retrospective Predictive Performance Evaluation in JIT-SDP* | Peer-reviewed, Empirical Software Engineering, 2023 | Across 13 projects, varying evaluation waiting time among 15/30/60/90 days had no significant effect in the reported model (`p=.564`), while longer training waiting time had a significant positive effect (`p=.028`, standardized coefficient `.22`). | Register training-label availability and evaluation maturation separately; test both locally rather than treating “waiting time” as one universal bias. | Defect-inducing changes are only one possible RuleLoom target; its waiting periods and label delays need not transfer to review or incident outcomes. |
+| Cabral et al., *An Investigation of Online and Offline Learning Models for Online JIT Software Defect Prediction* | Peer-reviewed, Empirical Software Engineering 2023 | Models were evaluated under realistic sequential availability, verification latency, and retraining periods; stale offline models can lag concept drift. | Enforce label availability at every rolling-origin fold and monitor/retrain prospectively rather than assuming one historical fit remains valid. | It studies conventional JIT classifiers, not logic-rule stability or coding-agent interventions. |
+| Tabassum et al., *Cross-Project Online Just-In-Time Software Defect Prediction* | Peer-reviewed, IEEE TSE 2023 | Combining incoming cross-project and within-project examples improved early and some later G-mean periods in the evaluated online projects. | Cross-project evidence is a credible future cold-start experiment with explicit source provenance and target-repository confirmation. | Distribution shift and false-alert costs remain; RuleLoom 0.9.0 intentionally does not pool repositories automatically. |
 
 ## What the literature supports
 
@@ -150,15 +166,20 @@ in a finite repository sample. Those relations can prompt review, but they are
 not logical entailments and do not reproduce REDUCER's pruning theorem.
 RuleLoom is a portable baseline, not a reimplementation of REDUCER, Popper,
 FastLAS, ILASP, or AutoSpec's CEGIS loop. Although the Prolog rendering uses a
-variable, every literal refers to the same change observation; the v0.8.0
+variable, every literal refers to the same change observation; the v0.9.0
 learner does not discover relations among entities.
 
 The evidence-pack boundary preserves that same core across languages. The
-`generic_changes@1` pack uses portable Git path and change-shape signals such as
+`generic_changes@1` compatibility pack uses portable Git path and change-shape signals such as
 tests, documentation, CI, dependency manifests, churn, and file count without
 parsing source syntax. That mechanism is language-neutral, but its filename
 conventions are heuristics, not a claim of equal semantic coverage in every
-ecosystem. Schema-v3 `configured_paths@1` adds repository-defined `touches_*`
+ecosystem. Schema-v4 `generic_changes@2` adds ordinal churn/file-count bands,
+change diffusion, strictly prior hotspots and dormancy, bounded co-change
+omissions, and prior-snapshot `CODEOWNERS` boundary facts. Time-based features
+abstain after non-monotonic timestamps; exact-path features abstain when path
+metadata is truncated. Co-change is not called a dependency, and owner
+identities are not persisted. Schema-v3/v4 `configured_paths@1` adds repository-defined `touches_*`
 facts over normalized paths plus the shared generic facts; the protocol requires
 their design to be outcome-blind. It does not read content. `flutter_testing@2` layers Dart/Flutter predicates on the shared
 evidence contract and, unlike frozen `flutter_testing@1`, recognizes both
@@ -172,6 +193,7 @@ Pack-neutral `EvidenceConfig` supplies repository-relative outcome-eligibility
 scopes and configurable churn/file-count thresholds. Schema v2 binds those
 settings, the pack version, and extractor identity into
 `evidence_protocol_hash`; schema v3 additionally binds canonical `pack_config`.
+Schema v4 additionally freezes the signal-probe and relative learner gates.
 Configured predicate globs create features only over already scoped files and
 never widen the outcome cohort. The collector also bounds sampled file-path
 metadata for large changes while retaining aggregate counts, explicit truncation counts,
@@ -179,7 +201,7 @@ and a full change-manifest hash. These are reproducibility and integrity
 controls; they do not establish that the extracted facts are useful predictors.
 
 The optional Popper adapter should not be confused with a reproduced paper
-artifact. Version 0.8.0 accepts only one non-recursive learned rule, disables
+artifact. Version 0.9.0 accepts only one non-recursive learned rule, disables
 RuleLoom bootstrap reruns, fingerprints an explicitly configured checkout, and
 requires an already provisioned compatible Python environment, SWI-Prolog, and
 GNU `timeout`. The adapter boundary is tested with controlled process output,
@@ -288,6 +310,26 @@ Repository outcomes are still delayed: calling an uneventful new change `negativ
 false certainty, while random splitting can train on the future and test on the
 past.
 
+Schema v4 protects the frozen deployment holdout with a prior signal-availability
+probe. Two predeclared model families—class-balanced Boolean logistic regression
+and a shallow Boolean tree—run in expanding-window folds over pre-holdout
+observations only. Every fold applies its own label-availability cutoff. This is
+not a theoretical “signal ceiling”: either model can miss a learnable concept,
+and passing does not imply that Horn will find or confirm a rule. The probe asks
+the narrower engineering question of whether this vocabulary clears a
+preregistered MCC or selective-lift threshold before spending the holdout.
+Average precision, alert rate, and selective risk remain visible because sparse
+guardrails operate under imbalance and abstention.
+
+Brown, Cai, and DasGupta support Wilson intervals for binomial proportions, not
+RuleLoom's ratio of endpoints. RuleLoom therefore labels
+`precision_wilson_lower / prevalence_wilson_upper` as a conservative descriptive
+lift diagnostic rather than a formal confidence interval. El-Yaniv and Wiener's
+risk/coverage framework motivates reporting abstention explicitly. Liu, Zhang,
+and Wong motivate the multiple-testing warning on train-selected near-misses:
+the top rejected clauses and their support help diagnose a null result, but are
+not post-selection evidence and never relax a gate automatically.
+
 RuleLoom orders mature labels by `observed_at`, trains on the older partition,
 and tests on the newer partition. Before learning, it removes a nominal training
 label if its `available_at` falls after the holdout starts. It persists the exact
@@ -298,7 +340,7 @@ across observations with the same `source.change_id`, and elapsed shadow time is
 computed from the earliest retained unit predictions.
 `Observation.protocol_hash` and
 `Prediction.protocol.evidence_protocol_hash` are the same digest binding
-the evidence protocol. For schema v2/v3 that identity includes experiment,
+the evidence protocol. For schema v2/v3/v4 that identity includes experiment,
 repository, observation unit, outcome definition, target, pack name/version,
 extractor identity, and exact `EvidenceConfig` scopes and thresholds; schema v3
 also includes canonical `pack_config`. The compact Prediction protocol binds the
@@ -307,7 +349,7 @@ settings, so independent reports must preserve the canonical config.
 
 A chronological split cannot repair outcome-caused features. For a review-time
 target, the final merge/squash diff may already contain validation added in
-response to review. Version 0.8.0 represents one logical `ChangeUnit` with an
+response to review. Version 0.9.0 represents one logical `ChangeUnit` with an
 exact point-in-time base/prediction SHA and groups it by stable `change_id`.
 Materialization emits one observation per unit and rejects duplicate mature
 change IDs, preventing related snapshots from crossing train and test. A
@@ -336,7 +378,7 @@ initial review patch must be separated from later revisions and why a later test
 change without an explicit trigger is ambiguous. Gallaba et al. and Huang et al.
 show why CI status alone is noisy and why attribution to the current patch is a
 separate question. Herbold et al. show why SZZ-derived links are not ground
-truth. RuleLoom v0.8.0 therefore implements three evidence grades:
+truth. RuleLoom v0.9.0 therefore implements three evidence grades:
 
 - `rich`: a point-in-time logical change plus ordered independent events;
 - `git_only`: topology/metadata without a provider decision point; and
@@ -363,7 +405,7 @@ from the provider contract: GitHub's GraphQL reference exposes
 [`LabeledEvent.label` as a `Label` object](https://docs.github.com/en/graphql/reference/issues#labeledevent),
 that object has mutable `updatedAt`, and the REST API explicitly permits
 [renaming a label](https://docs.github.com/en/rest/issues/labels#update-a-label).
-It is not a claim established by the cited research literature. RuleLoom v0.8.0
+It is not a claim established by the cited research literature. RuleLoom v0.9.0
 ships a local Action/webhook capture substrate for future events, but the archive
 adapter still cannot reconstruct this state retrospectively and automatic label
 supply remains an operational claim that must be measured.
@@ -413,6 +455,10 @@ and deprecation.
 | Evidence risk | Required mechanism |
 |---|---|
 | History is sparse or irrelevant | Data-readiness warnings and abstention |
+| A frozen vocabulary has no usable pre-holdout signal | Expanding-window logistic/tree signal probe over pre-holdout labels only; block holdout access on fail or inconclusive |
+| A low-prevalence guardrail is judged by an arbitrary absolute precision floor | Preregistered alert-rate plus conservative descriptive lift gates; retain MCC, average precision, and risk/coverage reporting |
+| No Horn clause passes and the null is opaque | Top rejected train-only clauses with support, confusion counts, rejection reasons, and explicit multiple-testing warning |
+| Path names alone omit temporal structure | Point-in-time hotspot, dormancy, co-change-omission, change-diffusion, ordinal size, and prior-snapshot ownership-boundary facts with bounded work and explicit abstention |
 | Different components contaminate one observation | Repository-relative include/exclude scopes fixed before collection |
 | Extractor semantics drift or vocabularies are mixed | One versioned pack/configuration per experiment; pack, extractor, canonical `pack_config`, scopes, and thresholds bound into `evidence_protocol_hash` |
 | Configured vocabulary is chosen using outcomes or holdout errors | Outcome-blind feature-design roles, pre-registered config hash and attempt log, plus an untouched future confirmation window after any informed revision |
@@ -424,6 +470,7 @@ and deprecation.
 | Weak archive heuristic is mistaken for ground truth | Strong-only labels by default; weak votes require opt-in, retain provenance, and make the dependent case non-confirmatory |
 | A mutable archive label name is mistaken for point-in-time adjudication | Ignore GitHub archive timeline label names; require a separately captured immutable webhook/export/ledger event for any strong label-backed outcome |
 | Very large changes exceed practical artifact limits | Bounded path/per-file metadata, explicit truncation counts, aggregate totals, and a full manifest hash |
+| Missing Git objects preferentially remove one outcome class | Retention counts/rates by pre-materialization outcome plus prospective snapshot capture; no silent approximate negative or confirmatory reconstruction |
 | Raw memory distracts agents | Compact matching rules only |
 | Labels contain noise | Required `label_evidence`, `unknown` state, maturation policy, optional MDL engine |
 | Future leakage inflates results | Chronological holdout, label-availability filtering, and persisted split IDs |
@@ -466,12 +513,18 @@ Every RuleLoom evaluation should report:
   repository/change binding, actor authorization/independence, target/value,
   maturity/completeness, conflicts, and corrections;
 - class prevalence and missing/extraction errors;
+- materialization retention by positive, negative, and unknown outcome before
+  Git-object filtering, with any differential-retention warning;
 - the pre-outcome predicate-audit artifact, its ordering/window sizes and
   thresholds, repository/experiment/target/config/protocol identity,
   outcome-blind observation and complete-audit manifest hashes, configured
   coverage, predicate prevalence/flags, observed relations, bounded path
   examples, warnings, and any resulting new experiment;
 - chronological train/test boundary and exact IDs;
+- signal-probe ID, frozen thresholds, completed rolling-origin folds, skipped
+  folds, pre-holdout manifest, per-family MCC/AP/alert rate/selective risk,
+  descriptive lift diagnostic, and confirmation that the deployment holdout was
+  not consulted;
 - predictor base/SHA/time, stable logical change ID, external independence audit,
   and count excluded because no pre-outcome rich snapshot was available;
 - learner name, revision/version, bias, limits, seed, and timeout;
@@ -481,6 +534,8 @@ Every RuleLoom evaluation should report:
 - confusion counts, precision, recall, F1, accuracy, balanced accuracy, MCC,
   prevalence, and predicted-positive rate;
 - rule count, literals per clause, support, and bootstrap stability;
+- hypotheses examined and any top train-only near-misses, labeled explicitly as
+  exploratory post-selection diagnostics;
 - for a manual rule: exact declaration/source hashes and statuses, historical
   coverage, censored/unknown count, post-hoc metrics/baselines, and an explicit
   statement that the audit was non-confirmatory and approval evidence is
@@ -574,6 +629,29 @@ target or maturity window after inspecting which one makes the rules look best.
 - Yasutaka Kamei et al. [A Large-Scale Empirical Study of Just-in-Time Quality
   Assurance](https://doi.org/10.1109/TSE.2012.70). *IEEE Transactions on
   Software Engineering*, 2013.
+- Thomas Zimmermann, Peter Weißgerber, Stephan Diehl, and Andreas Zeller.
+  [Mining Version Histories to Guide Software
+  Changes](https://www.cs.kent.edu/~jmaletic/cs63902/Papers/Zimmermann04.pdf).
+  *ICSE*, 2004.
+- Christian Bird, Nachiappan Nagappan, Brendan Murphy, Harald Gall, and Premkumar
+  Devanbu. [Don't Touch My Code! Examining the Effects of Ownership on Software
+  Quality](https://www.microsoft.com/en-us/research/uploads/prod/2016/02/bird2011dtm.pdf).
+  *ESEC/FSE*, 2011.
+- Lawrence D. Brown, T. Tony Cai, and Anirban DasGupta. [Interval Estimation for
+  a Binomial
+  Proportion](https://projecteuclid.org/journals/statistical-science/volume-16/issue-2/Interval-Estimation-for-a-Binomial-Proportion/10.1214/ss/1009213286.pdf).
+  *Statistical Science*, 2001.
+- Ran El-Yaniv and Yair Wiener. [On the Foundations of Noise-free Selective
+  Classification](https://jmlr.org/papers/v11/el-yaniv10a.html). *Journal of
+  Machine Learning Research*, 2010.
+- Guimei Liu, Hao Zhang, and Limsoon Wong. [Controlling False Positives in
+  Association Rule Mining](https://www.vldb.org/pvldb/vol5/p145_guimeiliu_vldb2012.pdf).
+  *PVLDB*, 2011.
+- Chakkrit Tantithamthavorn, Shane McIntosh, Ahmed E. Hassan, and Kenichi
+  Matsumoto. [An Empirical Comparison of Model Validation Techniques for Defect
+  Prediction
+  Models](https://sail.cs.queensu.ca/data/pdfs/TSE2016_AnEmpiricalComparisonofModelValidationTechniquesforDefectPredictionModels.pdf).
+  *IEEE Transactions on Software Engineering*, 2017.
 - Davide Falessi, Jacky Huang, Likhita Narayana, Jennifer Fong Thai, and Burak
   Turhan. [On the Need of Preserving Order of Data When Validating
   Within-Project Defect
@@ -610,6 +688,14 @@ target or maturity window after inspecting which one makes the rules look best.
   Predictive Performance Evaluation Procedures in Just-in-Time Software Defect
   Prediction](https://doi.org/10.1007/s10664-023-10341-8). *Empirical Software
   Engineering*, 2023.
+- Glauco Gonçalves Cabral, Leandro L. Minku, Emad Shihab, and Suhaib Mujahid.
+  [An Investigation of Online and Offline Learning Models for Online
+  Just-in-Time Software Defect
+  Prediction](https://link.springer.com/article/10.1007/s10664-023-10335-6).
+  *Empirical Software Engineering*, 2023.
+- Sheikha Tabassum et al. [Cross-Project Online Just-In-Time Software Defect
+  Prediction](https://minkull.github.io/publications/TabassumTSE2022.pdf).
+  *IEEE Transactions on Software Engineering*, 2023.
 
 ## Maintenance of this review
 

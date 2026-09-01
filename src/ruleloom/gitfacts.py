@@ -61,6 +61,10 @@ class GitFactsError(RuntimeError):
     """Raised when Git evidence cannot be collected safely."""
 
 
+class MissingPromisorObjectsError(GitFactsError):
+    """Raised when exact evidence would trigger hidden partial-clone fetching."""
+
+
 class _ScopeIneligibleError(GitFactsError):
     """Raised when a change cannot receive an outcome for the configured scope."""
 
@@ -249,6 +253,12 @@ def _git(
             or stdout.decode("utf-8", errors="replace").strip()
             or "unknown Git error"
         )
+        if not allow_lazy_fetch and "promisor remote" in detail.lower():
+            raise MissingPromisorObjectsError(
+                "required Git blobs are absent from this partial clone and lazy fetching "
+                "is disabled; hydrate the selected history in a trusted observer clone "
+                "(for example with `git backfill` when supported) or use a full clone"
+            )
         raise GitFactsError(f"git {' '.join(arguments)} failed: {detail}")
     try:
         return stdout.decode("utf-8")
@@ -471,14 +481,32 @@ def _scoped_tracked_changes(
     """Return scoped changes and exact eligibility counts using Git pathspecs only."""
 
     scoped = _parse_numstat(
-        _git(repo, "diff", "--numstat", "-z", *common, "--", *_scope_pathspecs(config))
+        _git(
+            repo,
+            "diff",
+            "--numstat",
+            "-z",
+            *common,
+            "--",
+            *_scope_pathspecs(config),
+            allow_lazy_fetch=False,
+        )
     )
     if config.include_paths == ("**",) and not config.exclude_paths:
         if len(scoped) > _MAX_CHANGED_FILES:
             raise GitFactsError(f"Git diff exceeds {_MAX_CHANGED_FILES} changed files")
         return scoped, len(scoped), 0, 0
     all_changes = _parse_numstat(
-        _git(repo, "diff", "--numstat", "-z", *common, "--", *_universe_pathspecs())
+        _git(
+            repo,
+            "diff",
+            "--numstat",
+            "-z",
+            *common,
+            "--",
+            *_universe_pathspecs(),
+            allow_lazy_fetch=False,
+        )
     )
     included = (
         all_changes
@@ -492,6 +520,7 @@ def _scoped_tracked_changes(
                 *common,
                 "--",
                 *_scope_pathspecs(config, apply_exclusions=False),
+                allow_lazy_fetch=False,
             )
         )
     )
@@ -612,6 +641,7 @@ def _content_patch(
             "--",
             *(f":(literal){path}" for path in batch),
             timeout_seconds=min(_GIT_TIMEOUT_SECONDS, remaining),
+            allow_lazy_fetch=False,
         )
         total += len(patch.encode("utf-8"))
         if total > _MAX_CONTENT_PATCH_BYTES:
@@ -714,6 +744,7 @@ def _read_diff(
         *common,
         "--",
         *INTERNAL_PREFIXES,
+        allow_lazy_fetch=False,
     )
     return DiffEvidence(
         changes=changes,

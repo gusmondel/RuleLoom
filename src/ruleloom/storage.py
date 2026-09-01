@@ -30,6 +30,7 @@ from ruleloom.models import (
     validate_subject,
 )
 from ruleloom.packs import validate_policy_pack_contract
+from ruleloom.signal_probe import SignalProbeReport
 
 _MAX_JSON_BYTES = 8 * 1024 * 1024
 _MAX_JSONL_BYTES = 64 * 1024 * 1024
@@ -266,6 +267,22 @@ def dataset_path(root: Path, config: RuleLoomConfig) -> Path:
 
 def predictions_path(root: Path, config: RuleLoomConfig) -> Path:
     return project_path(root, config.predictions)
+
+
+def signal_probe_path(root: Path, report_id: str) -> Path:
+    validate_subject(report_id)
+    return project_path(root, Path(".ruleloom/signal-probes") / f"{report_id}.json")
+
+
+def save_signal_probe(path: Path, report: SignalProbeReport) -> None:
+    if report.id != report.expected_id:
+        raise ModelError("signal probe id does not match its content identity")
+    with _file_lock(path):
+        if path.exists():
+            if read_json(path) != report.to_dict():
+                raise ModelError(f"refusing to overwrite immutable signal probe: {path}")
+            return
+        write_json(path, report.to_dict())
 
 
 def candidate_path(root: Path, config: RuleLoomConfig, candidate_id: str) -> Path:

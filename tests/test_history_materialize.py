@@ -8,8 +8,9 @@ from pathlib import Path
 import pytest
 
 import ruleloom.gitfacts as gitfacts_module
+import ruleloom.history.materialize as materialize_module
 from ruleloom.config import RuleLoomConfig
-from ruleloom.gitfacts import collect_snapshot
+from ruleloom.gitfacts import MissingPromisorObjectsError, collect_snapshot
 from ruleloom.history.git import collect_git_history
 from ruleloom.history.materialize import (
     materialize_history,
@@ -387,6 +388,35 @@ def test_materialization_manifest_is_independent_of_input_unit_order(
     assert forward.observations == reverse.observations
 
 
+def test_materialization_aborts_transaction_on_missing_partial_clone_blobs(
+    materialization_repo: tuple[Path, RuleLoomConfig, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, config, base, head = materialization_repo
+    unit = ChangeUnit(
+        id="change-partial",
+        repository_id=config.protocol.repository_id,
+        kind="git_only",
+        base_sha=base,
+        prediction_sha=head,
+        prediction_at="2025-01-02T00:00:00Z",
+        commits=(head,),
+        event_ids=(),
+        provider="git",
+        source_ref=head,
+        evidence_quality="git_only",
+        confirmatory=False,
+    )
+
+    def missing(*_args: object, **_kwargs: object) -> None:
+        raise MissingPromisorObjectsError("required blobs are absent from partial clone")
+
+    monkeypatch.setattr(materialize_module, "collect_snapshot", missing)
+
+    with pytest.raises(MissingPromisorObjectsError, match="partial clone"):
+        materialize_history(repo, config, [unit], [])
+
+
 def test_materialization_skips_discarded_first_parent_traversal(
     materialization_repo: tuple[Path, RuleLoomConfig, str, str],
     monkeypatch: pytest.MonkeyPatch,
@@ -482,3 +512,9 @@ def test_materialization_reports_missing_object_skip_category(
     assert report.skipped == 1
     assert report.skipped_by_reason == (("missing_commit_objects", 1),)
     assert report.to_dict()["skipped_by_reason"] == {"missing_commit_objects": 1}
+    assert report.to_dict()["retention_by_outcome"]["unknown"] == {
+        "eligible": 1,
+        "retained": 0,
+        "skipped": 1,
+        "rate": 0.0,
+    }

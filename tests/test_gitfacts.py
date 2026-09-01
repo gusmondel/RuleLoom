@@ -15,6 +15,7 @@ from ruleloom.gitfacts import (
     DiffEvidence,
     FileChange,
     GitFactsError,
+    MissingPromisorObjectsError,
     backfill_commits,
     backfill_commits_detailed,
     collect_snapshot,
@@ -521,6 +522,25 @@ def test_commit_object_preflight_disables_promisor_lazy_fetch(
     assert missing_commit_objects(repo, [head]) == ()
     assert environments[-1] is not None
     assert environments[-1]["GIT_NO_LAZY_FETCH"] == "1"
+
+
+def test_no_lazy_git_read_reports_missing_promisor_objects(
+    flutter_repo: tuple[Path, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, _base, _head = flutter_repo
+    monkeypatch.setattr(
+        gitfacts_module,
+        "_run_git_capped",
+        lambda *_args, **_kwargs: (
+            b"",
+            b"fatal: could not fetch deadbeef from promisor remote\n",
+            128,
+        ),
+    )
+
+    with pytest.raises(MissingPromisorObjectsError, match="partial clone"):
+        gitfacts_module._git(repo, "diff", allow_lazy_fetch=False)
 
 
 def test_collect_worktree_includes_tracked_and_untracked_flutter_changes(
