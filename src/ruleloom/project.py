@@ -11,7 +11,7 @@ from pathlib import Path
 from ruleloom.agents import SyncResult, sync_agents
 from ruleloom.config import CONFIG_PATH, RuleLoomConfig, default_config
 from ruleloom.gitfacts import GitFactsError, repository_identity
-from ruleloom.history.materialize import validate_materialized_outcome
+from ruleloom.history.materialize import resolve_git_window, validate_materialized_outcome
 from ruleloom.history.models import HistoricalEvent, validate_git_sha
 from ruleloom.history.storage import (
     change_units_path,
@@ -63,6 +63,7 @@ def initialize_project(
     pack_config: ConfiguredPathsConfig | None = None,
     schema_version: int = 5,
     agents: Sequence[str] = (),
+    git_window_days: int | None = None,
 ) -> InitResult:
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -83,6 +84,7 @@ def initialize_project(
         test_start_at=(
             datetime.now(UTC).isoformat().replace("+00:00", "Z") if schema_version >= 4 else None
         ),
+        git_window_days=git_window_days,
     )
     managed_paths = [
         config_path,
@@ -241,6 +243,7 @@ def validate_project(root: Path, config: RuleLoomConfig) -> Readiness:
         if event.change_id is not None:
             events_by_change[(event.repository_id, event.change_id)].append(event)
     units_by_id = {unit.id: unit for unit in units}
+    git_window = resolve_git_window(config, events)
     validate_unique_event_ownership(units)
     for unit in units:
         if unit.repository_id != config.protocol.repository_id:
@@ -306,7 +309,13 @@ def validate_project(root: Path, config: RuleLoomConfig) -> Readiness:
             attached_event = events_by_id[event_id]
             if attached_event.change_id is None:
                 linked[attached_event.id] = attached_event
-        validate_materialized_outcome(config, observation, unit, list(linked.values()))
+        validate_materialized_outcome(
+            config,
+            observation,
+            unit,
+            list(linked.values()),
+            git_window=git_window,
+        )
     load_candidates(root, config)
     load_shadow(root, config)
     load_approved(root, config)

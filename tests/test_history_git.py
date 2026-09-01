@@ -20,6 +20,11 @@ from ruleloom.history.storage import save_change_units, save_events
 from ruleloom.models import canonical_json
 
 REPOSITORY_ID = "repo.history-test"
+_COMMIT_EVENT_KINDS = {"git_commit", "git_merge"}
+
+
+def _commit_shas(report: history_git.GitHistoryReport) -> set[str]:
+    return {str(event.data["sha"]) for event in report.events if event.kind in _COMMIT_EVENT_KINDS}
 
 
 def _git(
@@ -101,12 +106,16 @@ def test_collects_deterministic_topological_git_metadata_only(
     second = ingest_git_history(repo, max_commits=None, repository_id=REPOSITORY_ID)
 
     assert first == second
-    assert first.examined == first.event_count == first.unit_count == 4
+    assert first.examined == first.unit_count == 4
+    # Four commit events plus the single history-horizon event; no revert trailers.
+    assert first.event_count == 5
+    assert first.revert_events == 0
+    assert first.horizon_at == "2026-01-04T10:00:00Z"
     assert not first.shallow
     assert not first.truncated
     assert first.warnings == ()
     assert len(first.manifest_hash) == 64
-    assert first.to_dict()["events"] == 4
+    assert first.to_dict()["events"] == 5
     assert first.to_dict()["units"] == 4
     assert first.storage_byte_limit == history_storage.HISTORY_JSONL_MAX_BYTES
     assert first.storage_line_byte_limit == history_storage.HISTORY_JSONL_MAX_LINE_BYTES
@@ -117,8 +126,9 @@ def test_collects_deterministic_topological_git_metadata_only(
         len((canonical_json(unit.to_dict()) + "\n").encode("utf-8")) for unit in first.units
     )
 
-    positions = {event.data["sha"]: index for index, event in enumerate(first.events)}
-    for event in first.events:
+    commit_events = [event for event in first.events if event.kind in {"git_commit", "git_merge"}]
+    positions = {event.data["sha"]: index for index, event in enumerate(commit_events)}
+    for event in commit_events:
         sha = event.data["sha"]
         assert isinstance(sha, str)
         parents = event.data["parents"]
@@ -146,7 +156,7 @@ def test_collects_deterministic_topological_git_metadata_only(
     )
     assert "private@example.test" not in serialized
     assert "History Person" not in serialized
-    assert all(len(str(event.data["author_hash"])) == 64 for event in first.events)
+    assert all(len(str(event.data["author_hash"])) == 64 for event in commit_events)
 
 
 def test_root_and_merge_units_preserve_only_defensible_git_semantics(
@@ -185,7 +195,7 @@ def test_max_commits_and_since_are_bounded_and_report_truncation(
     limited = collect_git_history(repo, max_commits=2, repository_id=REPOSITORY_ID)
     assert limited.examined == 2
     assert limited.truncated
-    assert {event.data["sha"] for event in limited.events} == {commits[2], commits[3]}
+    assert _commit_shas(limited) == {commits[2], commits[3]}
     assert any("max_commits" in warning for warning in limited.warnings)
 
     recent = collect_git_history(
@@ -195,7 +205,7 @@ def test_max_commits_and_since_are_bounded_and_report_truncation(
         repository_id=REPOSITORY_ID,
     )
     assert recent.since == "2026-01-02T12:00:00Z"
-    assert {event.data["sha"] for event in recent.events} == {commits[2], commits[3]}
+    assert _commit_shas(recent) == {commits[2], commits[3]}
     assert not recent.truncated
 
 
@@ -234,7 +244,7 @@ def test_incremental_cursor_is_exclusive_and_reproducible(
     assert first == second
     assert first.after == commits[1]
     assert first.incremental_boundary_is_ancestor is True
-    assert {event.data["sha"] for event in first.events} == {commits[2], commits[3]}
+    assert _commit_shas(first) == {commits[2], commits[3]}
     assert commits[1] not in {unit.prediction_sha for unit in first.units}
     assert first.to_dict()["incremental"] is True
 
@@ -346,7 +356,10 @@ def test_canonical_byte_budget_keeps_persistible_most_recent_prefix(
 ) -> None:
     repo, commits, _ = history_repo
     complete = collect_git_history(repo, max_commits=None, repository_id=REPOSITORY_ID)
-    newest_events = tuple(reversed(complete.events))
+    # The horizon event is appended after the commit prefix; budget the commits only.
+    newest_events = tuple(
+        reversed([event for event in complete.events if event.kind in _COMMIT_EVENT_KINDS])
+    )
     newest_units = tuple(reversed(complete.units))
 
     event_prefix_bytes = sum(
@@ -373,7 +386,7 @@ def test_canonical_byte_budget_keeps_persistible_most_recent_prefix(
     assert report.storage_truncated
     assert report.truncated
     assert report.examined == 2
-    assert {event.data["sha"] for event in report.events} == {commits[2], commits[3]}
+    assert _commit_shas(report) == {commits[2], commits[3]}
     assert report.event_log_bytes <= byte_budget
     assert report.change_unit_log_bytes <= byte_budget
     assert report.storage_byte_limit == byte_budget
@@ -541,8 +554,8 @@ def test_deduplicates_unexpected_git_records(
     monkeypatch.setattr(history_git, "_run_git_bounded", duplicate_log)
     report = collect_git_history(repo, max_commits=10, repository_id=REPOSITORY_ID)
 
-    assert report.event_count == 4
-    assert len({event.id for event in report.events}) == 4
+    assert report.event_count == 5
+    assert len({event.id for event in report.events}) == 5
     assert any("duplicate" in warning for warning in report.warnings)
 
 

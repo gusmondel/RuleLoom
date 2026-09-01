@@ -22,7 +22,17 @@ may emit the following semantic event taxonomy:
     finalization never implies a negative label.
 ``revert``
     ``linked_change_id`` and ``link_kind``.  Only ``link_kind=explicit`` is
-    strong evidence.  ``link_kind=heuristic`` is an opt-in weak vote.
+    strong evidence.  ``link_kind=heuristic`` and the Git-native
+    ``link_kind=git_trailer`` (a ``This reverts commit`` trailer found by
+    ``history bootstrap-git``) are opt-in weak votes.
+``git_history_horizon``
+    Emitted once per Git bootstrap with the newest committer timestamp of the
+    complete reachable prefix.  When an experiment registers
+    ``outcomes.git_window_days``, a Git-landed change whose window closed before
+    that horizon without any revert vote receives an opt-in *weak* negative for
+    ``post_merge_revert_or_hotfix``.  The window is registered before labels are
+    inspected, the horizon proves the window was observable, and the vote is
+    never confirmatory.
 ``incident``
     ``category`` (``hotfix`` or ``defect``), ``linked_change_id``, and
     ``link_kind``.  ``explicit`` is strong; ``fix_keyword`` and ``szz`` are weak.
@@ -36,6 +46,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Literal, cast
 
 from ruleloom.history.models import ChangeUnit, HistoricalEvent
@@ -67,10 +78,80 @@ ATOMIC_OUTCOME_TARGETS = (
 VoteValue = Literal["positive", "negative", "abstain"]
 VoteStrength = Literal["strong", "weak"]
 
+GIT_TRAILER_LINK_KIND = "git_trailer"
+GIT_HISTORY_HORIZON_EVENT_KIND = "git_history_horizon"
+MAX_GIT_WINDOW_DAYS = 3650
+
 _VOTE_VALUES = frozenset({"positive", "negative", "abstain"})
 _VOTE_STRENGTHS = frozenset({"strong", "weak"})
 _WEAK_LINK_KINDS = frozenset({"fix_keyword", "szz"})
-_WEAK_REVERT_LINK_KINDS = frozenset({"heuristic"})
+_WEAK_REVERT_LINK_KINDS = frozenset({"heuristic", GIT_TRAILER_LINK_KIND})
+_GIT_LANDED_UNIT_KINDS = frozenset({"git_commit", "git_merge"})
+
+
+@dataclass(frozen=True, slots=True)
+class GitWindow:
+    """A registered revert window plus the horizon proving it was observable."""
+
+    window_days: int
+    horizon_at: str
+    horizon_event_id: str
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.window_days, bool)
+            or not isinstance(self.window_days, int)
+            or not 1 <= self.window_days <= MAX_GIT_WINDOW_DAYS
+        ):
+            raise ModelError(f"git window_days must be between 1 and {MAX_GIT_WINDOW_DAYS}")
+        validate_timestamp(self.horizon_at)
+        validate_subject(self.horizon_event_id)
+
+    def to_dict(self) -> JsonObject:
+        return {
+            "window_days": self.window_days,
+            "horizon_at": self.horizon_at,
+            "horizon_event_id": self.horizon_event_id,
+            "semantics": "weak_negative_when_no_revert_vote_before_window_close",
+        }
+
+
+def git_window_from_events(
+    events: Iterable[HistoricalEvent],
+    *,
+    window_days: int | None,
+    repository_id: str,
+) -> GitWindow | None:
+    """Resolve the newest persisted Git history horizon for a registered window."""
+    if window_days is None:
+        return None
+    best: tuple[object, ...] | None = None
+    selected: tuple[str, str] | None = None
+    for event in events:
+        if event.kind != GIT_HISTORY_HORIZON_EVENT_KIND or event.repository_id != repository_id:
+            continue
+        raw_horizon = event.data.get("horizon_at")
+        if not isinstance(raw_horizon, str):
+            continue
+        try:
+            horizon = parse_timestamp(raw_horizon)
+        except ValueError:
+            continue
+        key = (horizon, event.id)
+        if best is None or key > best:
+            best = key
+            selected = (raw_horizon, event.id)
+    if selected is None:
+        return None
+    return GitWindow(
+        window_days=window_days,
+        horizon_at=selected[0],
+        horizon_event_id=selected[1],
+    )
+
+
+def _is_git_landed_unit(change_unit: ChangeUnit) -> bool:
+    return change_unit.provider == "git" and change_unit.kind in _GIT_LANDED_UNIT_KINDS
 
 
 @dataclass(frozen=True, slots=True)
@@ -464,12 +545,52 @@ def _post_merge_events(
     return tuple(event for event in events if parse_timestamp(event.occurred_at) > finalized_at)
 
 
+def _landed_events(
+    change_unit: ChangeUnit,
+    events: Sequence[HistoricalEvent],
+) -> tuple[HistoricalEvent, ...]:
+    """Events after the change landed: post-merge for finalized units, else Git landing."""
+    if change_unit.finalized_at is not None:
+        return _post_merge_events(change_unit, events)
+    if _is_git_landed_unit(change_unit):
+        # A Git commit lands when it is committed; scoped events already postdate it.
+        return tuple(events)
+    return ()
+
+
+def _git_window_negative_vote(
+    change_unit: ChangeUnit,
+    git_window: GitWindow,
+) -> OutcomeVote | None:
+    if not _is_git_landed_unit(change_unit):
+        return None
+    prediction_at = parse_timestamp(change_unit.prediction_at)
+    window_closes_at = prediction_at + timedelta(days=git_window.window_days)
+    if window_closes_at > parse_timestamp(git_window.horizon_at):
+        return None
+    available_at = window_closes_at.isoformat().replace("+00:00", "Z")
+    return OutcomeVote(
+        value="negative",
+        strength="weak",
+        target=POST_MERGE_REVERT_OR_HOTFIX,
+        available_at=available_at,
+        source_kind=GIT_HISTORY_HORIZON_EVENT_KIND,
+        event_ids=(git_window.horizon_event_id,),
+        independent_group=f"git_history_window.{change_unit.id}",
+        confidence=0.5,
+        reason=(
+            f"no Git revert trailer targeted the change within {git_window.window_days} days "
+            "of complete reachable history; hotfixes without a revert remain invisible"
+        ),
+    )
+
+
 def _revert_or_hotfix_votes(
     change_unit: ChangeUnit,
     events: Sequence[HistoricalEvent],
 ) -> tuple[OutcomeVote, ...]:
     votes: list[OutcomeVote] = []
-    for event in _post_merge_events(change_unit, events):
+    for event in _landed_events(change_unit, events):
         is_explicit_revert = event.kind == "revert" and _is_linked(event, change_unit, "explicit")
         raw_link_kind = event.data.get("link_kind")
         is_weak_revert = (
@@ -506,7 +627,9 @@ def _revert_or_hotfix_votes(
                 independent_group=event.independent_group,
                 confidence=confidence,
                 reason=(
-                    "post-merge revert heuristically linked to the change"
+                    "post-merge revert linked to the change by its Git revert trailer"
+                    if is_weak_revert and raw_link_kind == GIT_TRAILER_LINK_KIND
+                    else "post-merge revert heuristically linked to the change"
                     if is_weak_revert
                     else "post-merge revert or hotfix explicitly linked to the change"
                 ),
@@ -579,6 +702,7 @@ def _label_evidence_kind(votes: Sequence[OutcomeVote]) -> str:
         "incident": "incident",
         "change_snapshot": "imported",
         "change_finalized": "imported",
+        GIT_HISTORY_HORIZON_EVENT_KIND: "imported",
     }
     kinds = {mappings.get(vote.source_kind, "imported") for vote in votes}
     return kinds.pop() if len(kinds) == 1 else "imported"
@@ -663,8 +787,14 @@ def derive_outcome(
     target: str,
     *,
     include_weak: bool = False,
+    git_window: GitWindow | None = None,
 ) -> OutcomeDerivation:
-    """Derive one atomic outcome from events attached to a change unit."""
+    """Derive one atomic outcome from events attached to a change unit.
+
+    ``git_window`` adds the opt-in weak negative for Git-landed units whose
+    registered revert window closed before the persisted history horizon and
+    that attracted no revert vote of any strength.
+    """
     try:
         labeling_function = _LABELING_FUNCTIONS[target]
     except KeyError as exc:
@@ -673,6 +803,14 @@ def derive_outcome(
     votes = _explicit_outcome_votes(change_unit, target, scoped) + labeling_function(
         change_unit, scoped
     )
+    if (
+        target == POST_MERGE_REVERT_OR_HOTFIX
+        and git_window is not None
+        and not any(vote.value == "positive" for vote in votes)
+    ):
+        window_vote = _git_window_negative_vote(change_unit, git_window)
+        if window_vote is not None:
+            votes = (*votes, window_vote)
     return aggregate_votes(target, votes, include_weak=include_weak)
 
 
@@ -682,6 +820,7 @@ def derive_outcomes(
     *,
     targets: Iterable[str] = ATOMIC_OUTCOME_TARGETS,
     include_weak: bool = False,
+    git_window: GitWindow | None = None,
 ) -> dict[str, OutcomeDerivation]:
     """Derive multiple atomic targets without exhausting a one-shot event stream."""
     materialized_events = tuple(events)
@@ -694,6 +833,7 @@ def derive_outcomes(
             materialized_events,
             target,
             include_weak=include_weak,
+            git_window=git_window,
         )
         for target in requested_targets
     }

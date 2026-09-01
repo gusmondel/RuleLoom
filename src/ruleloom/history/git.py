@@ -4,6 +4,13 @@ This module deliberately collects commit topology and headers only.  It does
 not inspect paths, patches, source files, or programming-language metadata.
 Provider-specific PR, CI, review, and incident evidence belongs in separate
 adapters that can link back to the emitted change units.
+
+Two Git-native outcome signals are additionally recorded without reading prose
+as instructions: the exact ``This reverts commit <sha>`` trailer that ``git
+revert`` generates becomes a weak ``revert`` event, and one
+``git_history_horizon`` event records the newest committer timestamp of the
+complete reachable prefix so a registered revert window can later prove it
+was fully observable.
 """
 
 from __future__ import annotations
@@ -40,7 +47,17 @@ _MAX_COMMITS = 100_000
 _LOG_FIELD_SEPARATOR = b"\x1f"
 _LOG_RECORD_SEPARATOR = b"\x00"
 _LOG_FORMAT = "%H%x1f%P%x1f%cI%x1f%an%x1f%ae%x1f%s%x00"
+_REVERT_LOG_FORMAT = "%H%x1f%B%x00"
+_REVERT_GREP = "^This reverts commit [0-9a-f]{40}"
+_REVERT_TRAILER_RE = re.compile(
+    r"(?im)^this reverts commit ([0-9a-f]{40}|[0-9a-f]{64})(?=[.,;:\s]|$)"
+)
+_MAX_REVERT_TRAILERS_PER_COMMIT = 8
 _OID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
+GIT_HISTORY_ADAPTER_VERSION = "ruleloom-git/2"
+REVERT_TRAILER_LINK_KIND = "git_trailer"
+HISTORY_HORIZON_EVENT_KIND = "git_history_horizon"
 
 
 class GitHistoryError(RuntimeError):
@@ -134,6 +151,8 @@ class GitHistoryReport:
     storage_line_byte_limit: int
     event_log_bytes: int
     change_unit_log_bytes: int
+    revert_events: int = 0
+    horizon_at: str | None = None
 
     @property
     def event_count(self) -> int:
@@ -164,6 +183,9 @@ class GitHistoryReport:
             "storage_line_byte_limit": self.storage_line_byte_limit,
             "event_log_bytes": self.event_log_bytes,
             "change_unit_log_bytes": self.change_unit_log_bytes,
+            "revert_events": self.revert_events,
+            "horizon_at": self.horizon_at,
+            "adapter": GIT_HISTORY_ADAPTER_VERSION,
         }
 
 
@@ -499,6 +521,109 @@ def _event_and_unit(
     return event, unit
 
 
+def _revert_events(
+    header: _CommitHeader,
+    reverted_shas: tuple[str, ...],
+    *,
+    repository_id: str,
+    kinds_by_sha: dict[str, str],
+) -> tuple[HistoricalEvent, ...]:
+    """Emit one weak ``revert`` event per exact trailer target of a reverting commit."""
+    reverting_kind = kinds_by_sha.get(header.sha, "git_commit")
+    events: list[HistoricalEvent] = []
+    for reverted in reverted_shas:
+        reverted_kind = kinds_by_sha.get(reverted, "git_commit")
+        linked_change = f"change.{reverted_kind}.{reverted}"
+        events.append(
+            HistoricalEvent(
+                schema_version=1,
+                id=f"event.git_revert.{header.sha}.{reverted}",
+                repository_id=repository_id,
+                kind="revert",
+                occurred_at=header.committed_at,
+                available_at=header.committed_at,
+                provider="git",
+                source_ref=header.sha,
+                independent_group=f"change.{reverting_kind}.{header.sha}",
+                data={
+                    "adapter": GIT_HISTORY_ADAPTER_VERSION,
+                    "sha": header.sha,
+                    "reverted_sha": reverted,
+                    "linked_change_id": linked_change,
+                    "link_kind": REVERT_TRAILER_LINK_KIND,
+                    "evidence_grade": "weak_heuristic",
+                    "heuristic_id": "git_revert_trailer@1",
+                    "committed_at": header.committed_at,
+                },
+                change_id=linked_change,
+            )
+        )
+    return tuple(events)
+
+
+def _horizon_event(
+    *,
+    repository_id: str,
+    resolved_ref: str,
+    horizon_at: str,
+) -> HistoricalEvent:
+    digest = hashlib.sha256(
+        f"{repository_id}\x00{resolved_ref}\x00{horizon_at}".encode()
+    ).hexdigest()[:20]
+    identifier = f"event.{HISTORY_HORIZON_EVENT_KIND}.{digest}"
+    return HistoricalEvent(
+        schema_version=1,
+        id=identifier,
+        repository_id=repository_id,
+        kind=HISTORY_HORIZON_EVENT_KIND,
+        occurred_at=horizon_at,
+        available_at=horizon_at,
+        provider="git",
+        source_ref=resolved_ref,
+        independent_group=identifier,
+        data={
+            "adapter": GIT_HISTORY_ADAPTER_VERSION,
+            "resolved_ref": resolved_ref,
+            "horizon_at": horizon_at,
+            "selection": "newest_committer_timestamp_of_complete_reachable_prefix",
+        },
+        change_id=None,
+    )
+
+
+def _parse_revert_log(stdout: bytes, selected: set[str]) -> dict[str, tuple[str, ...]]:
+    """Map selected reverting commits to the exact trailer targets in their bodies."""
+    reverts: dict[str, tuple[str, ...]] = {}
+    for raw_record in stdout.split(_LOG_RECORD_SEPARATOR):
+        if raw_record.startswith(b"\n"):
+            raw_record = raw_record[1:]
+        if not raw_record.strip():
+            continue
+        fields = raw_record.split(_LOG_FIELD_SEPARATOR, 1)
+        if len(fields) != 2:
+            raise GitHistoryError("Git returned a malformed revert trailer record")
+        sha = _decode_git_text(fields[0], field_name="commit object ID").strip()
+        _validate_oid(sha, field_name="commit object ID")
+        if sha not in selected:
+            continue
+        try:
+            body = fields[1].decode("utf-8")
+        except UnicodeDecodeError:
+            # A non-UTF-8 body cannot carry a trusted trailer; abstain for this commit.
+            continue
+        targets: list[str] = []
+        for match in _REVERT_TRAILER_RE.finditer(body):
+            target = match.group(1)
+            if target == sha or target in targets:
+                continue
+            targets.append(target)
+            if len(targets) >= _MAX_REVERT_TRAILERS_PER_COMMIT:
+                break
+        if targets:
+            reverts[sha] = tuple(targets)
+    return reverts
+
+
 def _canonical_record_bytes(record: HistoricalEvent | ChangeUnit) -> int:
     """Return canonical UTF-8 record bytes, excluding the JSONL newline."""
     return len(canonical_json(record.to_dict()).encode("utf-8"))
@@ -622,19 +747,25 @@ def collect_git_history(
     ).strip()
     _validate_oid(empty_tree, field_name="empty-tree object ID")
 
-    log_arguments = [
-        "log",
-        "--date-order",
-        f"--max-count={effective_limit + 1}",
-        f"--format={_LOG_FORMAT}",
-        "--no-decorate",
-    ]
-    if normalized_since is not None:
-        log_arguments.append(f"--since={normalized_since}")
-    log_arguments.extend(("--end-of-options", resolved_ref))
-    if resolved_after is not None:
-        log_arguments.append(f"^{resolved_after}")
-    newest_first = _parse_log(_git_bytes(top_level, *log_arguments, budgets=selected_budgets))
+    def log_arguments(log_format: str, *extra: str) -> list[str]:
+        arguments = [
+            "log",
+            "--date-order",
+            f"--max-count={effective_limit + 1}",
+            f"--format={log_format}",
+            "--no-decorate",
+            *extra,
+        ]
+        if normalized_since is not None:
+            arguments.append(f"--since={normalized_since}")
+        arguments.extend(("--end-of-options", resolved_ref))
+        if resolved_after is not None:
+            arguments.append(f"^{resolved_after}")
+        return arguments
+
+    newest_first = _parse_log(
+        _git_bytes(top_level, *log_arguments(_LOG_FORMAT), budgets=selected_budgets)
+    )
 
     unique_newest_first: list[_CommitHeader] = []
     seen: set[str] = set()
@@ -647,23 +778,51 @@ def collect_git_history(
         unique_newest_first.append(header)
 
     commit_limit_truncated = len(unique_newest_first) > effective_limit
-    selected_newest_first: list[tuple[HistoricalEvent, ChangeUnit]] = []
+    retained_headers = unique_newest_first[:effective_limit]
+    kinds_by_sha = {
+        header.sha: "git_merge" if len(header.parents) > 1 else "git_commit"
+        for header in retained_headers
+    }
+    reverts_by_sha = _parse_revert_log(
+        _git_bytes(
+            top_level,
+            *log_arguments(
+                _REVERT_LOG_FORMAT,
+                "--extended-regexp",
+                "--regexp-ignore-case",
+                f"--grep={_REVERT_GREP}",
+            ),
+            budgets=selected_budgets,
+        ),
+        set(kinds_by_sha),
+    )
+    selected_newest_first: list[tuple[tuple[HistoricalEvent, ...], ChangeUnit]] = []
     event_log_bytes = 0
     change_unit_log_bytes = 0
     storage_truncated = False
     storage_truncation_detail = ""
     storage_byte_limit = selected_budgets.effective_storage_bytes
     storage_line_byte_limit = selected_budgets.effective_storage_line_bytes
-    for header in unique_newest_first[:effective_limit]:
+    revert_event_count = 0
+    for header in retained_headers:
         event, unit = _event_and_unit(
             header,
             repository_id=effective_repository_id,
             empty_tree=empty_tree,
         )
-        event_record_bytes = _canonical_record_bytes(event)
+        commit_events = (
+            event,
+            *_revert_events(
+                header,
+                reverts_by_sha.get(header.sha, ()),
+                repository_id=effective_repository_id,
+                kinds_by_sha=kinds_by_sha,
+            ),
+        )
+        event_record_bytes = [_canonical_record_bytes(item) for item in commit_events]
         unit_record_bytes = _canonical_record_bytes(unit)
         if (
-            event_record_bytes > storage_line_byte_limit
+            any(size > storage_line_byte_limit for size in event_record_bytes)
             or unit_record_bytes > storage_line_byte_limit
         ):
             storage_truncated = True
@@ -671,7 +830,7 @@ def collect_git_history(
                 f"the next canonical record exceeds {storage_line_byte_limit} bytes"
             )
             break
-        event_line_bytes = event_record_bytes + 1
+        event_line_bytes = sum(size + 1 for size in event_record_bytes)
         unit_line_bytes = unit_record_bytes + 1
         if (
             event_log_bytes + event_line_bytes > storage_byte_limit
@@ -682,9 +841,10 @@ def collect_git_history(
                 f"the next record would exceed {storage_byte_limit} bytes per log"
             )
             break
-        selected_newest_first.append((event, unit))
+        selected_newest_first.append((commit_events, unit))
         event_log_bytes += event_line_bytes
         change_unit_log_bytes += unit_line_bytes
+        revert_event_count += len(commit_events) - 1
 
     truncated = commit_limit_truncated or storage_truncated
     if resolved_after is not None and truncated:
@@ -717,8 +877,32 @@ def collect_git_history(
         )
 
     selected_oldest_first = tuple(reversed(selected_newest_first))
-    events = [event for event, _unit in selected_oldest_first]
-    units = [unit for _event, unit in selected_oldest_first]
+    events = [event for commit_events, _unit in selected_oldest_first for event in commit_events]
+    units = [unit for _events, unit in selected_oldest_first]
+    horizon_at: str | None = None
+    if units:
+        horizon_at = max(
+            (unit.prediction_at for unit in units),
+            key=lambda value: (parse_timestamp(value), value),
+        )
+        horizon = _horizon_event(
+            repository_id=effective_repository_id,
+            resolved_ref=resolved_ref,
+            horizon_at=horizon_at,
+        )
+        horizon_line_bytes = _canonical_record_bytes(horizon) + 1
+        if (
+            horizon_line_bytes - 1 <= storage_line_byte_limit
+            and event_log_bytes + horizon_line_bytes <= storage_byte_limit
+        ):
+            events.append(horizon)
+            event_log_bytes += horizon_line_bytes
+        else:
+            horizon_at = None
+            warnings.append(
+                "history horizon event omitted because it would exceed the canonical "
+                "storage budget; registered Git revert windows cannot mature from this run"
+            )
 
     manifest: JsonObject = {
         "schema_version": 1,
@@ -736,13 +920,16 @@ def collect_git_history(
         "storage_line_byte_limit": storage_line_byte_limit,
         "event_log_bytes": event_log_bytes,
         "change_unit_log_bytes": change_unit_log_bytes,
+        "revert_events": revert_event_count,
+        "horizon_at": horizon_at,
+        "adapter": GIT_HISTORY_ADAPTER_VERSION,
         "events": [event.to_dict() for event in events],
         "change_units": [unit.to_dict() for unit in units],
     }
     return GitHistoryReport(
         events=tuple(events),
         units=tuple(units),
-        examined=len(events),
+        examined=len(units),
         shallow=shallow,
         truncated=truncated,
         warnings=tuple(warnings),
@@ -758,6 +945,8 @@ def collect_git_history(
         storage_line_byte_limit=storage_line_byte_limit,
         event_log_bytes=event_log_bytes,
         change_unit_log_bytes=change_unit_log_bytes,
+        revert_events=revert_event_count,
+        horizon_at=horizon_at,
     )
 
 

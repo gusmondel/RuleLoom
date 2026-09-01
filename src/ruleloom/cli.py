@@ -203,6 +203,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         pack_config=pack_config,
         schema_version=5,
         agents=selected,
+        git_window_days=args.git_window_days,
     )
     print(f"Initialized RuleLoom in {result.root}")
     print(f"Config: {result.root / CONFIG_PATH}")
@@ -441,7 +442,8 @@ def _cmd_history_bootstrap_git(args: argparse.Namespace) -> int:
             "evidence_grade": "exploratory_git_only",
             "note": (
                 "Git topology is language-neutral but does not establish PR-time snapshots "
-                "or independent outcomes. Import normalized provider events for confirmatory "
+                "or independent outcomes. Revert trailers and the history horizon are weak, "
+                "opt-in label evidence. Import normalized provider events for confirmatory "
                 "change units."
             ),
         }
@@ -1678,6 +1680,15 @@ def build_parser() -> argparse.ArgumentParser:
         choices=["none", "all", "codex", "claude"],
         default="none",
         help="install agent skills now (default none for shadow-mode isolation)",
+    )
+    init.add_argument(
+        "--git-window-days",
+        type=int,
+        help=(
+            "register a Git revert window in days for post_merge_revert_or_hotfix; a landed "
+            "change with no revert trailer before the window closes inside complete "
+            "reachable history becomes an opt-in weak negative (never confirmatory)"
+        ),
     )
     init.set_defaults(handler=_cmd_init)
 

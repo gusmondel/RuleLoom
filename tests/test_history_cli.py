@@ -85,7 +85,8 @@ def test_history_cli_exposes_fail_closed_incremental_git_cursor(
         ],
         capsys,
     )
-    assert initial["events_inserted"] == 1
+    # One commit event plus the history-horizon event of this bootstrap run.
+    assert initial["events_inserted"] == 2
     expected = _commit(repo, "next.txt", "2025-01-02T00:00:00Z")
 
     report = _run(
@@ -106,7 +107,7 @@ def test_history_cli_exposes_fail_closed_incremental_git_cursor(
     assert report["resolved_ref"] == expected
     assert report["incremental"] is True
     assert report["incremental_boundary_is_ancestor"] is True
-    assert report["events_inserted"] == 1
+    assert report["events_inserted"] == 2
     assert report["units_inserted"] == 1
 
 
@@ -372,7 +373,7 @@ def test_history_cli_bootstraps_imports_materializes_and_reports(
         ],
         capsys,
     )
-    assert bootstrapped["events_inserted"] == 1
+    assert bootstrapped["events_inserted"] == 2
     assert bootstrapped["units_inserted"] == 1
     assert bootstrapped["evidence_grade"] == "exploratory_git_only"
     assert bootstrapped["storage_byte_limit"] == 64 * 1024 * 1024
@@ -496,7 +497,7 @@ def test_history_cli_bootstraps_imports_materializes_and_reports(
     assert unchanged["updated"] == 0
 
     status = _run(["history", "--root", str(repo), "status"], capsys)
-    assert status["events"] == 4
+    assert status["events"] == 5
     assert status["change_units"] == 2
     assert status["language_neutral_core"] is True
     assert status["labels"] == {"negative": 0, "positive": 1, "unknown": 1}

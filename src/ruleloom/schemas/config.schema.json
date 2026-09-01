@@ -286,6 +286,18 @@
           "minimum": 1
         }
       }
+    },
+    "outcomes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["git_window_days"],
+      "properties": {
+        "git_window_days": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 3650
+        }
+      }
     }
   },
   "allOf": [
@@ -319,7 +331,8 @@
                   ]
                 }
               }
-            }
+            },
+            {"required": ["outcomes"]}
           ]
         }
       }
@@ -352,7 +365,8 @@
                   ]
                 }
               }
-            }
+            },
+            {"required": ["outcomes"]}
           ]
         }
       }
@@ -384,7 +398,8 @@
                   ]
                 }
               }
-            }
+            },
+            {"required": ["outcomes"]}
           ]
         }
       }
@@ -430,13 +445,20 @@
               "properties": {"evaluation": {"required": ["test_start_at"]}}
             }
           }
-        ]
+        ],
+        "not": {"anyOf": [{"required": ["outcomes"]}]}
       }
     },
     {
       "if": {"properties": {"schema_version": {"const": 5}}},
       "then": {
-        "required": ["pack_version", "evidence", "pack_config", "signal_probe"],
+        "required": [
+          "pack_version",
+          "evidence",
+          "pack_config",
+          "signal_probe",
+          "outcomes"
+        ],
         "properties": {
           "learner": {
             "required": [

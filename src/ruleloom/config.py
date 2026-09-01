@@ -983,6 +983,37 @@ class EvidenceConfig:
         )
 
 
+MAX_GIT_WINDOW_DAYS = 3650
+
+
+@dataclass(frozen=True, slots=True)
+class OutcomesConfig:
+    """Registered, label-blind outcome-window settings bound into the evidence protocol."""
+
+    git_window_days: int | None = None
+
+    def __post_init__(self) -> None:
+        if self.git_window_days is not None and (
+            isinstance(self.git_window_days, bool)
+            or not isinstance(self.git_window_days, int)
+            or not 1 <= self.git_window_days <= MAX_GIT_WINDOW_DAYS
+        ):
+            raise ModelError(
+                f"outcomes.git_window_days must be null or between 1 and {MAX_GIT_WINDOW_DAYS}"
+            )
+
+    def to_dict(self) -> JsonObject:
+        return {"git_window_days": self.git_window_days}
+
+    @classmethod
+    def from_dict(cls, value: dict[str, object]) -> OutcomesConfig:
+        _reject_unknown(value, {"git_window_days"}, "outcomes")
+        raw = value.get("git_window_days")
+        if raw is not None and (isinstance(raw, bool) or not isinstance(raw, int)):
+            raise ModelError("outcomes.git_window_days must be an integer or null")
+        return cls(git_window_days=raw)
+
+
 @dataclass(frozen=True, slots=True)
 class RuleLoomConfig:
     project: str
@@ -1003,6 +1034,7 @@ class RuleLoomConfig:
     schema_version: int = 2
     pack_config: ConfiguredPathsConfig | None = None
     signal_probe: SignalProbeConfig = field(default_factory=SignalProbeConfig)
+    outcomes: OutcomesConfig = field(default_factory=OutcomesConfig)
 
     def __post_init__(self) -> None:
         if (
@@ -1047,6 +1079,8 @@ class RuleLoomConfig:
             raise ModelError("configured_paths requires config schema_version 3")
         if self.schema_version < 4 and self.signal_probe != SignalProbeConfig():
             raise ModelError("signal_probe requires config schema_version 4")
+        if self.schema_version < 5 and self.outcomes != OutcomesConfig():
+            raise ModelError("outcomes settings require config schema_version 5")
         if self.schema_version < 5 and not self.learner.search_controls_are_legacy:
             raise ModelError(
                 "learner search controls (search_strategy, beam_width, predicate_ranking, "
@@ -1154,6 +1188,8 @@ class RuleLoomConfig:
             protocol["evidence"] = self.evidence.to_dict()
         if self.schema_version >= 3:
             protocol["pack_config"] = self.pack_config_dict
+        if self.schema_version >= 5:
+            protocol["outcomes"] = self.outcomes.to_dict()
         return protocol
 
     @property
@@ -1187,6 +1223,8 @@ class RuleLoomConfig:
             value["pack_config"] = self.pack_config_dict
         if self.schema_version >= 4:
             value["signal_probe"] = self.signal_probe.to_dict()
+        if self.schema_version >= 5:
+            value["outcomes"] = self.outcomes.to_dict()
         return value
 
     @classmethod
@@ -1199,6 +1237,8 @@ class RuleLoomConfig:
             version_fields.add("pack_config")
         if raw_version >= 4:
             version_fields.add("signal_probe")
+        if raw_version >= 5:
+            version_fields.add("outcomes")
         _reject_unknown(
             value,
             {
@@ -1226,6 +1266,7 @@ class RuleLoomConfig:
         raw_learner = _object(value.get("learner", {}), "learner")
         raw_evaluation = _object(value.get("evaluation", {}), "evaluation")
         raw_signal_probe = _object(value.get("signal_probe", {}), "signal_probe")
+        raw_outcomes = _object(value.get("outcomes", {}), "outcomes")
         raw_promotion = _object(value.get("promotion", {}), "promotion")
         if raw_version >= 2:
             _require_fields(
@@ -1249,6 +1290,7 @@ class RuleLoomConfig:
                     "promotion",
                     *({"pack_config"} if raw_version >= 3 else set()),
                     *({"signal_probe"} if raw_version >= 4 else set()),
+                    *({"outcomes"} if raw_version >= 5 else set()),
                 },
                 f"schema-v{raw_version} config",
             )
@@ -1302,6 +1344,8 @@ class RuleLoomConfig:
                 {"test_fraction", "min_train_examples", "min_test_examples", "seed"},
                 "schema-v2 evaluation",
             )
+            if raw_version >= 5:
+                _require_fields(raw_outcomes, {"git_window_days"}, "schema-v5 outcomes")
             if raw_version >= 4:
                 _require_fields(
                     raw_signal_probe,
@@ -1386,6 +1430,9 @@ class RuleLoomConfig:
                 if raw_version >= 4
                 else SignalProbeConfig()
             ),
+            outcomes=(
+                OutcomesConfig.from_dict(raw_outcomes) if raw_version >= 5 else OutcomesConfig()
+            ),
             promotion=PromotionConfig.from_dict(raw_promotion),
         )
 
@@ -1425,6 +1472,7 @@ def default_config(
     pack_config: ConfiguredPathsConfig | None = None,
     schema_version: int = 2,
     test_start_at: str | None = None,
+    git_window_days: int | None = None,
 ) -> RuleLoomConfig:
     selected_pack = (
         pack
@@ -1474,4 +1522,5 @@ def default_config(
         ),
         evaluation=EvaluationConfig(test_start_at=test_start_at),
         signal_probe=SignalProbeConfig(enabled=schema_version >= 4),
+        outcomes=OutcomesConfig(git_window_days=git_window_days),
     )

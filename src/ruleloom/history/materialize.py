@@ -21,9 +21,11 @@ from ruleloom.history.models import ChangeUnit, HistoricalEvent
 from ruleloom.history.outcomes import (
     ATOMIC_OUTCOME_TARGETS,
     VALIDATION_REWORK_REQUIRED,
+    GitWindow,
     OutcomeDerivation,
     aggregate_votes,
     derive_outcome,
+    git_window_from_events,
 )
 from ruleloom.history.units import (
     validate_change_unit_event_links,
@@ -64,6 +66,8 @@ class MaterializationReport:
     eligible_positive: int
     eligible_negative: int
     eligible_unknown: int
+    git_window: GitWindow | None = None
+    git_window_negatives: int = 0
 
     @staticmethod
     def _retention(eligible: int, retained: int) -> JsonObject:
@@ -89,6 +93,8 @@ class MaterializationReport:
             "outcome_target": self.outcome_target,
             "weak_evidence_enabled": self.weak_evidence_enabled,
             "manifest_hash": self.manifest_hash,
+            "git_window": None if self.git_window is None else self.git_window.to_dict(),
+            "git_window_negatives": self.git_window_negatives,
             "retention_by_outcome": {
                 "positive": self._retention(self.eligible_positive, self.positive),
                 "negative": self._retention(self.eligible_negative, self.negative),
@@ -127,6 +133,7 @@ def _historical_observation(
     weak_evidence_enabled: bool,
     aggregate_statistics: AggregateDiffStatistics | None,
     repository_context: SnapshotRepositoryContext,
+    git_window: GitWindow | None,
 ) -> Observation:
     if aggregate_statistics is None:
         snapshot = collect_snapshot(
@@ -200,6 +207,7 @@ def _historical_observation(
         "historical_event_ids": list(unit.event_ids),
         "historical_votes": [vote.to_dict() for vote in derivation.votes],
         "weak_evidence_enabled": weak_evidence_enabled,
+        "historical_git_window": None if git_window is None else git_window.to_dict(),
         "history_warnings": cast(JsonValue, warnings),
     }
     return replace(
@@ -259,11 +267,25 @@ def _skip_reason_code(reason: str) -> str:
     return "git_evidence_error"
 
 
+def resolve_git_window(
+    config: RuleLoomConfig,
+    events: tuple[HistoricalEvent, ...] | list[HistoricalEvent],
+) -> GitWindow | None:
+    """Resolve the registered Git revert window against the persisted history horizon."""
+    return git_window_from_events(
+        events,
+        window_days=config.outcomes.git_window_days,
+        repository_id=config.protocol.repository_id,
+    )
+
+
 def validate_materialized_outcome(
     config: RuleLoomConfig,
     observation: Observation,
     unit: ChangeUnit,
     events: tuple[HistoricalEvent, ...] | list[HistoricalEvent],
+    *,
+    git_window: GitWindow | None = None,
 ) -> None:
     """Recompute a persisted historical label and its confirmatory status."""
     validate_change_unit_evidence(unit, events)
@@ -283,6 +305,7 @@ def validate_materialized_outcome(
         events,
         selected_target,
         include_weak=weak_evidence_enabled,
+        git_window=git_window,
     )
     strong_only = aggregate_votes(selected_target, derivation.votes, include_weak=False)
     weak_votes_contributed = (
@@ -291,6 +314,7 @@ def validate_materialized_outcome(
         and strong_only.value is not derivation.value
     )
     expected_confirmatory = unit.confirmatory and not weak_votes_contributed
+    expected_window = None if git_window is None else git_window.to_dict()
     event_manifest_hash = content_hash(
         [event.to_dict() for event in sorted(events, key=lambda item: item.id)]
     )
@@ -306,6 +330,7 @@ def validate_materialized_outcome(
         or observation.metadata.get("historical_event_ids") != list(unit.event_ids)
         or observation.metadata.get("historical_prediction_at") != unit.prediction_at
         or observation.metadata.get("historical_finalized_at") != unit.finalized_at
+        or observation.metadata.get("historical_git_window") != expected_window
     ):
         raise ModelError(
             f"historical observation {observation.id!r} does not match its recomputed "
@@ -382,6 +407,8 @@ def materialize_history(
         required_objects,
     )
     missing_objects = repository_context.missing_object_ids
+    git_window = resolve_git_window(config, event_values)
+    git_window_negatives = 0
     for unit in ordered_units:
         linked = {
             event.id: event for event in events_by_change.get((unit.repository_id, unit.id), ())
@@ -400,6 +427,7 @@ def materialize_history(
             unit_events,
             selected_target,
             include_weak=include_weak,
+            git_window=git_window,
         )
         eligible_counts[derivation.value] += 1
         unit_missing = tuple(
@@ -428,6 +456,7 @@ def materialize_history(
                 weak_evidence_enabled=include_weak,
                 aggregate_statistics=_aggregate_diff_statistics(unit, unit_events),
                 repository_context=repository_context,
+                git_window=git_window,
             )
         except MissingPromisorObjectsError:
             # This is a cohort-level environment problem, not unit-level missingness.
@@ -446,6 +475,14 @@ def materialize_history(
             continue
         observations.append(observation)
         counts[observation.labels[config.target]] += 1
+        evidence = observation.label_evidence.get(config.target)
+        if (
+            git_window is not None
+            and observation.labels[config.target] is LabelValue.NEGATIVE
+            and evidence is not None
+            and evidence.source == "historical-events:" + git_window.horizon_event_id
+        ):
+            git_window_negatives += 1
 
     manifest: dict[str, JsonValue] = {
         "schema_version": 1,
@@ -453,6 +490,7 @@ def materialize_history(
         "evidence_protocol_hash": config.evidence_protocol_hash,
         "outcome_target": selected_target,
         "weak_evidence_enabled": include_weak,
+        "git_window": None if git_window is None else git_window.to_dict(),
         "event_manifest_hash": complete_event_manifest_hash,
         "unit_ids": [item.id for item in ordered_units],
         "observation_ids": [item.id for item in observations],
@@ -478,4 +516,6 @@ def materialize_history(
         eligible_positive=eligible_counts[LabelValue.POSITIVE],
         eligible_negative=eligible_counts[LabelValue.NEGATIVE],
         eligible_unknown=eligible_counts[LabelValue.UNKNOWN],
+        git_window=git_window,
+        git_window_negatives=git_window_negatives,
     )
