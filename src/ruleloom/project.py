@@ -61,7 +61,7 @@ def initialize_project(
     pack: str | None = None,
     pack_version: int | None = None,
     pack_config: ConfiguredPathsConfig | None = None,
-    schema_version: int = 4,
+    schema_version: int = 5,
     agents: Sequence[str] = (),
 ) -> InitResult:
     root = root.resolve()

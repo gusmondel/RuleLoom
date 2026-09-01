@@ -15,6 +15,7 @@ from typing import cast
 
 from ruleloom.config import RuleLoomConfig
 from ruleloom.evaluation import (
+    BooleanLogisticModel,
     best_literal_baseline,
     bootstrap_stability,
     evaluate,
@@ -30,6 +31,7 @@ from ruleloom.learners.horn import (
     HornBudget,
     HornLearningResult,
     HornSettings,
+    apply_predicate_order,
     learn_horn,
     learn_horn_diagnostics,
     select_train_predicates,
@@ -51,6 +53,7 @@ from ruleloom.models import (
     ModelError,
     Observation,
     Prediction,
+    RuleLiteral,
     RuleSet,
     content_hash,
     parse_timestamp,
@@ -62,7 +65,7 @@ from ruleloom.packs import (
     validate_persisted_extraction,
     validate_policy_pack_contract,
 )
-from ruleloom.signal_probe import SignalProbeReport, run_signal_probe
+from ruleloom.signal_probe import SignalProbeReport, run_signal_probe, tree_seed_bodies
 from ruleloom.storage import (
     approved_path,
     candidate_path,
@@ -266,6 +269,13 @@ def _horn_settings(config: RuleLoomConfig) -> HornSettings:
         min_alert_rate=learner.min_alert_rate,
         confidence_level=learner.confidence_level,
         near_miss_limit=learner.near_miss_limit,
+        search_strategy=learner.search_strategy,
+        beam_width=learner.beam_width,
+        precision_estimate=learner.precision_estimate,
+        require_temporal_consistency=learner.require_temporal_consistency,
+        prune_fraction=learner.prune_fraction,
+        permutation_runs=learner.permutation_runs,
+        seed=config.evaluation.seed,
     )
 
 
@@ -327,8 +337,35 @@ def _run_horn(
     config: RuleLoomConfig,
     *,
     budget: HornBudget,
+    seed_bodies: Sequence[tuple[RuleLiteral, ...]] = (),
+    predicate_order: Sequence[str] | None = None,
 ) -> RuleSet:
-    return learn_horn(observations, target, _horn_settings(config), budget=budget)
+    """Bootstrap resamples reuse the train-only search controls without the null runs."""
+    settings = replace(_horn_settings(config), permutation_runs=0)
+    return learn_horn(
+        observations,
+        target,
+        settings,
+        budget=budget,
+        seed_bodies=seed_bodies,
+        predicate_order=predicate_order,
+    )
+
+
+def _train_predicate_order(
+    config: RuleLoomConfig,
+    logistic_model: BooleanLogisticModel,
+) -> tuple[str, ...] | None:
+    """Order predicates by the magnitude of their train-only logistic weight."""
+    if config.learner.predicate_ranking != "logistic_weight":
+        return None
+    return tuple(
+        predicate
+        for predicate, _weight in sorted(
+            zip(logistic_model.predicates, logistic_model.weights, strict=True),
+            key=lambda pair: (-abs(pair[1]), pair[0]),
+        )
+    )
 
 
 def _validate_observation_pack_contract(
@@ -484,6 +521,24 @@ def learn_candidate(
         target,
         allow_negation=config.learner.allow_negation,
     )
+    logistic_model = fit_boolean_logistic_baseline(train, target, as_of=cutoff)
+    predicate_order = _train_predicate_order(config, logistic_model)
+    search_predicates = apply_predicate_order(
+        predicate_selection.ranked_predicates, predicate_order
+    )[: config.learner.max_predicates]
+    seed_bodies: tuple[tuple[RuleLiteral, ...], ...] = ()
+    if (
+        config.learner.engine == "horn"
+        and config.learner.tree_seeds
+        and predicate_selection.positive_observations
+        and predicate_selection.negative_observations
+    ):
+        seed_bodies = tree_seed_bodies(
+            train,
+            target,
+            max_depth=config.signal_probe.tree_max_depth,
+            max_predicates=config.signal_probe.max_predicates,
+        )
 
     if config.learner.engine == "horn":
         predicate_count = min(
@@ -492,15 +547,17 @@ def learn_candidate(
         )
         estimated_checks = (
             config.learner.hypothesis_count(predicate_count)
-            * (config.learner.bootstrap_runs + 1)
             * max(1, (len(train) + 63) // 64)
             * config.learner.max_body
-            * config.learner.max_rules
+            * (
+                (config.learner.bootstrap_runs + 1) * config.learner.max_rules
+                + config.learner.permutation_runs
+            )
         )
         if estimated_checks > _MAX_HORN_BITSET_WORK_UNITS:
             raise ModelError(
                 "estimated Horn search work exceeds the safe budget; reduce observations, "
-                "max_body, max_predicates, or bootstrap_runs"
+                "max_body, max_predicates, beam_width, bootstrap_runs, or permutation_runs"
             )
 
     if config.learner.engine == "horn":
@@ -510,6 +567,8 @@ def learn_candidate(
             target,
             _horn_settings(config),
             budget=horn_budget,
+            seed_bodies=seed_bodies,
+            predicate_order=predicate_order,
         )
         horn_result: HornLearningResult | None = learned_horn
         rules = learned_horn.rules
@@ -537,7 +596,6 @@ def learn_candidate(
     test_metrics = evaluate(split.test, target, rules.predicts, as_of=cutoff)
     majority_value, _ = majority_baseline(train, target, as_of=cutoff)
     _, literal_metrics = best_literal_baseline(train, split.test, target, as_of=cutoff)
-    logistic_model = fit_boolean_logistic_baseline(train, target, as_of=cutoff)
 
     def size_only_predictor(facts: frozenset[str]) -> bool:
         return bool({"large_change", "multi_file_change"}.intersection(facts))
@@ -564,7 +622,14 @@ def learn_candidate(
     def bootstrap_learner(sample: Sequence[Observation], sample_target: str) -> RuleSet:
         if config.learner.engine != "horn":
             return rules
-        return _run_horn(sample, sample_target, config, budget=horn_budget)
+        return _run_horn(
+            sample,
+            sample_target,
+            config,
+            budget=horn_budget,
+            seed_bodies=seed_bodies,
+            predicate_order=predicate_order,
+        )
 
     warnings = [*split.warnings, *availability_warnings]
     if predicate_selection.constant_predicates:
@@ -649,11 +714,12 @@ def learn_candidate(
             "negative_observations": predicate_selection.negative_observations,
             "observed_predicate_count": len(predicate_selection.observed_predicates),
             "eligible_representative_count": len(predicate_selection.ranked_predicates),
-            "search_predicates": list(
-                predicate_selection.ranked_predicates[: config.learner.max_predicates]
-            ),
+            "search_strategy": config.learner.search_strategy,
+            "predicate_ranking": config.learner.predicate_ranking,
+            "search_predicates": list(search_predicates),
             "constant_predicates": list(predicate_selection.constant_predicates),
             "duplicate_groups": duplicate_groups,
+            "tree_seed_bodies": [[literal.to_dict() for literal in body] for body in seed_bodies],
         },
     }
     if signal_report is not None:

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from statistics import NormalDist
@@ -17,6 +18,7 @@ from ruleloom.models import (
     Metrics,
     ModelError,
     Observation,
+    RuleLiteral,
     content_hash,
     parse_timestamp,
 )
@@ -221,6 +223,51 @@ def _fit_boolean_tree(
     root = build(list(range(len(observations))), tuple(predicates), 0)
     train_scores = [root.score(item.facts) for item in observations]
     return _BooleanTreeModel(root=root, threshold=_threshold(train_scores, labels))
+
+
+def tree_seed_bodies(
+    observations: Sequence[Observation],
+    target: str,
+    *,
+    max_depth: int = 2,
+    max_predicates: int = 256,
+) -> tuple[tuple[RuleLiteral, ...], ...]:
+    """Return root-to-leaf conjunctions of a train-only tree whose leaf favours positives.
+
+    The tree is the same class-balanced shallow Boolean tree used by the signal
+    probe. Each returned body is a candidate conjunction for the Horn search; it
+    is evaluated under the same frozen gates as every other hypothesis and never
+    bypasses them. An empty tuple is returned when either class is absent.
+    """
+    labelled = [
+        item
+        for item in observations
+        if item.labels.get(target, LabelValue.UNKNOWN) is not LabelValue.UNKNOWN
+    ]
+    if not any(item.labels[target] is LabelValue.POSITIVE for item in labelled) or not any(
+        item.labels[target] is LabelValue.NEGATIVE for item in labelled
+    ):
+        return ()
+    model = _fit_boolean_tree(
+        labelled,
+        target,
+        max_depth=max_depth,
+        max_predicates=max_predicates,
+    )
+    bodies: list[tuple[RuleLiteral, ...]] = []
+
+    def walk(node: _TreeNode | None, path: tuple[RuleLiteral, ...]) -> None:
+        if node is None:
+            return
+        if node.predicate is None:
+            if path and node.probability >= 0.5:
+                bodies.append(path)
+            return
+        walk(node.absent, (*path, RuleLiteral(predicate=node.predicate, negated=True)))
+        walk(node.present, (*path, RuleLiteral(predicate=node.predicate)))
+
+    walk(model.root, ())
+    return tuple(bodies)
 
 
 @dataclass(frozen=True, slots=True)

@@ -201,7 +201,7 @@ def _cmd_init(args: argparse.Namespace) -> int:
         pack=args.pack,
         pack_version=args.pack_version,
         pack_config=pack_config,
-        schema_version=4,
+        schema_version=5,
         agents=selected,
     )
     print(f"Initialized RuleLoom in {result.root}")

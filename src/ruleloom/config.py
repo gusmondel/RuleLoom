@@ -86,6 +86,23 @@ def _require_fields(value: dict[str, object], required: set[str], name: str) -> 
         raise ModelError(f"{name} is missing required fields: {', '.join(sorted(missing))}")
 
 
+SEARCH_STRATEGIES = ("exhaustive", "beam")
+PREDICATE_RANKINGS = ("rate_gap", "logistic_weight")
+PRECISION_ESTIMATES = ("point", "wilson_lower")
+_MAX_EXHAUSTIVE_PREDICATES = 32
+_MAX_BEAM_PREDICATES = 256
+_LEGACY_SEARCH_CONTROLS: dict[str, object] = {
+    "search_strategy": "exhaustive",
+    "beam_width": 20,
+    "predicate_ranking": "rate_gap",
+    "precision_estimate": "point",
+    "require_temporal_consistency": False,
+    "prune_fraction": 0.0,
+    "permutation_runs": 0,
+    "tree_seeds": False,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class LearnerConfig:
     engine: str = "horn"
@@ -104,6 +121,14 @@ class LearnerConfig:
     min_alert_rate: float = 0.01
     confidence_level: float = 0.95
     near_miss_limit: int = 10
+    search_strategy: str = "exhaustive"
+    beam_width: int = 20
+    predicate_ranking: str = "rate_gap"
+    precision_estimate: str = "point"
+    require_temporal_consistency: bool = False
+    prune_fraction: float = 0.0
+    permutation_runs: int = 0
+    tree_seeds: bool = False
 
     def __post_init__(self) -> None:
         if self.engine not in {"horn", "popper"}:
@@ -120,8 +145,45 @@ class LearnerConfig:
             raise ModelError("false_positive_cost must be >= 0")
         if not 0 <= self.bootstrap_runs <= 100:
             raise ModelError("bootstrap_runs must be between 0 and 100")
-        if not 1 <= self.max_predicates <= 32:
-            raise ModelError("max_predicates must be between 1 and 32")
+        if self.search_strategy not in SEARCH_STRATEGIES:
+            raise ModelError(
+                "learner.search_strategy must be one of: " + ", ".join(SEARCH_STRATEGIES)
+            )
+        predicate_cap = (
+            _MAX_BEAM_PREDICATES if self.search_strategy == "beam" else _MAX_EXHAUSTIVE_PREDICATES
+        )
+        if not 1 <= self.max_predicates <= predicate_cap:
+            raise ModelError(
+                f"max_predicates must be between 1 and {predicate_cap} for "
+                f"search_strategy={self.search_strategy!r}"
+            )
+        if not 1 <= self.beam_width <= 256:
+            raise ModelError("learner.beam_width must be between 1 and 256")
+        if self.predicate_ranking not in PREDICATE_RANKINGS:
+            raise ModelError(
+                "learner.predicate_ranking must be one of: " + ", ".join(PREDICATE_RANKINGS)
+            )
+        if self.precision_estimate not in PRECISION_ESTIMATES:
+            raise ModelError(
+                "learner.precision_estimate must be one of: " + ", ".join(PRECISION_ESTIMATES)
+            )
+        if not isinstance(self.require_temporal_consistency, bool):
+            raise ModelError("learner.require_temporal_consistency must be a boolean")
+        if not isinstance(self.tree_seeds, bool):
+            raise ModelError("learner.tree_seeds must be a boolean")
+        if (
+            isinstance(self.prune_fraction, bool)
+            or not isinstance(self.prune_fraction, int | float)
+            or not math.isfinite(self.prune_fraction)
+            or not 0 <= self.prune_fraction <= 0.5
+        ):
+            raise ModelError("learner.prune_fraction must be between 0 and 0.5")
+        if (
+            isinstance(self.permutation_runs, bool)
+            or not isinstance(self.permutation_runs, int)
+            or not 0 <= self.permutation_runs <= 1000
+        ):
+            raise ModelError("learner.permutation_runs must be between 0 and 1000")
         if not 1 <= self.popper_timeout_seconds <= 3600:
             raise ModelError("popper_timeout_seconds must be between 1 and 3600")
         if self.gate_mode not in {"absolute_precision", "relative_lift"}:
@@ -139,10 +201,13 @@ class LearnerConfig:
         if not 0 <= self.near_miss_limit <= 100:
             raise ModelError("learner.near_miss_limit must be between 0 and 100")
         hypotheses = self.hypothesis_count()
-        if hypotheses > 250_000 or hypotheses * (self.bootstrap_runs + 1) > 5_000_000:
+        if (
+            hypotheses > 250_000
+            or hypotheses * (self.bootstrap_runs + 1 + self.permutation_runs) > 5_000_000
+        ):
             raise ModelError(
                 "learner search budget is too large; reduce max_body, max_predicates, "
-                "or bootstrap_runs"
+                "beam_width, bootstrap_runs, or permutation_runs"
             )
         if self.engine == "popper":
             if self.max_rules != 1:
@@ -164,23 +229,54 @@ class LearnerConfig:
                     "learner.min_precision, min_support, and false_positive_cost are "
                     "built-in Horn settings and must retain their defaults when engine='popper'"
                 )
+            if not self.search_controls_are_legacy:
+                raise ModelError(
+                    "learner search controls (beam search, pruning, permutation null, "
+                    "tree seeds, precision estimate, temporal consistency) apply to the "
+                    "built-in Horn engine only; keep their defaults when engine='popper'"
+                )
             if self.popper_dir is None or not Path(self.popper_dir).is_absolute():
                 raise ModelError(
                     "learner.popper_dir must be an explicit absolute path when engine='popper'"
                 )
 
+    @property
+    def search_controls(self) -> dict[str, object]:
+        return {
+            "search_strategy": self.search_strategy,
+            "beam_width": self.beam_width,
+            "predicate_ranking": self.predicate_ranking,
+            "precision_estimate": self.precision_estimate,
+            "require_temporal_consistency": self.require_temporal_consistency,
+            "prune_fraction": self.prune_fraction,
+            "permutation_runs": self.permutation_runs,
+            "tree_seeds": self.tree_seeds,
+        }
+
+    @property
+    def search_controls_are_legacy(self) -> bool:
+        """Whether the Horn 0.5 behaviour is reproduced exactly (schema v4 and older)."""
+        return self.search_controls == _LEGACY_SEARCH_CONTROLS
+
     def hypothesis_count(self, predicate_count: int | None = None) -> int:
-        """Return the bounded number of clause bodies considered by the Horn search."""
+        """Return the bounded number of clause bodies considered by one Horn rule search."""
         predicates = self.max_predicates if predicate_count is None else predicate_count
         if isinstance(predicates, bool) or not 0 <= predicates <= self.max_predicates:
             raise ModelError("predicate_count must be between 0 and learner.max_predicates")
         literal_variants = 2 if self.allow_negation else 1
+        if self.search_strategy == "beam":
+            return literal_variants * predicates * (1 + self.beam_width * (self.max_body - 1))
         return sum(
             comb(predicates, size) * literal_variants**size
             for size in range(1, min(self.max_body, predicates) + 1)
         )
 
-    def to_dict(self, *, include_signal_gates: bool = False) -> JsonObject:
+    def to_dict(
+        self,
+        *,
+        include_signal_gates: bool = False,
+        include_search_controls: bool = False,
+    ) -> JsonObject:
         value: JsonObject = {
             "engine": self.engine,
             "max_body": self.max_body,
@@ -204,11 +300,28 @@ class LearnerConfig:
                     "near_miss_limit": self.near_miss_limit,
                 }
             )
+        if include_search_controls:
+            value.update(
+                {
+                    "search_strategy": self.search_strategy,
+                    "beam_width": self.beam_width,
+                    "predicate_ranking": self.predicate_ranking,
+                    "precision_estimate": self.precision_estimate,
+                    "require_temporal_consistency": self.require_temporal_consistency,
+                    "prune_fraction": self.prune_fraction,
+                    "permutation_runs": self.permutation_runs,
+                    "tree_seeds": self.tree_seeds,
+                }
+            )
         return value
 
     @classmethod
     def from_dict(
-        cls, value: dict[str, object], *, include_signal_gates: bool = False
+        cls,
+        value: dict[str, object],
+        *,
+        include_signal_gates: bool = False,
+        include_search_controls: bool = False,
     ) -> LearnerConfig:
         signal_fields = (
             {
@@ -221,6 +334,7 @@ class LearnerConfig:
             if include_signal_gates
             else set()
         )
+        search_fields = set(_LEGACY_SEARCH_CONTROLS) if include_search_controls else set()
         _reject_unknown(
             value,
             {
@@ -236,6 +350,7 @@ class LearnerConfig:
                 "popper_dir",
                 "popper_timeout_seconds",
                 *signal_fields,
+                *search_fields,
             },
             "learner",
         )
@@ -279,6 +394,27 @@ class LearnerConfig:
                 maximum=0.999999,
             ),
             near_miss_limit=_integer(value.get("near_miss_limit", 10), "learner.near_miss_limit"),
+            search_strategy=_string(
+                value.get("search_strategy", "exhaustive"), "learner.search_strategy"
+            ),
+            beam_width=_integer(value.get("beam_width", 20), "learner.beam_width", minimum=1),
+            predicate_ranking=_string(
+                value.get("predicate_ranking", "rate_gap"), "learner.predicate_ranking"
+            ),
+            precision_estimate=_string(
+                value.get("precision_estimate", "point"), "learner.precision_estimate"
+            ),
+            require_temporal_consistency=_boolean(
+                value.get("require_temporal_consistency", False),
+                "learner.require_temporal_consistency",
+            ),
+            prune_fraction=_number(
+                value.get("prune_fraction", 0.0),
+                "learner.prune_fraction",
+                maximum=0.5,
+            ),
+            permutation_runs=_integer(value.get("permutation_runs", 0), "learner.permutation_runs"),
+            tree_seeds=_boolean(value.get("tree_seeds", False), "learner.tree_seeds"),
         )
 
 
@@ -872,7 +1008,7 @@ class RuleLoomConfig:
         if (
             isinstance(self.schema_version, bool)
             or not isinstance(self.schema_version, int)
-            or self.schema_version not in {1, 2, 3, 4}
+            or self.schema_version not in {1, 2, 3, 4, 5}
         ):
             raise ModelError("unsupported config schema_version")
         if not self.project.strip():
@@ -911,6 +1047,12 @@ class RuleLoomConfig:
             raise ModelError("configured_paths requires config schema_version 3")
         if self.schema_version < 4 and self.signal_probe != SignalProbeConfig():
             raise ModelError("signal_probe requires config schema_version 4")
+        if self.schema_version < 5 and not self.learner.search_controls_are_legacy:
+            raise ModelError(
+                "learner search controls (search_strategy, beam_width, predicate_ranking, "
+                "precision_estimate, require_temporal_consistency, prune_fraction, "
+                "permutation_runs, tree_seeds) require config schema_version 5"
+            )
         if (
             self.schema_version >= 4
             and self.signal_probe.enabled
@@ -1031,7 +1173,10 @@ class RuleLoomConfig:
             "deprecated_dir": self.deprecated_dir,
             "predictions": self.predictions,
             "protocol": self.protocol.to_dict(),
-            "learner": self.learner.to_dict(include_signal_gates=self.schema_version >= 4),
+            "learner": self.learner.to_dict(
+                include_signal_gates=self.schema_version >= 4,
+                include_search_controls=self.schema_version >= 5,
+            ),
             "evaluation": self.evaluation.to_dict(),
             "promotion": self.promotion.to_dict(),
         }
@@ -1148,6 +1293,7 @@ class RuleLoomConfig:
                         if raw_version >= 4
                         else set()
                     ),
+                    *(set(_LEGACY_SEARCH_CONTROLS) if raw_version >= 5 else set()),
                 },
                 "schema-v2 learner",
             )
@@ -1229,7 +1375,11 @@ class RuleLoomConfig:
                 if raw_version >= 3 and raw_pack == "configured_paths"
                 else None
             ),
-            learner=LearnerConfig.from_dict(raw_learner, include_signal_gates=raw_version >= 4),
+            learner=LearnerConfig.from_dict(
+                raw_learner,
+                include_signal_gates=raw_version >= 4,
+                include_search_controls=raw_version >= 5,
+            ),
             evaluation=EvaluationConfig.from_dict(raw_evaluation),
             signal_probe=(
                 SignalProbeConfig.from_dict(raw_signal_probe)
@@ -1305,7 +1455,22 @@ def default_config(
             )
         ),
         learner=(
-            LearnerConfig(gate_mode="relative_lift") if schema_version >= 4 else LearnerConfig()
+            LearnerConfig(
+                gate_mode="relative_lift",
+                search_strategy="beam",
+                beam_width=20,
+                max_predicates=64,
+                predicate_ranking="logistic_weight",
+                precision_estimate="wilson_lower",
+                require_temporal_consistency=True,
+                prune_fraction=0.2,
+                permutation_runs=100,
+                tree_seeds=True,
+            )
+            if schema_version >= 5
+            else LearnerConfig(gate_mode="relative_lift")
+            if schema_version >= 4
+            else LearnerConfig()
         ),
         evaluation=EvaluationConfig(test_start_at=test_start_at),
         signal_probe=SignalProbeConfig(enabled=schema_version >= 4),

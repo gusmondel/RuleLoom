@@ -635,6 +635,8 @@ def test_candidate_deduplicates_only_on_temporally_eligible_train() -> None:
         "negative_observations": 3,
         "observed_predicate_count": 2,
         "eligible_representative_count": 1,
+        "search_strategy": "exhaustive",
+        "predicate_ranking": "rate_gap",
         "search_predicates": ["large_change"],
         "constant_predicates": [],
         "duplicate_groups": [
@@ -643,6 +645,7 @@ def test_candidate_deduplicates_only_on_temporally_eligible_train() -> None:
                 "aliases": ["multi_file_change"],
             }
         ],
+        "tree_seed_bodies": [],
     }
     assert any("without consulting holdout" in warning for warning in candidate.warnings)
     assert candidate.metrics["test"].false_negative == 1

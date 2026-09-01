@@ -300,7 +300,7 @@ def test_cli_defaults_to_generic_pack_and_lists_versioned_packs(
     assert exit_code == 0
     assert stderr == ""
     config = RuleLoomConfig.load(repo)
-    assert config.schema_version == 4
+    assert config.schema_version == 5
     assert config.signal_probe.enabled is True
     assert (config.pack, config.pack_version) == ("generic_changes", 2)
 
@@ -492,7 +492,7 @@ def test_cli_initializes_and_collects_with_configured_paths(
     assert "Initialized RuleLoom" in stdout
     assert stderr == ""
     config = RuleLoomConfig.load(repo)
-    assert config.schema_version == 4
+    assert config.schema_version == 5
     assert config.signal_probe.enabled is True
     assert config.evaluation.test_start_at is not None
     assert config.pack_config is not None
