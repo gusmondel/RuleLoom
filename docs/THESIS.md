@@ -253,13 +253,13 @@ yet support third-party pack plugins, so broader extensibility remains unproven.
   mutable current names do not prove what a label was called at the historical
   application time. Strong label-backed outcomes require an external
   point-in-time webhook/export/immutable ledger and normalized event import.
-  v0.9.0 includes a local GitHub Action/webhook capture substrate for future
+  v0.10.0 includes a local GitHub Action/webhook capture substrate for future
   deliveries; it cannot repair a mutable historical archive after the fact.
 - A predictor snapshot must precede its outcome-generating event. A final diff
   containing validation added because of review is not a valid review-time
   predictor, regardless of chronological ordering.
 - Training never uses observations newer than the holdout.
-- Version 0.9.0 historical materialization emits one observation per stable
+- Version 0.10.0 historical materialization emits one observation per stable
   `ChangeUnit`; `learn` rejects duplicate mature `change_id` values and mixed
   unit cohorts. `git_only`/`final_only` and weak-dependent cases are exploratory,
   and they cannot support approval of a learned historical candidate. A manual
@@ -328,7 +328,16 @@ true after a representative pilot:
 Failure is an acceptable result. The pilot is designed to distinguish a useful
 repository-learning loop from a polished demonstration.
 
-## Scope of version 0.9.0
+## Scope of version 0.10.0
+
+Version 0.10.0 keeps the propositional core and adds three bounded capabilities:
+a train-only Horn search with beam refinement, Wilson lower-bound precision,
+temporal-consistency and chronological pruning gates, and a permutation-null
+calibration; weak, opt-in Git-native labels from exact revert trailers and a
+preregistered revert window proven observable by a recorded history horizon;
+and an outcome-blind proposer that instantiates hotspots, owner areas, and
+missing co-change partners as reviewed `generic_changes@3` predicates. None of
+these changes the falsification criteria above.
 
 Included:
 
@@ -372,7 +381,7 @@ Included:
 - schema-v4 train-only rolling-origin signal probes, relative-to-base-rate Horn
   gates, and explicitly exploratory near-miss diagnostics;
 - optional, externally provisioned Popper/MDL integration for noisy labels,
-  restricted in version 0.9.0 to one non-recursive rule and no bootstrap reruns;
+  restricted in version 0.10.0 to one non-recursive rule and no bootstrap reruns;
 - chronological holdout, baselines, confusion metrics, and bootstrap stability;
 - label-availability filtering at the holdout boundary;
 - candidate, shadow, approval, deprecation, local-trust, and agent-sync
