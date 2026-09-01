@@ -27,6 +27,9 @@ Default paths are relative to the initialized repository:
 .ruleloom/
   config.json
   observations.jsonl
+  history/
+    events.jsonl
+    change-units.jsonl
   candidates/
     <candidate-id>.json
   shadow/
@@ -125,7 +128,7 @@ OS user.
 }
 ```
 
-Version 0.3.0 defaults to configuration schema v2 and the language-neutral
+Version 0.4.0 defaults to configuration schema v2 and the language-neutral
 `generic_changes@1` pack. It also ships schema-v3 `configured_paths@1` and
 `flutter_testing@2`. The frozen `flutter_testing@1` implementation exists
 only to read structurally and reproduce the hashes of historical configuration
@@ -245,12 +248,12 @@ Predicate-like fields start with a lowercase letter and contain lowercase ASCII
 letters, numbers, and underscores. `init` derives `repository_id` from
 `remote.origin.url`, or from root commits when no origin exists; initialization
 therefore requires an origin or at least one commit. The storage lock uses POSIX
-`fcntl`: version 0.3.0 supports macOS and Linux, not Windows.
+`fcntl`: version 0.4.0 supports macOS and Linux, not Windows.
 
 The built-in search also enforces finite operational bounds:
 `max_body` 1–4, `max_rules` 1–10, `max_predicates` 1–32,
 `bootstrap_runs` 0–100, and Popper timeout 1–3600 seconds, plus a combined
-hypothesis/work budget. For `engine="popper"`, version 0.3.0 requires
+hypothesis/work budget. For `engine="popper"`, version 0.4.0 requires
 `max_rules=1`, `bootstrap_runs=0`, and the Horn-specific support/precision/cost
 settings at their defaults. Popper is an offline adapter to an explicitly
 configured, already provisioned checkout; RuleLoom does not install it.
@@ -331,7 +334,7 @@ Each non-empty line in `.ruleloom/observations.jsonl` is one object:
 
 | Field | Type | Contract |
 |---|---|---|
-| `schema_version` | integer | Must be artifact schema `1` in version 0.3.0. |
+| `schema_version` | integer | Must be artifact schema `1` in version 0.4.0. |
 | `id` | string | Unique within the dataset; lowercase letters/numbers plus `.`, `_`, or `-`. |
 | `observed_at` | string | Decision-time timestamp with timezone; used for chronological splitting. |
 | `protocol_hash` | string | Lowercase SHA-256 of the configured evidence protocol; evidence with a different hash must not be pooled. |
@@ -381,16 +384,112 @@ authorized audit system. Persisted Git history is ordered by first-parent
 topological position when that provenance is available, otherwise by timestamp
 then ID.
 
-First-parent order establishes an ordering, not a valid decision point. For a
-review-time target, a merge or squash commit may already contain validation
-added because of CI or review. That final diff is post-outcome evidence and must
-not be used as the predictor snapshot, even if its commit timestamp is later and
-the split is chronological. Version 0.3.0 retrospective `learn` accepts only
-`git_commit`, so the historical observation itself must be a genuine pre-event
-commit. A reconstructed `git_range` or `git_worktree` is usable for prospective
-collection/prediction, not retrospective training. If no pre-event commit
-exists, keep the historical case out of confirmatory evaluation; never alter
+First-parent order establishes ordering, not a valid decision point. A merge or
+squash may already contain validation added because of CI or review. Version
+0.4.0 therefore distinguishes raw `git_commit` evidence from grouped
+`historical_change` observations. The latter bind one stable `change_id` to an
+exact `base_sha`, `prediction_sha`, and prediction time. Only a `rich` unit with
+a genuinely persisted point-in-time snapshot can be confirmatory. `git_only`
+and `final_only` cases remain useful for exploration but cannot support approval.
+`git_range` and `git_worktree` remain prospective units. Never alter
 `observed_at` or `available_at` to force eligibility.
+
+## Historical bootstrap records
+
+Historical records use their own artifact schema v1. They are independent of a
+programming language and provider: adapters normalize forge, review, CI, revert,
+and incident data before the evidence pack re-extracts facts from Git.
+
+`.ruleloom/history/events.jsonl` stores immutable `HistoricalEvent` objects:
+
+| Field | Contract |
+|---|---|
+| `id`, `repository_id`, `kind`, `provider` | Safe lowercase identifiers. |
+| `occurred_at` | When the source event happened. |
+| `available_at` | When it became observable; never earlier than `occurred_at`. |
+| `source_ref` | Stable, nonblank provider reference without control characters; imported text is untrusted. |
+| `change_id` | Stable logical change or `null` when not linked. |
+| `independent_group` | Evidence-source group used to avoid double-counting dependent votes. |
+| `data` | Provider-normalized JSON; the core taxonomy makes no source-language assumptions. |
+
+Supported semantic event kinds are `change_opened`, `change_snapshot`,
+`change_merged`, `change_closed`, `change_finalized`, `review`, `ci_run`,
+`revert`, and `incident`. Git ingestion additionally emits `git_commit` and
+`git_merge` metadata events. A point-in-time snapshot carries `base_sha`,
+`head_sha`/`prediction_sha`, and `point_in_time: true`. A structural final event
+carries `final_sha`/`merge_sha`/`head_sha`; an explicit matured
+`change_finalized` outcome instead carries `target`, `value`, and
+`evidence_complete`. It remains an outcome—not structural finalization—even if
+an adapter also includes a SHA. The assembler does not conflate the two roles.
+
+`.ruleloom/history/change-units.jsonl` stores one immutable `ChangeUnit` per
+logical change:
+
+| Field | Contract |
+|---|---|
+| `id`, `repository_id`, `kind` | Stable logical identity and repository boundary. |
+| `base_sha`, `prediction_sha`, `prediction_at` | Exact predictor snapshot and historical decision time. |
+| `final_sha`, `finalized_at` | Both set or both `null`; a rich earlier snapshot never uses the final state as its predictor. |
+| `commits`, `event_ids` | Deduplicated provenance; every event ID must resolve in the same repository and may be unscoped only through this explicit attachment. |
+| `provider`, `source_ref` | Origin of the prediction snapshot. |
+| `evidence_quality` | `rich`, `git_only`, or `final_only`. |
+| `confirmatory` | May be true only for `rich` point-in-time units. |
+
+For a confirmatory unit, the matching snapshot event must itself have been
+available no later than `prediction_at`; a snapshot reconstructed or exposed
+only afterward remains non-confirmatory even when its SHAs are exact.
+
+The JSONL stores are canonical, size-bounded, lock-protected, and immutable by
+ID. Each history log and imported JSONL is limited to 64 MiB, each persisted
+canonical record or imported input line to 1 MiB, and each file to 250,000
+records. Imports use the same shared limits as persistence, so an exported valid
+store remains importable. Conflicting ID reuse fails before overwrite.
+
+Git bootstrap additionally caps traversal at 100,000 commits and retains the
+most recent prefix whose canonical event and change-unit logs both fit. Its
+report exposes `storage_truncated`, `storage_byte_limit`,
+`storage_line_byte_limit`, `event_log_bytes`, and `change_unit_log_bytes`.
+Those fields, the ordinary `truncated` decision, and the retained records are
+covered by `manifest_hash`; a consumer must not interpret a storage-truncated
+sample as complete repository history.
+
+`history materialize` re-extracts the configured pack at the prediction SHA,
+sets `source.kind=historical_change`, and attaches only strictly later outcomes.
+New immutable outcome events can be appended and materialized again. That may
+advance an `unknown` derived label to `positive` or `negative`; a mature label,
+prediction snapshot, evidence protocol, outcome target, and weak-evidence mode
+cannot be rewritten in place. Each observation hashes only the events linked to
+its logical change, so unrelated imports do not mutate its provenance.
+Structural snapshot and finalization events must be complete before the unit ID
+is assembled. Streaming exporters should import early structural events with
+`--no-assemble`, then assemble once; the current schema does not mutate an open
+unit into finalized or upgrade `final_only` into `rich`.
+
+Four outcome targets remain separate:
+
+- `validation_rework_required`;
+- `change_attributable_ci_failure`;
+- `post_merge_revert_or_hotfix`; and
+- `post_merge_defect`.
+
+The selected atomic outcome is registered through the frozen config `target`
+(the legacy `needs_extra_validation` target maps only to
+`validation_rework_required`). `--outcome-target` can assert that mapping but
+cannot override it. Studying another outcome requires a separate experiment
+whose target and operational `protocol.outcome_definition` were fixed before
+labels were inspected; both are covered by the evidence protocol hash.
+
+Strong review/CI/link evidence and explicit complete maturation records are
+enabled by default. Test changes alone, fix keywords, and SZZ links are weak and
+require explicit opt-in. Absence, malformed events, and conflicting independent
+votes produce `unknown`; they never produce an implicit negative. Weak-dependent
+labels and non-rich units are non-confirmatory, and approval rejects a candidate
+trained from any such historical case.
+
+A strong CI sequence requires strictly ordered failure, code-change, and success
+times, the same provider, and the same provider-scoped stable `check_id` for the
+failure and success. Adapters must namespace that identity where provider names
+are not globally unique.
 
 ### Labels
 
@@ -428,12 +527,11 @@ only when `available_at` is strictly later than that unit's earliest
 `predicted_at` within the policy set.
 
 The same independent change must not appear on both sides of a retrospective
-split through multiple commits. Current topological/timestamp ordering does not
-infer PR membership or group by `change_id`, and `learn` does not accept range or
-worktree observations. A confirmatory v0.3.0 cohort must therefore contain at
-most one independently auditable `git_commit` per real-world change; otherwise
-classify the analysis as exploratory. Group-aware training by change ID or range
-is future work.
+split through multiple snapshots. Version 0.4.0 materializes one observation per
+`ChangeUnit`, and `learn` rejects duplicate mature `change_id` values. It also
+rejects mixing `git_commit` and `historical_change` cohorts. A raw commit cohort
+still needs manual independence auditing; grouped history is the preferred
+bootstrap path.
 
 ### Fact evidence
 
@@ -447,7 +545,7 @@ Each `fact_evidence` entry contains:
 | `confidence` | number or absent | Optional value from 0 through 1, mainly for non-deterministic facts. |
 
 `agent`, `human`, and `imported` are reserved wire-format values for future
-extractors and migration tooling. In version 0.3.0, current built-in-pack
+extractors and migration tooling. In version 0.4.0, current built-in-pack
 observations are accepted for validation, learning, and prediction only when
 every fact has `kind: "deterministic"` and names the exact configured extractor.
 A record using a reserved non-deterministic kind may be read structurally, but
@@ -480,7 +578,7 @@ missing diff is extraction failure or ineligibility, never logical falsehood.
 
 ## Rule representation
 
-Version 0.3.0 is propositionalized ILP over one change at a time. Each fact is a
+Version 0.4.0 is propositionalized ILP over one change at a time. Each fact is a
 Boolean unary predicate of the same observation variable `A`; there are no
 multiple entity variables, relations between files/types/people, relational
 joins, recursion, predicate invention, or arbitrary Prolog programs. A rule set
@@ -778,7 +876,7 @@ eligible for prospective confusion metrics. `excluded_preexisting_outcome`
 prevents a retrospectively known answer from masquerading as a prediction. Use
 `report --policy-set <hash>` for the unwrapped single-policy report. The report
 describes aggregate prospective association, never a causal estimate; causal
-impact needs a randomized or pre-specified staged advisory rollout. Version 0.3.0
+impact needs a randomized or pre-specified staged advisory rollout. Version 0.4.0
 does not emit confidence intervals or per-clause prospective tables in this
 report. Promotion separately evaluates the registered Wilson lower-bound and
 per-clause gates described above.

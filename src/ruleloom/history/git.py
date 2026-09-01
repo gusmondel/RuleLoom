@@ -1,0 +1,625 @@
+"""Deterministic, language-agnostic bootstrap from the Git object graph.
+
+This module deliberately collects commit topology and headers only.  It does
+not inspect paths, patches, source files, or programming-language metadata.
+Provider-specific PR, CI, review, and incident evidence belongs in separate
+adapters that can link back to the emitted change units.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+import subprocess
+import threading
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from pathlib import Path
+from typing import BinaryIO
+
+from ruleloom.gitfacts import repository_identity
+from ruleloom.history.models import ChangeUnit, HistoricalEvent
+from ruleloom.history.storage import HISTORY_JSONL_MAX_BYTES, HISTORY_JSONL_MAX_LINE_BYTES
+from ruleloom.models import (
+    JsonObject,
+    ModelError,
+    canonical_json,
+    content_hash,
+    parse_timestamp,
+    validate_subject,
+)
+
+_GIT_TIMEOUT_SECONDS = 45.0
+_MAX_GIT_STDOUT_BYTES = 64 * 1024 * 1024
+_MAX_GIT_STDERR_BYTES = 1024 * 1024
+_MAX_GIT_INPUT_BYTES = 1024
+_MAX_REF_BYTES = 1024
+_MAX_SUBJECT_BYTES = 512
+_MAX_COMMITS = 100_000
+_LOG_FIELD_SEPARATOR = b"\x1f"
+_LOG_RECORD_SEPARATOR = b"\x00"
+_LOG_FORMAT = "%H%x1f%P%x1f%cI%x1f%an%x1f%ae%x1f%s%x00"
+_OID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
+
+
+class GitHistoryError(RuntimeError):
+    """Raised when historical Git metadata cannot be collected safely."""
+
+
+@dataclass(frozen=True, slots=True)
+class GitHistoryReport:
+    """Auditable result of a bounded traversal of one Git revision."""
+
+    events: tuple[HistoricalEvent, ...]
+    units: tuple[ChangeUnit, ...]
+    examined: int
+    shallow: bool
+    truncated: bool
+    warnings: tuple[str, ...]
+    manifest_hash: str
+    resolved_ref: str
+    since: str | None
+    requested_max_commits: int | None
+    storage_truncated: bool
+    storage_byte_limit: int
+    storage_line_byte_limit: int
+    event_log_bytes: int
+    change_unit_log_bytes: int
+
+    @property
+    def event_count(self) -> int:
+        return len(self.events)
+
+    @property
+    def unit_count(self) -> int:
+        return len(self.units)
+
+    def to_dict(self) -> JsonObject:
+        return {
+            "examined": self.examined,
+            "events": self.event_count,
+            "units": self.unit_count,
+            "shallow": self.shallow,
+            "truncated": self.truncated,
+            "warnings": list(self.warnings),
+            "manifest_hash": self.manifest_hash,
+            "resolved_ref": self.resolved_ref,
+            "since": self.since,
+            "requested_max_commits": self.requested_max_commits,
+            "storage_truncated": self.storage_truncated,
+            "storage_byte_limit": self.storage_byte_limit,
+            "storage_line_byte_limit": self.storage_line_byte_limit,
+            "event_log_bytes": self.event_log_bytes,
+            "change_unit_log_bytes": self.change_unit_log_bytes,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class _CommitHeader:
+    sha: str
+    parents: tuple[str, ...]
+    committed_at: str
+    author_name: str
+    author_email: str
+    subject: str
+
+
+def _run_git_bounded(
+    repo: Path,
+    arguments: tuple[str, ...],
+    *,
+    input_bytes: bytes | None = None,
+    stdout_limit: int = _MAX_GIT_STDOUT_BYTES,
+) -> tuple[bytes, bytes, int]:
+    """Execute Git without a shell while enforcing time and output budgets."""
+    if input_bytes is not None and len(input_bytes) > _MAX_GIT_INPUT_BYTES:
+        raise GitHistoryError(f"Git stdin exceeds {_MAX_GIT_INPUT_BYTES} bytes")
+    try:
+        process = subprocess.Popen(
+            ("git", "-C", str(repo), *arguments),
+            stdin=subprocess.PIPE if input_bytes is not None else subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            shell=False,
+        )
+    except FileNotFoundError as exc:
+        raise GitHistoryError("Git is not installed or is not available on PATH") from exc
+
+    if input_bytes is not None:
+        assert process.stdin is not None
+        try:
+            process.stdin.write(input_bytes)
+        except BrokenPipeError as exc:
+            process.wait()
+            raise GitHistoryError(f"git {' '.join(arguments)} closed stdin early") from exc
+        finally:
+            process.stdin.close()
+
+    assert process.stdout is not None
+    assert process.stderr is not None
+    buffers = {"stdout": bytearray(), "stderr": bytearray()}
+    violation = threading.Event()
+    violation_messages: list[str] = []
+
+    def drain(name: str, stream: BinaryIO, limit: int) -> None:
+        while True:
+            chunk = stream.read(64 * 1024)
+            if not chunk:
+                return
+            if len(buffers[name]) + len(chunk) > limit:
+                violation_messages.append(f"git {' '.join(arguments)} {name} exceeds {limit} bytes")
+                violation.set()
+                return
+            buffers[name].extend(chunk)
+
+    readers = (
+        threading.Thread(
+            target=drain,
+            args=("stdout", process.stdout, stdout_limit),
+            daemon=True,
+        ),
+        threading.Thread(
+            target=drain,
+            args=("stderr", process.stderr, _MAX_GIT_STDERR_BYTES),
+            daemon=True,
+        ),
+    )
+    for reader in readers:
+        reader.start()
+
+    deadline = time.monotonic() + _GIT_TIMEOUT_SECONDS
+    try:
+        while process.poll() is None:
+            if violation.is_set():
+                process.kill()
+                process.wait()
+                raise GitHistoryError(violation_messages[0])
+            if time.monotonic() >= deadline:
+                process.kill()
+                process.wait()
+                raise GitHistoryError(
+                    f"git {' '.join(arguments)} exceeded {_GIT_TIMEOUT_SECONDS:g} seconds"
+                )
+            time.sleep(0.01)
+
+        returncode = process.wait()
+        for reader in readers:
+            reader.join(timeout=1)
+        if any(reader.is_alive() for reader in readers):
+            process.kill()
+            process.wait()
+            raise GitHistoryError(f"git {' '.join(arguments)} output readers did not terminate")
+        if violation.is_set():
+            raise GitHistoryError(violation_messages[0])
+    finally:
+        process.stdout.close()
+        process.stderr.close()
+
+    return bytes(buffers["stdout"]), bytes(buffers["stderr"]), returncode
+
+
+def _git_bytes(
+    repo: Path,
+    *arguments: str,
+    input_bytes: bytes | None = None,
+    stdout_limit: int = _MAX_GIT_STDOUT_BYTES,
+) -> bytes:
+    stdout, stderr, returncode = _run_git_bounded(
+        repo,
+        arguments,
+        input_bytes=input_bytes,
+        stdout_limit=stdout_limit,
+    )
+    if returncode != 0:
+        detail = stderr.decode("utf-8", errors="replace").strip() or "unknown Git error"
+        raise GitHistoryError(f"git {' '.join(arguments)} failed: {detail}")
+    return stdout
+
+
+def _decode_git_text(value: bytes, *, field_name: str) -> str:
+    try:
+        return value.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise GitHistoryError(
+            f"Git returned non-UTF-8 {field_name}; RuleLoom refuses lossy historical evidence"
+        ) from exc
+
+
+def _git_text(
+    repo: Path,
+    *arguments: str,
+    input_bytes: bytes | None = None,
+    stdout_limit: int = _MAX_GIT_STDOUT_BYTES,
+) -> str:
+    return _decode_git_text(
+        _git_bytes(
+            repo,
+            *arguments,
+            input_bytes=input_bytes,
+            stdout_limit=stdout_limit,
+        ),
+        field_name="metadata",
+    )
+
+
+def _validate_ref(ref: str) -> str:
+    if not isinstance(ref, str) or not ref:
+        raise GitHistoryError("ref must be a non-empty string")
+    try:
+        encoded = ref.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise GitHistoryError("ref must be valid UTF-8") from exc
+    if len(encoded) > _MAX_REF_BYTES:
+        raise GitHistoryError(f"ref exceeds {_MAX_REF_BYTES} UTF-8 bytes")
+    if ref.startswith("-") or any(character in ref for character in ("\x00", "\n", "\r")):
+        raise GitHistoryError("ref contains unsafe characters")
+    return ref
+
+
+def _validate_max_commits(max_commits: int | None) -> int:
+    if max_commits is None:
+        return _MAX_COMMITS
+    if isinstance(max_commits, bool) or not isinstance(max_commits, int):
+        raise GitHistoryError("max_commits must be a positive integer or null")
+    if not 1 <= max_commits <= _MAX_COMMITS:
+        raise GitHistoryError(f"max_commits must be between 1 and {_MAX_COMMITS}")
+    return max_commits
+
+
+def _normalize_since(since: str | datetime | None) -> str | None:
+    if since is None:
+        return None
+    if isinstance(since, datetime):
+        parsed = since
+        if parsed.tzinfo is None:
+            raise GitHistoryError("since must include a timezone")
+    elif isinstance(since, str):
+        try:
+            parsed = parse_timestamp(since)
+        except ValueError as exc:
+            raise GitHistoryError("since must be an aware ISO-8601 timestamp") from exc
+    else:
+        raise GitHistoryError("since must be an aware ISO-8601 timestamp or null")
+    normalized = parsed.astimezone(UTC)
+    timespec = "microseconds" if normalized.microsecond else "seconds"
+    return normalized.isoformat(timespec=timespec).replace("+00:00", "Z")
+
+
+def _validate_repository_id(repository_id: str) -> str:
+    if not isinstance(repository_id, str):
+        raise GitHistoryError("repository_id must be a stable RuleLoom identifier")
+    try:
+        return validate_subject(repository_id)
+    except ModelError as exc:
+        raise GitHistoryError("repository_id must be a stable RuleLoom identifier") from exc
+
+
+def _validate_oid(value: str, *, field_name: str) -> str:
+    if not _OID_RE.fullmatch(value):
+        raise GitHistoryError(f"Git returned an invalid {field_name}: {value!r}")
+    return value
+
+
+def _parse_log(stdout: bytes) -> tuple[_CommitHeader, ...]:
+    records: list[_CommitHeader] = []
+    for raw_record in stdout.split(_LOG_RECORD_SEPARATOR):
+        if raw_record.startswith(b"\n"):
+            raw_record = raw_record[1:]
+        if not raw_record or raw_record == b"\n":
+            continue
+        if raw_record.endswith(b"\n"):
+            raw_record = raw_record[:-1]
+        fields = raw_record.split(_LOG_FIELD_SEPARATOR)
+        if len(fields) != 6:
+            raise GitHistoryError("Git returned a malformed historical commit record")
+        sha, raw_parents, committed_at, author_name, author_email, subject = (
+            _decode_git_text(field, field_name="commit metadata") for field in fields
+        )
+        parents = tuple(raw_parents.split()) if raw_parents else ()
+        _validate_oid(sha, field_name="commit object ID")
+        for parent in parents:
+            _validate_oid(parent, field_name="parent object ID")
+        try:
+            parse_timestamp(committed_at)
+        except ValueError as exc:
+            raise GitHistoryError(
+                f"Git returned an invalid commit timestamp: {committed_at!r}"
+            ) from exc
+        records.append(
+            _CommitHeader(
+                sha=sha,
+                parents=parents,
+                committed_at=committed_at,
+                author_name=author_name,
+                author_email=author_email,
+                subject=subject,
+            )
+        )
+    return tuple(records)
+
+
+def _bounded_subject(subject: str) -> tuple[str, bool]:
+    encoded = subject.encode("utf-8")
+    if len(encoded) <= _MAX_SUBJECT_BYTES:
+        return subject, False
+    prefix = encoded[: _MAX_SUBJECT_BYTES - len("…".encode())]
+    while True:
+        try:
+            return prefix.decode("utf-8") + "…", True
+        except UnicodeDecodeError:
+            prefix = prefix[:-1]
+
+
+def _author_hash(repository_id: str, name: str, email: str) -> str:
+    identity = (
+        b"ruleloom.git.author.v1\x00"
+        + repository_id.encode("utf-8")
+        + b"\x00"
+        + name.encode("utf-8")
+        + b"\x00"
+        + email.encode("utf-8")
+    )
+    return hashlib.sha256(identity).hexdigest()
+
+
+def _event_and_unit(
+    header: _CommitHeader,
+    *,
+    repository_id: str,
+    empty_tree: str,
+) -> tuple[HistoricalEvent, ChangeUnit]:
+    is_merge = len(header.parents) > 1
+    kind = "git_merge" if is_merge else "git_commit"
+    event_id = f"event.{kind}.{header.sha}"
+    change_id = f"change.{kind}.{header.sha}"
+    subject, subject_truncated = _bounded_subject(header.subject)
+    event = HistoricalEvent(
+        schema_version=1,
+        id=event_id,
+        repository_id=repository_id,
+        kind=kind,
+        occurred_at=header.committed_at,
+        available_at=header.committed_at,
+        provider="git",
+        source_ref=header.sha,
+        independent_group=change_id,
+        data={
+            "sha": header.sha,
+            "parents": list(header.parents),
+            "committed_at": header.committed_at,
+            "subject": subject,
+            "subject_hash": hashlib.sha256(header.subject.encode("utf-8")).hexdigest(),
+            "subject_truncated": subject_truncated,
+            "author_hash": _author_hash(
+                repository_id,
+                header.author_name,
+                header.author_email,
+            ),
+        },
+        change_id=change_id,
+    )
+    unit = ChangeUnit(
+        schema_version=1,
+        id=change_id,
+        repository_id=repository_id,
+        kind=kind,
+        base_sha=header.parents[0] if header.parents else empty_tree,
+        prediction_sha=header.sha,
+        prediction_at=header.committed_at,
+        commits=(header.sha,),
+        event_ids=(event_id,),
+        provider="git",
+        source_ref=header.sha,
+        evidence_quality="final_only" if is_merge else "git_only",
+        confirmatory=False,
+        final_sha=header.sha if is_merge else None,
+        finalized_at=header.committed_at if is_merge else None,
+    )
+    return event, unit
+
+
+def _canonical_record_bytes(record: HistoricalEvent | ChangeUnit) -> int:
+    """Return canonical UTF-8 record bytes, excluding the JSONL newline."""
+    return len(canonical_json(record.to_dict()).encode("utf-8"))
+
+
+def collect_git_history(
+    repo: Path,
+    *,
+    ref: str = "HEAD",
+    max_commits: int | None = 1_000,
+    since: str | datetime | None = None,
+    repository_id: str | None = None,
+) -> GitHistoryReport:
+    """Collect bounded historical evidence from one revision.
+
+    The most recent ``max_commits`` reachable commits are selected and emitted
+    oldest-first in reverse date/topological order.  ``None`` requests all
+    reachable history up to the hard safety cap; truncation is always explicit
+    in the returned report.
+    """
+    requested_ref = _validate_ref(ref)
+    effective_limit = _validate_max_commits(max_commits)
+    normalized_since = _normalize_since(since)
+    resolved_repo = repo.resolve()
+    if not resolved_repo.is_dir():
+        raise GitHistoryError(f"repository directory does not exist: {resolved_repo}")
+    top_level_text = _git_text(
+        resolved_repo,
+        "rev-parse",
+        "--show-toplevel",
+        stdout_limit=16 * 1024,
+    ).strip()
+    if not top_level_text:
+        raise GitHistoryError("Git returned an empty repository root")
+    top_level = Path(top_level_text).resolve()
+
+    resolved_ref = _git_text(
+        top_level,
+        "rev-parse",
+        "--verify",
+        "--end-of-options",
+        f"{requested_ref}^{{commit}}",
+        stdout_limit=1024,
+    ).strip()
+    _validate_oid(resolved_ref, field_name="resolved revision")
+    effective_repository_id = _validate_repository_id(
+        repository_id if repository_id is not None else repository_identity(top_level)
+    )
+
+    shallow_text = _git_text(
+        top_level,
+        "rev-parse",
+        "--is-shallow-repository",
+        stdout_limit=128,
+    ).strip()
+    if shallow_text not in {"true", "false"}:
+        raise GitHistoryError(f"Git returned an invalid shallow status: {shallow_text!r}")
+    shallow = shallow_text == "true"
+
+    empty_tree = _git_text(
+        top_level,
+        "hash-object",
+        "-t",
+        "tree",
+        "--stdin",
+        input_bytes=b"",
+        stdout_limit=1024,
+    ).strip()
+    _validate_oid(empty_tree, field_name="empty-tree object ID")
+
+    log_arguments = [
+        "log",
+        "--date-order",
+        f"--max-count={effective_limit + 1}",
+        f"--format={_LOG_FORMAT}",
+        "--no-decorate",
+    ]
+    if normalized_since is not None:
+        log_arguments.append(f"--since={normalized_since}")
+    log_arguments.extend(("--end-of-options", resolved_ref))
+    newest_first = _parse_log(_git_bytes(top_level, *log_arguments))
+
+    unique_newest_first: list[_CommitHeader] = []
+    seen: set[str] = set()
+    duplicate_count = 0
+    for header in newest_first:
+        if header.sha in seen:
+            duplicate_count += 1
+            continue
+        seen.add(header.sha)
+        unique_newest_first.append(header)
+
+    commit_limit_truncated = len(unique_newest_first) > effective_limit
+    selected_newest_first: list[tuple[HistoricalEvent, ChangeUnit]] = []
+    event_log_bytes = 0
+    change_unit_log_bytes = 0
+    storage_truncated = False
+    storage_truncation_detail = ""
+    for header in unique_newest_first[:effective_limit]:
+        event, unit = _event_and_unit(
+            header,
+            repository_id=effective_repository_id,
+            empty_tree=empty_tree,
+        )
+        event_record_bytes = _canonical_record_bytes(event)
+        unit_record_bytes = _canonical_record_bytes(unit)
+        if (
+            event_record_bytes > HISTORY_JSONL_MAX_LINE_BYTES
+            or unit_record_bytes > HISTORY_JSONL_MAX_LINE_BYTES
+        ):
+            storage_truncated = True
+            storage_truncation_detail = (
+                f"the next canonical record exceeds {HISTORY_JSONL_MAX_LINE_BYTES} bytes"
+            )
+            break
+        event_line_bytes = event_record_bytes + 1
+        unit_line_bytes = unit_record_bytes + 1
+        if (
+            event_log_bytes + event_line_bytes > HISTORY_JSONL_MAX_BYTES
+            or change_unit_log_bytes + unit_line_bytes > HISTORY_JSONL_MAX_BYTES
+        ):
+            storage_truncated = True
+            storage_truncation_detail = (
+                f"the next record would exceed {HISTORY_JSONL_MAX_BYTES} bytes per log"
+            )
+            break
+        selected_newest_first.append((event, unit))
+        event_log_bytes += event_line_bytes
+        change_unit_log_bytes += unit_line_bytes
+
+    truncated = commit_limit_truncated or storage_truncated
+    warnings: list[str] = []
+    if shallow:
+        warnings.append("repository is shallow; history before the shallow boundary is unavailable")
+    if commit_limit_truncated:
+        requested = "the hard safety cap" if max_commits is None else "max_commits"
+        warnings.append(
+            f"history was truncated by {requested} to {effective_limit} most recent commits"
+        )
+    if storage_truncated:
+        warnings.append(
+            "history was truncated by canonical storage limits to "
+            f"{len(selected_newest_first)} most recent commits: {storage_truncation_detail}"
+        )
+    if duplicate_count:
+        warnings.append(
+            f"Git returned {duplicate_count} duplicate commit record(s); duplicates were ignored"
+        )
+
+    selected_oldest_first = tuple(reversed(selected_newest_first))
+    events = [event for event, _unit in selected_oldest_first]
+    units = [unit for _event, unit in selected_oldest_first]
+
+    manifest: JsonObject = {
+        "schema_version": 1,
+        "repository_id": effective_repository_id,
+        "resolved_ref": resolved_ref,
+        "since": normalized_since,
+        "requested_max_commits": max_commits,
+        "shallow": shallow,
+        "truncated": truncated,
+        "storage_truncated": storage_truncated,
+        "storage_byte_limit": HISTORY_JSONL_MAX_BYTES,
+        "storage_line_byte_limit": HISTORY_JSONL_MAX_LINE_BYTES,
+        "event_log_bytes": event_log_bytes,
+        "change_unit_log_bytes": change_unit_log_bytes,
+        "events": [event.to_dict() for event in events],
+        "change_units": [unit.to_dict() for unit in units],
+    }
+    return GitHistoryReport(
+        events=tuple(events),
+        units=tuple(units),
+        examined=len(events),
+        shallow=shallow,
+        truncated=truncated,
+        warnings=tuple(warnings),
+        manifest_hash=content_hash(manifest),
+        resolved_ref=resolved_ref,
+        since=normalized_since,
+        requested_max_commits=max_commits,
+        storage_truncated=storage_truncated,
+        storage_byte_limit=HISTORY_JSONL_MAX_BYTES,
+        storage_line_byte_limit=HISTORY_JSONL_MAX_LINE_BYTES,
+        event_log_bytes=event_log_bytes,
+        change_unit_log_bytes=change_unit_log_bytes,
+    )
+
+
+def ingest_git_history(
+    repo: Path,
+    *,
+    ref: str = "HEAD",
+    max_commits: int | None = 1_000,
+    since: str | datetime | None = None,
+    repository_id: str | None = None,
+) -> GitHistoryReport:
+    """Compatibility alias using ingestion terminology."""
+    return collect_git_history(
+        repo,
+        ref=ref,
+        max_commits=max_commits,
+        since=since,
+        repository_id=repository_id,
+    )

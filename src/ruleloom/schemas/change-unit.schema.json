@@ -1,0 +1,82 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ruleloom:schema:change-unit:v1",
+  "title": "RuleLoom change unit v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "repository_id",
+    "kind",
+    "base_sha",
+    "prediction_sha",
+    "prediction_at",
+    "final_sha",
+    "finalized_at",
+    "commits",
+    "event_ids",
+    "provider",
+    "source_ref",
+    "evidence_quality",
+    "confirmatory"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"$ref": "#/$defs/subject"},
+    "repository_id": {"$ref": "#/$defs/subject"},
+    "kind": {"$ref": "#/$defs/subject"},
+    "base_sha": {"$ref": "#/$defs/gitSha"},
+    "prediction_sha": {"$ref": "#/$defs/gitSha"},
+    "prediction_at": {"type": "string", "format": "date-time"},
+    "final_sha": {
+      "anyOf": [{"$ref": "#/$defs/gitSha"}, {"type": "null"}]
+    },
+    "finalized_at": {
+      "anyOf": [{"type": "string", "format": "date-time"}, {"type": "null"}]
+    },
+    "commits": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/gitSha"}
+    },
+    "event_ids": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/subject"}
+    },
+    "provider": {"$ref": "#/$defs/subject"},
+    "source_ref": {
+      "type": "string",
+      "pattern": "^(?=.*\\S)[^\\u0000-\\u001F\\u007F]*$"
+    },
+    "evidence_quality": {"enum": ["rich", "git_only", "final_only"]},
+    "confirmatory": {"type": "boolean"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"confirmatory": {"const": true}}},
+      "then": {"properties": {"evidence_quality": {"const": "rich"}}}
+    },
+    {
+      "if": {"properties": {"final_sha": {"type": "null"}}},
+      "then": {"properties": {"finalized_at": {"type": "null"}}},
+      "else": {"properties": {"finalized_at": {"type": "string"}}}
+    },
+    {
+      "if": {"properties": {"finalized_at": {"type": "null"}}},
+      "then": {"properties": {"final_sha": {"type": "null"}}},
+      "else": {"properties": {"final_sha": {"type": "string"}}}
+    }
+  ],
+  "$defs": {
+    "subject": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$"
+    },
+    "gitSha": {
+      "type": "string",
+      "pattern": "^(?:[0-9a-f]{40}|[0-9a-f]{64})$"
+    }
+  }
+}

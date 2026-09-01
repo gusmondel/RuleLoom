@@ -31,8 +31,8 @@ record with the pilot artifacts if the repository owner's data policy permits it
 |---|---|
 | Experiment ID | One stable ID for this pre-registered protocol; change it when the contract changes |
 | Repository ID | The identity derived by `init`; never pool another repository |
-| Unit of observation | Retrospective `learn` accepts only `git_commit`, whose contents and timestamp must predate the outcome. `git_range`/`git_worktree` are prospective collection/prediction snapshots, never retrospective training input; do not pool unit kinds |
-| Independent-unit/group key | External stable PR/task/change identity used to audit independence. Version 0.3.0 does not group retrospective commits by this key; grouped change/range training is future work |
+| Unit of observation | Prefer one grouped `historical_change` per logical change. Raw `git_commit` cohorts remain supported separately and exploratory unless independently curated. `git_range`/`git_worktree` are prospective units; never pool unit kinds. |
+| Independent-unit/group key | Stable PR/task/change ID. Materialization emits one observation per `ChangeUnit`; `learn` rejects duplicate mature `change_id` values. Evidence-source `independent_group` prevents dependent votes from masquerading as corroboration. |
 | Prediction time | Exact workflow point and immutable commit SHA for retrospective training, or base/head/worktree snapshot for prospective prediction |
 | Target | One outcome with a single operational definition |
 | Evidence profile | Schema version plus one exact `pack@version`; use schema-v2 `generic_changes@1` unless the experiment has pre-registered a supported specialized or schema-v3 configurable pack |
@@ -47,7 +47,7 @@ record with the pilot artifacts if the repository owner's data policy permits it
 | Unknown label | Every case not yet mature or not adjudicable |
 | Maturation window | Time or workflow event after which negative is allowed |
 | Retrospective window | Oldest and newest eligible historical change |
-| Holdout rule | Latest chronological `git_commit` fraction, never random. Because splitting is not group-aware, admit only one demonstrably independent commit per real-world change or classify the result as exploratory |
+| Holdout rule | Latest chronological grouped changes, never random. In a raw-commit fallback, admit only one independently audited commit per real-world change or classify it as exploratory. |
 | Confirmation window | Untouched future interval reserved for any design selected after exploratory analysis |
 | Primary predictive metric | Suggested: MCC for the promotion comparison; precision may be the operational priority when false prompts dominate cost |
 | Secondary metrics | Precision, recall, F1, balanced accuracy, prevalence, predicted-positive rate, coverage, confusion counts |
@@ -95,13 +95,17 @@ reformatting may retain identity only when the resulting hash is unchanged.
 
 ## Recommended first target
 
-The default target is `needs_extra_validation`. For the first pilot, keep it
-narrow and tied to the normal review process:
+The default configured target is `needs_extra_validation`; historical
+materialization maps it to the atomic event target
+`validation_rework_required`. Keep it narrow and tied to the normal review
+process:
 
-- **Positive:** after the prediction point, an independent CI or human review
-  signal identifies a concrete missing validation and the change is updated with
-  that validation (for example, an accepted request for an automated test,
-  contract check, or reproducible failing scenario).
+- **Positive:** after the prediction point, an independent human review request
+  identifies a concrete missing validation (for example, an accepted request
+  for an automated test, contract check, or reproducible failing scenario). A
+  later validating update may corroborate the request but is not required by
+  this target. A provider adapter may instead emit an explicit, complete matured
+  outcome under this same registered definition.
 - **Negative:** the chosen review/maturation event completes without such a
   signal.
 - **Unknown:** review is ongoing, the outcome is ambiguous, the change was
@@ -114,11 +118,11 @@ label from the same diff pattern used to generate the facts.
 Conversely, a test or validation path added in response to the review request is
 part of the outcome process and must not appear in the predictor snapshot. For
 this target, a final merge/squash diff is usually too late unless evidence proves
-that no target event preceded or changed it. A confirmatory retrospective
-observation must itself be a pre-event `git_commit`; version 0.3.0 cannot train
-on a reconstructed `git_range` or `git_worktree`. If such a commit or reliable
-event ordering is unavailable, label the retrospective case `unknown` or exclude
-it from confirmatory evaluation and collect prospectively; never rewrite its
+that no target event preceded or changed it. A confirmatory historical
+`ChangeUnit` must carry an exact point-in-time base/prediction SHA before the
+event and `evidence_quality=rich`. Git-only or final-only reconstruction is
+exploratory and cannot support approval. If reliable event ordering is
+unavailable, keep the case `unknown` or collect prospectively; never rewrite its
 timestamps.
 
 Post-merge regressions should be a separate target with a longer maturity
@@ -143,9 +147,9 @@ Before initializing the target repository:
 - for `configured_paths@1`, preserve the canonical config/hash, outcome-blind
   design revision and rationale, roles, lock time, and all configuration
   attempts before opening outcome sources;
-- verify that every historical predictor snapshot predates its prospective
-  review/CI outcome; admit one independent commit per real-world change because
-  the retrospective splitter cannot enforce PR/change grouping;
+- verify that every historical predictor snapshot predates its review/CI
+  outcome; require one stable `ChangeUnit` ID per logical change and audit any
+  raw-commit fallback manually;
 - decide which retrospective `.ruleloom` artifacts data policy permits; keep
   shadow and prediction material out of any checkout visible to the agent or
   outcome adjudicator;
@@ -275,6 +279,47 @@ install them. The Popper adapter has not yet completed a real end-to-end run in
 the reference development environment, so an initial installation must use
 `horn`.
 
+Bootstrap the existing Git graph before waiting for new changes:
+
+```bash
+ruleloom history bootstrap-git --all
+ruleloom history status
+```
+
+`--all` retains the most recent reachable prefix until the first of three bounds:
+100,000 commits, 64 MiB in either canonical history JSONL, or 1 MiB for one
+canonical record. The JSON report states shallow/truncated status,
+`storage_truncated`, exact event/unit byte totals, both storage limits, and a
+manifest hash covering those decisions. Record these fields so a byte-limited
+sample is not mistaken for complete history. This step is language-neutral and
+immediately measures repository volume, but its `git_only`/`final_only` units
+are exploratory because Git alone does not prove a PR-time decision point or
+independent outcome.
+
+For confirmatory reconstruction, export authorized forge/review/CI/incident
+history into the normalized historical-event v1 JSONL contract, then run:
+
+```bash
+ruleloom history import --events /absolute/path/to/historical-events.jsonl
+ruleloom history materialize
+ruleloom history status
+```
+
+The importer assembles logical changes by stable `change_id`. A
+`change_snapshot` becomes rich only when it contains exact `base_sha`,
+`head_sha`/`prediction_sha`, and `point_in_time: true`. Provider text is never
+treated as instructions or as a fact. Strong outcomes are enabled by default;
+do not pass `--include-weak` in a confirmatory pilot. If an adapter already
+emits reviewed `ChangeUnit` records, import them with `--units`. The two JSONL
+stores are immutable by ID, so preserve the complete extraction and do not
+reuse an ID for corrected semantics.
+
+For a streaming export, import incomplete structural lifecycle events with
+`--no-assemble` and assemble only after the prediction/finalization set is
+complete. Later outcome-only events can be appended and rematerialized; an
+already-created unit cannot be upgraded from open to finalized or from
+`final_only` to `rich` in schema v1.
+
 Collect a small known range first:
 
 ```bash
@@ -314,8 +359,9 @@ sides of every include/exclude boundary. For every audited observation check:
 - `scope_outside_files` is zero; mixed and wholly out-of-scope units were not
   admitted to the dataset;
 - labels remain `unknown` until the registered maturity event;
-- the retrospective cohort contains at most one independently auditable commit
-  per real-world change; the current learner cannot enforce grouping itself;
+- the preferred historical cohort contains exactly one materialized observation
+  per stable `ChangeUnit`; a raw-commit fallback contains at most one independently
+  audited commit per real-world change;
 - a configurable-pack source's `pack_config_hash` and extraction metadata's
   `configured_paths_config_hash` both equal the exact locked hash;
 - rerunning collection produces the same facts and no duplicate ID.
@@ -364,7 +410,17 @@ duration. A high model score cannot repair untrustworthy extraction.
 
 ## Phase 2 — label historical outcomes
 
-Apply labels from independent outcome evidence:
+Normalized history can derive labels while retaining every vote and timestamp.
+Use separate atomic targets: `validation_rework_required`,
+`change_attributable_ci_failure`, `post_merge_revert_or_hotfix`, and
+`post_merge_defect`. Absence, disagreement, malformed linkage, or an unfinished
+maturity window remains `unknown`; a normal merge is not a negative. Review
+requests and attributable fail-change-pass CI sequences are strong positives.
+Test changes alone, message keywords, and SZZ linkage are weak and disabled by
+default.
+
+For a manually curated fallback on ordinary `git_commit` or prospective
+observations, apply labels from independent outcome evidence:
 
 ```bash
 ruleloom label <observation-id> positive \
@@ -381,6 +437,13 @@ ruleloom label <observation-id> negative \
   --available-at "2026-01-15T15:00:00Z" \
   --reason "Registered maturity event completed with no missing validation"
 ```
+
+Do not use `label` or `import-labels` on `historical_change` observations.
+Those labels are derived and revalidated from the append-only event log; import
+an explicit complete `change_finalized` outcome event and rerun
+`ruleloom history materialize` instead. This prevents a synthetic/manual label
+from making a rich unit appear confirmatory without recomputable strong
+evidence.
 
 `positive` and `negative` require label evidence. `--kind` accepts `ci`,
 `review`, `incident`, `human`, `imported`, or `synthetic`; `--available-at` is
@@ -406,17 +469,14 @@ record and leave the RuleLoom value `unknown` until the registered adjudication
 contract resolves it. The current schema stores the resolved evidence, not a
 multi-reviewer event history.
 
-Historical reconstruction is useful but vulnerable to survivorship bias,
-outcome-caused features, and incomplete linkage. `collect git --last` observes
-first-parent commit states; it does not reconstruct the initial PR head or prove
-that a review request happened later. A commit is eligible for a review-time
-target only when its exact diff and `observed_at` predate the independent event
-and any validation added in response. A final merge/squash commit containing
-that response is not a predictor observation. Version 0.3.0 retrospective
-`learn` accepts only `git_commit`; a reconstructed range/worktree cannot replace
-the missing training observation. If provider history cannot supply a genuine
-pre-event commit and reliable event order, exclude the case or use the
-historical cohort only as exploratory instrumentation.
+Historical reconstruction remains vulnerable to survivorship bias,
+outcome-caused features, and incomplete linkage. `history bootstrap-git` does
+not reconstruct an initial PR head or prove that review happened later. A rich
+provider `ChangeUnit` is eligible only when its exact diff and `prediction_at`
+predate the independent event and any response. A final merge/squash containing
+that response is not a predictor observation. If provider history cannot supply
+a point-in-time snapshot and reliable order, RuleLoom retains the case as
+exploratory or unknown; it does not upgrade Git topology into ground truth.
 
 Audit at least one positive and one negative against their independent sources,
 including the predictor SHA, event timestamp, response commit, maturity event,
@@ -443,16 +503,14 @@ local transition attestations, and locally attested prediction records. A
 successful result establishes structural/provenance consistency, not label
 truth or predictive value.
 
-When all eligible observations carry compatible repository topology, the latest
-first-parent positions form the holdout; otherwise RuleLoom falls back to
-timestamps. Commit timestamps remain audit evidence, and backdated/tied values
-produce warnings. Retrospective `learn` rejects non-`git_commit` observations,
-and neither ordering method is group-aware. Version 0.3.0 therefore requires a
-confirmatory cohort with one demonstrably independent commit per real-world
-change; if several commits belong to one PR/task/change or reliable linkage is
-unavailable, do not call the holdout confirmatory. Training grouped by
-`change_id` or over `git_range` snapshots remains backlog work. Chronology also
-cannot repair a commit created after its label-generating event.
+When all eligible raw commits carry compatible repository topology, the latest
+first-parent positions form the holdout; grouped historical changes use their
+prediction times. Ties and non-monotonic timestamps produce warnings.
+Retrospective `learn` accepts either one canonical `git_commit` cohort or one
+`historical_change` cohort, never a mixture. Grouped history rejects duplicate
+mature `change_id` values, so one logical change cannot cross train and test.
+Chronology still cannot repair a snapshot created after its label-generating
+event, and a raw-commit cohort still requires manual independence auditing.
 
 The current default mechanical
 minimum is eight training and four test examples. That minimum allows the

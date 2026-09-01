@@ -751,6 +751,7 @@ class RuleLoomConfig:
             **{name: Path(value) for name, value in managed.items()},
             "config": CONFIG_PATH,
             "readme": Path(".ruleloom/README.md"),
+            "history": Path(".ruleloom/history"),
         }
 
         def portable_identity(path: Path) -> tuple[str, ...]:
@@ -1025,6 +1026,8 @@ def default_config(
     project: str,
     *,
     repository_id: str = "repository.unspecified",
+    target: str = "needs_extra_validation",
+    outcome_definition: str | None = None,
     pack: str | None = None,
     pack_version: int | None = None,
     pack_config: ConfiguredPathsConfig | None = None,
@@ -1045,8 +1048,16 @@ def default_config(
     return RuleLoomConfig(
         schema_version=schema_version,
         project=project,
+        target=target,
         pack=selected_pack,
         pack_version=selected_version,
         pack_config=pack_config,
-        protocol=ProtocolConfig(repository_id=repository_id),
+        protocol=(
+            ProtocolConfig(repository_id=repository_id)
+            if outcome_definition is None
+            else ProtocolConfig(
+                repository_id=repository_id,
+                outcome_definition=outcome_definition,
+            )
+        ),
     )

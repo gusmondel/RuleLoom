@@ -571,6 +571,22 @@ def test_default_config_does_not_replace_an_explicit_empty_pack() -> None:
             },
             "must not overlap",
         ),
+        (
+            {
+                "schema_version": 1,
+                "project": "ExampleProject",
+                "dataset": ".ruleloom/history/events.jsonl",
+            },
+            "must not overlap",
+        ),
+        (
+            {
+                "schema_version": 1,
+                "project": "ExampleProject",
+                "candidates_dir": ".ruleloom/HISTORY",
+            },
+            "must not overlap",
+        ),
     ],
 )
 def test_config_rejects_unsafe_or_invalid_values(value: dict[str, object], message: str) -> None:

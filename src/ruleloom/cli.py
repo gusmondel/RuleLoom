@@ -8,11 +8,12 @@ import hashlib
 import json
 import shutil
 import sys
+from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from ruleloom import __version__
 from ruleloom.agents import sync_agents
@@ -23,6 +24,26 @@ from ruleloom.gitfacts import (
     backfill_commits_detailed,
     collect_snapshot,
     collect_worktree,
+    repository_identity,
+)
+from ruleloom.history.git import GitHistoryError, collect_git_history
+from ruleloom.history.importing import import_change_units, import_events
+from ruleloom.history.materialize import materialize_history
+from ruleloom.history.models import ChangeUnit, HistoricalEvent
+from ruleloom.history.outcomes import ATOMIC_OUTCOME_TARGETS
+from ruleloom.history.storage import (
+    change_units_path,
+    events_path,
+    load_change_units,
+    load_events,
+    upsert_change_units,
+    upsert_events,
+)
+from ruleloom.history.units import (
+    assemble_change_units,
+    validate_change_unit_event_links,
+    validate_change_unit_evidence,
+    validate_unique_event_ownership,
 )
 from ruleloom.learners.popper import PopperError
 from ruleloom.lifecycle import (
@@ -89,6 +110,18 @@ def _project(args: argparse.Namespace) -> tuple[Path, RuleLoomConfig]:
     return root, RuleLoomConfig.load(root)
 
 
+def _ensure_repository_boundary(root: Path, config: RuleLoomConfig) -> None:
+    try:
+        actual_repository = repository_identity(root)
+    except GitFactsError as exc:
+        raise ModelError(f"cannot verify configured Git repository: {exc}") from exc
+    if actual_repository != config.protocol.repository_id:
+        raise ModelError(
+            f"configured repository id {config.protocol.repository_id!r} does not match "
+            f"this checkout {actual_repository!r}"
+        )
+
+
 def _config_with_engine(config: RuleLoomConfig, engine: str | None) -> RuleLoomConfig:
     if engine is not None and engine != config.learner.engine:
         raise ModelError(
@@ -129,6 +162,8 @@ def _cmd_init(args: argparse.Namespace) -> int:
     result = initialize_project(
         Path(args.path if args.path is not None else "."),
         args.project,
+        target=args.target,
+        outcome_definition=args.outcome_definition,
         pack=args.pack,
         pack_version=args.pack_version,
         pack_config=pack_config,
@@ -262,6 +297,187 @@ def _cmd_collect_git(args: argparse.Namespace) -> int:
     return 0
 
 
+class _HistoricalRecord(Protocol):
+    @property
+    def id(self) -> str: ...
+
+    @property
+    def repository_id(self) -> str: ...
+
+
+def _ensure_history_repository(records: Sequence[_HistoricalRecord], repository_id: str) -> None:
+    mismatched = [item.id for item in records if item.repository_id != repository_id]
+    if mismatched:
+        raise ModelError(
+            "historical import contains records for a different repository: "
+            + ", ".join(str(item) for item in mismatched[:10])
+        )
+
+
+def _preflight_immutable_history(
+    existing: Sequence[HistoricalEvent] | Sequence[ChangeUnit],
+    incoming: Sequence[HistoricalEvent] | Sequence[ChangeUnit],
+    *,
+    kind: str,
+) -> None:
+    persisted = {item.id: item for item in existing}
+    staged: dict[str, object] = {}
+    for item in incoming:
+        identifier = item.id
+        previous = staged.get(identifier, persisted.get(identifier))
+        if previous is not None and previous != item:
+            raise ModelError(f"conflicting immutable {kind} id {identifier!r}")
+        staged[identifier] = item
+
+
+def _cmd_history_bootstrap_git(args: argparse.Namespace) -> int:
+    root, config = _project(args)
+    _ensure_repository_boundary(root, config)
+    maximum = args.max_commits
+    if args.all or maximum is None:
+        maximum = None
+    report = collect_git_history(
+        root,
+        ref=args.ref,
+        max_commits=maximum,
+        since=args.since,
+        repository_id=config.protocol.repository_id,
+    )
+    events_inserted, events_unchanged = upsert_events(events_path(root), report.events)
+    units_inserted, units_unchanged = upsert_change_units(change_units_path(root), report.units)
+    _json(
+        {
+            **report.to_dict(),
+            "events_inserted": events_inserted,
+            "events_unchanged": events_unchanged,
+            "units_inserted": units_inserted,
+            "units_unchanged": units_unchanged,
+            "evidence_grade": "exploratory_git_only",
+            "note": (
+                "Git topology is language-neutral but does not establish PR-time snapshots "
+                "or independent outcomes. Import normalized provider events for confirmatory "
+                "change units."
+            ),
+        }
+    )
+    return 0
+
+
+def _cmd_history_import(args: argparse.Namespace) -> int:
+    root, config = _project(args)
+    _ensure_repository_boundary(root, config)
+    incoming_events = import_events(Path(args.events)) if args.events is not None else ()
+    imported_units = import_change_units(Path(args.units)) if args.units is not None else ()
+    if not incoming_events and not imported_units:
+        raise ModelError("history import requires --events and/or --units")
+    _ensure_history_repository(incoming_events, config.protocol.repository_id)
+    _ensure_history_repository(imported_units, config.protocol.repository_id)
+
+    existing_events = load_events(events_path(root))
+    existing_units = load_change_units(change_units_path(root))
+    combined_events = {item.id: item for item in existing_events}
+    for item in incoming_events:
+        previous = combined_events.get(item.id)
+        if previous is not None and previous != item:
+            raise ModelError(f"conflicting immutable historical event id {item.id!r}")
+        combined_events[item.id] = item
+    assembled = (
+        assemble_change_units(tuple(combined_events.values()))
+        if incoming_events and not args.no_assemble
+        else ()
+    )
+    incoming_units = (*imported_units, *assembled)
+    _ensure_history_repository(incoming_units, config.protocol.repository_id)
+    _preflight_immutable_history(existing_events, incoming_events, kind="historical event")
+    _preflight_immutable_history(existing_units, incoming_units, kind="change unit")
+    combined_event_values = tuple(combined_events.values())
+    combined_events_by_change: dict[tuple[str, str], list[HistoricalEvent]] = defaultdict(list)
+    for event in combined_event_values:
+        if event.change_id is not None:
+            combined_events_by_change[(event.repository_id, event.change_id)].append(event)
+    combined_units = {item.id: item for item in existing_units}
+    combined_units.update({item.id: item for item in incoming_units})
+    validate_unique_event_ownership(tuple(combined_units.values()))
+    for unit in combined_units.values():
+        validate_change_unit_event_links(unit, combined_events)
+        linked = {
+            event.id: event
+            for event in combined_events_by_change.get((unit.repository_id, unit.id), ())
+        }
+        for event_id in unit.event_ids:
+            attached_event = combined_events[event_id]
+            if attached_event.change_id is None:
+                linked[attached_event.id] = attached_event
+        validate_change_unit_evidence(unit, tuple(linked.values()))
+
+    event_counts = upsert_events(events_path(root), incoming_events)
+    unit_counts = upsert_change_units(change_units_path(root), incoming_units)
+    _json(
+        {
+            "events_imported": len(incoming_events),
+            "events_inserted": event_counts[0],
+            "events_unchanged": event_counts[1],
+            "units_imported": len(imported_units),
+            "units_assembled": len(assembled),
+            "units_inserted": unit_counts[0],
+            "units_unchanged": unit_counts[1],
+        }
+    )
+    return 0
+
+
+def _cmd_history_materialize(args: argparse.Namespace) -> int:
+    root, config = _project(args)
+    _ensure_repository_boundary(root, config)
+    events = load_events(events_path(root))
+    units = load_change_units(change_units_path(root))
+    if not units:
+        raise ModelError("no historical change units are available; collect or import them first")
+    report = materialize_history(
+        root,
+        config,
+        units,
+        events,
+        outcome_target=args.outcome_target,
+        include_weak=args.include_weak,
+    )
+    inserted, updated, _ = _persist_historical(
+        dataset_path(root, config),
+        list(report.observations),
+        target=config.target,
+    )
+    validate_project(root, config)
+    _json({**report.to_dict(), "inserted": inserted, "updated": updated})
+    return 0
+
+
+def _cmd_history_status(args: argparse.Namespace) -> int:
+    root, config = _project(args)
+    validate_project(root, config)
+    events = load_events(events_path(root))
+    units = load_change_units(change_units_path(root))
+    observations = load_observations(dataset_path(root, config))
+    historical = [item for item in observations if item.source.get("kind") == "historical_change"]
+    qualities: dict[str, int] = {}
+    for unit in units:
+        qualities[unit.evidence_quality] = qualities.get(unit.evidence_quality, 0) + 1
+    labels = {item.value: 0 for item in LabelValue}
+    for observation in historical:
+        labels[observation.labels.get(config.target, LabelValue.UNKNOWN).value] += 1
+    _json(
+        {
+            "events": len(events),
+            "change_units": len(units),
+            "evidence_quality": qualities,
+            "confirmatory_units": sum(item.confirmatory for item in units),
+            "historical_observations": len(historical),
+            "labels": labels,
+            "language_neutral_core": True,
+        }
+    )
+    return 0
+
+
 def _label_one(
     observations: list[Observation],
     *,
@@ -279,6 +495,11 @@ def _label_one(
         if observation.id != observation_id:
             continue
         current = observation.labels.get(target, LabelValue.UNKNOWN)
+        if observation.source.get("kind") == "historical_change":
+            raise ModelError(
+                "historical_change labels are derived from immutable events; import a "
+                "normalized outcome event and run `ruleloom history materialize`"
+            )
         if current is not LabelValue.UNKNOWN:
             raise ModelError(
                 f"mature label {target!r} for {observation_id} is immutable; "
@@ -392,6 +613,7 @@ def _cmd_validate(args: argparse.Namespace) -> int:
 def _cmd_learn(args: argparse.Namespace) -> int:
     root, loaded_config = _project(args)
     config = _config_with_engine(loaded_config, args.engine)
+    validate_project(root, config)
     if config.learner.engine == "popper":
         _external_popper_checkout(root, config)
     observations = load_observations(dataset_path(root, config))
@@ -416,6 +638,7 @@ def _cmd_learn(args: argparse.Namespace) -> int:
 
 def _cmd_promote(args: argparse.Namespace) -> int:
     root, config = _project(args)
+    validate_project(root, config)
     if config.learner.engine == "popper":
         _external_popper_checkout(root, config)
     promoted, decision, path = promote_candidate(
@@ -486,6 +709,13 @@ def _merge_collected_observation(
     existing: list[Observation], collected: Observation
 ) -> Observation:
     prior = next((item for item in existing if item.id == collected.id), None)
+    return _merge_collected_prior(prior, collected)
+
+
+def _merge_collected_prior(
+    prior: Observation | None,
+    collected: Observation,
+) -> Observation:
     if prior is None:
         return collected
     if (
@@ -527,8 +757,108 @@ def _persist_collected(
     path: Path, collected: list[Observation]
 ) -> tuple[int, int, list[Observation]]:
     with edit_observations(path) as existing:
-        merged = [_merge_collected_observation(existing, item) for item in collected]
         by_id = {item.id: item for item in existing}
+        merged = [_merge_collected_prior(by_id.get(item.id), item) for item in collected]
+        inserted = 0
+        updated = 0
+        for observation in merged:
+            if observation.id in by_id:
+                updated += by_id[observation.id] != observation
+            else:
+                inserted += 1
+            by_id[observation.id] = observation
+        existing[:] = by_id.values()
+    return inserted, updated, merged
+
+
+_HISTORICAL_DERIVATION_METADATA = frozenset(
+    {
+        "historical_event_manifest_hash",
+        "historical_votes",
+        "history_warnings",
+    }
+)
+
+
+def _without_historical_derivation(metadata: dict[str, Any]) -> dict[str, Any]:
+    return {
+        key: value for key, value in metadata.items() if key not in _HISTORICAL_DERIVATION_METADATA
+    }
+
+
+def _merge_historical_observation(
+    prior: Observation | None,
+    collected: Observation,
+    *,
+    target: str,
+) -> Observation:
+    """Advance or refresh a derived label without changing its mature value."""
+    if prior is None:
+        return collected
+    if prior.source.get("kind") != "historical_change":
+        raise ModelError(
+            f"historical observation {collected.id!r} conflicts with a non-historical record"
+        )
+    if (
+        prior.observed_at != collected.observed_at
+        or prior.protocol_hash != collected.protocol_hash
+        or prior.facts != collected.facts
+        or prior.fact_evidence != collected.fact_evidence
+        or prior.source != collected.source
+        or _without_historical_derivation(prior.metadata)
+        != _without_historical_derivation(collected.metadata)
+    ):
+        raise ModelError(
+            f"immutable historical snapshot {collected.id!r} changed its predictor, "
+            "protocol, or materialization semantics"
+        )
+
+    previous_label = prior.labels.get(target, LabelValue.UNKNOWN)
+    collected_label = collected.labels.get(target, LabelValue.UNKNOWN)
+    if previous_label is not LabelValue.UNKNOWN:
+        if collected_label is not previous_label:
+            raise ModelError(
+                f"mature historical label {target!r} for {collected.id!r} conflicts with "
+                "newly imported evidence"
+            )
+        labels = dict(prior.labels)
+        labels[target] = collected_label
+        evidence = dict(prior.label_evidence)
+        evidence[target] = collected.label_evidence[target]
+        return replace(
+            prior,
+            labels=labels,
+            label_evidence=evidence,
+            metadata=collected.metadata,
+        )
+
+    labels = dict(prior.labels)
+    labels[target] = collected_label
+    evidence = dict(prior.label_evidence)
+    if collected_label is LabelValue.UNKNOWN:
+        evidence.pop(target, None)
+    else:
+        evidence[target] = collected.label_evidence[target]
+    return replace(
+        prior,
+        labels=labels,
+        label_evidence=evidence,
+        metadata=collected.metadata,
+    )
+
+
+def _persist_historical(
+    path: Path,
+    collected: list[Observation],
+    *,
+    target: str,
+) -> tuple[int, int, list[Observation]]:
+    with edit_observations(path) as existing:
+        by_id = {item.id: item for item in existing}
+        merged = [
+            _merge_historical_observation(by_id.get(item.id), item, target=target)
+            for item in collected
+        ]
         inserted = 0
         updated = 0
         for observation in merged:
@@ -788,6 +1118,15 @@ def build_parser() -> argparse.ArgumentParser:
     init = subparsers.add_parser("init", help="initialize a repository")
     init.add_argument("path", nargs="?")
     init.add_argument("--project")
+    init.add_argument(
+        "--target",
+        default="needs_extra_validation",
+        help="frozen outcome predicate for this experiment",
+    )
+    init.add_argument(
+        "--outcome-definition",
+        help="single-line operational definition bound into the evidence protocol",
+    )
     pack_names = sorted({item.name for item in available_packs()})
     init.add_argument(
         "--pack",
@@ -846,6 +1185,66 @@ def build_parser() -> argparse.ArgumentParser:
         help="history ref for --last or worktree base for --working-tree (default: HEAD)",
     )
     git.set_defaults(handler=_cmd_collect_git)
+
+    history = subparsers.add_parser(
+        "history", help="bootstrap point-in-time evidence from existing repository history"
+    )
+    _add_root(history)
+    history_commands = history.add_subparsers(dest="history_command", required=True)
+
+    bootstrap_git = history_commands.add_parser(
+        "bootstrap-git",
+        help="ingest language-neutral Git topology (exploratory evidence)",
+    )
+    bootstrap_limit = bootstrap_git.add_mutually_exclusive_group()
+    bootstrap_limit.add_argument(
+        "--all",
+        action="store_true",
+        help=(
+            "ingest the most recent reachable prefix up to 100000 commits and canonical "
+            "storage limits (default)"
+        ),
+    )
+    bootstrap_limit.add_argument(
+        "--max-commits",
+        type=int,
+        help="limit ingestion to the most recent N commits, still bounded by canonical storage",
+    )
+    bootstrap_git.add_argument("--ref", default="HEAD")
+    bootstrap_git.add_argument("--since", help="optional aware ISO-8601 lower timestamp bound")
+    bootstrap_git.set_defaults(handler=_cmd_history_bootstrap_git)
+
+    history_import = history_commands.add_parser(
+        "import", help="import normalized provider events and/or change units"
+    )
+    history_import.add_argument("--events", help="historical-event JSONL file")
+    history_import.add_argument("--units", help="change-unit JSONL file")
+    history_import.add_argument(
+        "--no-assemble",
+        action="store_true",
+        help="do not assemble change units from imported normalized events",
+    )
+    history_import.set_defaults(handler=_cmd_history_import)
+
+    materialize = history_commands.add_parser(
+        "materialize", help="extract prediction-time facts and conservative outcome labels"
+    )
+    materialize.add_argument(
+        "--outcome-target",
+        choices=ATOMIC_OUTCOME_TARGETS,
+        help="assert the atomic target registered by config (cannot override it)",
+    )
+    materialize.add_argument(
+        "--include-weak",
+        action="store_true",
+        help="opt into weak heuristic labels; resulting dependent cases cannot be approved",
+    )
+    materialize.set_defaults(handler=_cmd_history_materialize)
+
+    history_status = history_commands.add_parser(
+        "status", help="summarize historical evidence grades and labels"
+    )
+    history_status.set_defaults(handler=_cmd_history_status)
 
     label = subparsers.add_parser("label", help="record a mature outcome with provenance")
     _add_root(label)
@@ -969,7 +1368,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.handler(args))
-    except (ModelError, GitFactsError, PopperError) as exc:
+    except (ModelError, GitFactsError, GitHistoryError, PopperError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except ValueError as exc:

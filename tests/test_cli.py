@@ -174,6 +174,40 @@ def test_cli_defaults_to_generic_pack_and_lists_versioned_packs(
     )
 
 
+def test_cli_freezes_custom_target_and_outcome_definition(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = tmp_path / "custom_outcome"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "ruleloom@example.test")
+    _git(repo, "config", "user.name", "RuleLoom Test")
+    (repo / "artifact.bin").write_text("evidence\n", encoding="utf-8")
+    _commit(repo, "Initial", "2026-01-01T10:00:00Z")
+
+    exit_code, _, stderr = _run_cli(
+        [
+            "init",
+            str(repo),
+            "--target",
+            "post_merge_defect",
+            "--outcome-definition",
+            "explicitly linked defect after the registered maturity window",
+        ],
+        capsys,
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    config = RuleLoomConfig.load(repo)
+    assert config.target == "post_merge_defect"
+    assert (
+        config.protocol.outcome_definition
+        == "explicitly linked defect after the registered maturity window"
+    )
+
+
 def test_cli_initializes_and_collects_with_configured_paths(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

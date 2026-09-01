@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 import subprocess
 import tempfile
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime
@@ -323,6 +324,7 @@ def _validate_observation_pack_contract(
         "git_commit",
         "git_range",
         "git_worktree",
+        "historical_change",
     }:
         raise ModelError(f"{subject} {item.id!r} lacks a supported observation unit")
     repository = item.source.get("repository")
@@ -399,6 +401,7 @@ def learn_candidate(
             "git_commit",
             "git_range",
             "git_worktree",
+            "historical_change",
         }:
             raise ModelError(f"learning observation {item.id!r} lacks a supported observation unit")
         if not isinstance(repository, str) or not repository:
@@ -406,12 +409,28 @@ def learn_candidate(
         units.add(kind)
         repositories.add(repository)
     if len(units) > 1:
-        raise ModelError("learning data mixes Git observation units: " + ", ".join(sorted(units)))
-    if units != {"git_commit"}:
+        raise ModelError("learning data mixes observation units: " + ", ".join(sorted(units)))
+    if units not in ({"git_commit"}, {"historical_change"}):
         raise ModelError(
-            "the retrospective learner accepts canonical git_commit units only; "
-            "git_range/worktree observations remain prospective pilot evidence"
+            "the retrospective learner accepts canonical git_commit units only, or grouped "
+            "historical_change units; git_range/worktree observations remain prospective "
+            "pilot evidence"
         )
+    change_ids: list[str] = []
+    if units == {"historical_change"}:
+        for item in mature_examples:
+            change_id = item.source.get("change_id")
+            if not isinstance(change_id, str) or not change_id:
+                raise ModelError(f"historical observation {item.id!r} lacks a stable change_id")
+            change_ids.append(change_id)
+        duplicates = sorted(
+            change_id for change_id, count in Counter(change_ids).items() if count > 1
+        )
+        if duplicates:
+            raise ModelError(
+                "historical learning data contains more than one labeled snapshot for a "
+                "logical change; regroup before learning: " + ", ".join(duplicates[:10])
+            )
     if repositories != {config.protocol.repository_id}:
         raise ModelError(
             "learning data must come from configured repository "
@@ -510,12 +529,13 @@ def learn_candidate(
     warnings.extend(status.warnings)
     dataset_hash = observations_hash(observations)
     best_literal_name, _ = best_literal_baseline(train, split.test, target, as_of=cutoff)
+    historical_unit = next(iter(units))
     metadata: JsonObject = {
         "pack": config.pack,
         "pack_version": config.pack_version,
         "repository_id": config.protocol.repository_id,
         "evidence_protocol_hash": expected_protocol_hash,
-        "historical_observation_unit": "git_commit",
+        "historical_observation_unit": historical_unit,
         "extractors": cast(JsonValue, _extractors(observations)),
         "readiness": status.to_dict(),
         "best_single_literal": best_literal_name,
@@ -537,6 +557,27 @@ def learn_candidate(
             "label_availability_enforced": True,
         },
     }
+    if historical_unit == "historical_change":
+        evidence_qualities = sorted(
+            {
+                value
+                for item in mature_examples
+                if isinstance((value := item.source.get("evidence_quality")), str)
+            }
+        )
+        confirmatory_history = all(
+            item.source.get("confirmatory") is True
+            and item.source.get("evidence_quality") == "rich"
+            for item in mature_examples
+        )
+        metadata["historical_evidence_qualities"] = cast(JsonValue, evidence_qualities)
+        metadata["confirmatory_history"] = confirmatory_history
+        metadata["independent_change_units"] = len(change_ids)
+        if not confirmatory_history:
+            warnings.append(
+                "historical labels include exploratory or final-state evidence; this "
+                "candidate may enter shadow review but cannot be approved"
+            )
     if descriptor.configuration_hash is not None:
         metadata["pack_config_hash"] = descriptor.configuration_hash
     candidate = Candidate(
@@ -856,6 +897,15 @@ def promotion_decision(
         block(f"candidate fact pack does not match {config.pack!r}")
     if candidate.metadata.get("repository_id") != config.protocol.repository_id:
         block("candidate repository does not match the configured repository")
+    if (
+        destination == "approved"
+        and candidate.metadata.get("historical_observation_unit") == "historical_change"
+        and candidate.metadata.get("confirmatory_history") is not True
+    ):
+        block(
+            "candidate was learned from non-confirmatory historical evidence; approval "
+            "requires rich point-in-time change units"
+        )
     readiness_value = candidate.metadata.get("readiness")
     positive = positive_count if positive_count is not None else 0
     if positive_count is None and isinstance(readiness_value, dict):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -10,6 +11,19 @@ from pathlib import Path
 from ruleloom.agents import SyncResult, sync_agents
 from ruleloom.config import CONFIG_PATH, RuleLoomConfig, default_config
 from ruleloom.gitfacts import GitFactsError, repository_identity
+from ruleloom.history.materialize import validate_materialized_outcome
+from ruleloom.history.models import HistoricalEvent
+from ruleloom.history.storage import (
+    change_units_path,
+    events_path,
+    load_change_units,
+    load_events,
+)
+from ruleloom.history.units import (
+    validate_change_unit_event_links,
+    validate_change_unit_evidence,
+    validate_unique_event_ownership,
+)
 from ruleloom.lifecycle import Readiness, readiness
 from ruleloom.models import ModelError, Observation, parse_timestamp
 from ruleloom.packs import (
@@ -43,6 +57,8 @@ def initialize_project(
     root: Path,
     project: str | None = None,
     *,
+    target: str = "needs_extra_validation",
+    outcome_definition: str | None = None,
     pack: str | None = None,
     pack_version: int | None = None,
     pack_config: ConfiguredPathsConfig | None = None,
@@ -59,6 +75,8 @@ def initialize_project(
     config = default_config(
         project if project is not None else root.name,
         repository_id=repository_id,
+        target=target,
+        outcome_definition=outcome_definition,
         pack=pack,
         pack_version=pack_version,
         pack_config=pack_config,
@@ -73,6 +91,8 @@ def initialize_project(
         project_path(root, config.shadow_dir),
         project_path(root, config.approved_dir),
         project_path(root, config.deprecated_dir),
+        events_path(root),
+        change_units_path(root),
     ]
     agent_relative_paths = {
         "codex": (
@@ -103,6 +123,8 @@ def initialize_project(
     write_json(config_path, config.to_dict())
     write_text(dataset_path(root, config), "")
     write_text(predictions_path(root, config), "")
+    write_text(events_path(root), "")
+    write_text(change_units_path(root), "")
     for directory in (
         config.candidates_dir,
         config.shadow_dir,
@@ -114,12 +136,14 @@ def initialize_project(
         project_path(root, ".ruleloom/README.md"),
         """# RuleLoom project data
 
-Commit `config.json`, `observations.jsonl`, candidate manifests, and reviewed shadow/approved
-policies when repository policy permits. They form the reproducibility and provenance trail.
+Commit `config.json`, `observations.jsonl`, normalized `history/` records, candidate manifests,
+and reviewed shadow/approved policies when repository policy permits. They form the
+reproducibility and provenance trail.
 
 Do not use CI or review outcomes as prediction-time facts. Record them later as labels with
-`label_evidence.available_at` provenance. Generated caches and external learner checkouts are
-ignored.
+`label_evidence.available_at` provenance. Git-only and final-state historical units are
+exploratory; only independently sourced point-in-time units can be confirmatory. Generated
+caches and external learner checkouts are ignored.
 """,
     )
     agent_files = tuple(sync_agents(root, config, agents=agents)) if agents else ()
@@ -145,7 +169,7 @@ def validate_observations(
                 "start a new experiment dataset instead of reinterpreting its labels"
             )
         kind = item.source.get("kind")
-        if kind not in {"git_commit", "git_range", "git_worktree"}:
+        if kind not in {"git_commit", "git_range", "git_worktree", "historical_change"}:
             raise ModelError(f"observation {item.id!r} lacks a supported source.kind")
         if item.source.get("repository") != config.protocol.repository_id:
             raise ModelError(f"observation {item.id!r} belongs to a different repository")
@@ -201,9 +225,67 @@ def validate_project(root: Path, config: RuleLoomConfig) -> Readiness:
             f"configured repository id {config.protocol.repository_id!r} does not match "
             f"this checkout {actual_repository!r}"
         )
-    report = validate_observations(
-        load_observations(dataset_path(root, config)), config, as_of=as_of
-    )
+    observations = load_observations(dataset_path(root, config))
+    report = validate_observations(observations, config, as_of=as_of)
+    events = load_events(events_path(root))
+    units = load_change_units(change_units_path(root))
+    for event in events:
+        if event.repository_id != config.protocol.repository_id:
+            raise ModelError(f"historical event {event.id!r} belongs to a different repository")
+    events_by_id = {event.id: event for event in events}
+    events_by_change: dict[tuple[str, str], list[HistoricalEvent]] = defaultdict(list)
+    for event in events:
+        if event.change_id is not None:
+            events_by_change[(event.repository_id, event.change_id)].append(event)
+    units_by_id = {unit.id: unit for unit in units}
+    validate_unique_event_ownership(units)
+    for unit in units:
+        if unit.repository_id != config.protocol.repository_id:
+            raise ModelError(f"change unit {unit.id!r} belongs to a different repository")
+        validate_change_unit_event_links(unit, events_by_id)
+        linked = {
+            event.id: event for event in events_by_change.get((unit.repository_id, unit.id), ())
+        }
+        for event_id in unit.event_ids:
+            attached_event = events_by_id[event_id]
+            if attached_event.change_id is None:
+                linked[attached_event.id] = attached_event
+        validate_change_unit_evidence(unit, list(linked.values()))
+    for observation in observations:
+        if observation.source.get("kind") != "historical_change":
+            continue
+        change_id = observation.source.get("change_id")
+        if not isinstance(change_id, str) or change_id not in units_by_id:
+            raise ModelError(
+                f"historical observation {observation.id!r} lacks a persisted change unit"
+            )
+        unit = units_by_id[change_id]
+        if (
+            observation.id != f"history.{unit.id}"
+            or observation.observed_at != unit.prediction_at
+            or observation.source.get("base") != unit.base_sha
+            or observation.source.get("head") != unit.prediction_sha
+            or observation.source.get("unit_kind") != unit.kind
+            or observation.source.get("provider") != unit.provider
+            or observation.source.get("source_ref") != unit.source_ref
+            or observation.source.get("evidence_quality") != unit.evidence_quality
+        ):
+            raise ModelError(
+                f"historical observation {observation.id!r} conflicts with its change unit"
+            )
+        source_confirmatory = observation.source.get("confirmatory")
+        if source_confirmatory is True and not unit.confirmatory:
+            raise ModelError(
+                f"historical observation {observation.id!r} overstates confirmatory evidence"
+            )
+        linked = {
+            event.id: event for event in events_by_change.get((unit.repository_id, unit.id), ())
+        }
+        for event_id in unit.event_ids:
+            attached_event = events_by_id[event_id]
+            if attached_event.change_id is None:
+                linked[attached_event.id] = attached_event
+        validate_materialized_outcome(config, observation, unit, list(linked.values()))
     load_candidates(root, config)
     load_shadow(root, config)
     load_approved(root, config)

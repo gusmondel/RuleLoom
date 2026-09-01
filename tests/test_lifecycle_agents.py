@@ -1280,6 +1280,108 @@ def test_learning_rejects_unknown_observation_from_another_repository() -> None:
         learn_candidate([foreign], config)
 
 
+def test_historical_change_learning_is_grouped_and_records_evidence_grade() -> None:
+    config = replace(
+        _promotion_config(),
+        learner=LearnerConfig(
+            max_body=1,
+            max_rules=1,
+            min_support=1,
+            bootstrap_runs=1,
+            max_predicates=4,
+        ),
+        evaluation=EvaluationConfig(
+            test_fraction=0.25,
+            min_train_examples=4,
+            min_test_examples=2,
+        ),
+    )
+    observations = [
+        replace(
+            _observation(
+                index,
+                LabelValue.POSITIVE if index % 2 == 0 else LabelValue.NEGATIVE,
+                {"large_change"} if index % 2 == 0 else {"touches_test"},
+                config=config,
+                kind="historical_change",
+            ),
+            source={
+                **_observation(index, LabelValue.UNKNOWN, config=config).source,
+                "kind": "historical_change",
+                "change_id": f"pr-{index}",
+                "evidence_quality": "rich",
+                "confirmatory": True,
+            },
+        )
+        for index in range(8)
+    ]
+
+    candidate = learn_candidate(observations, config)
+
+    assert candidate.metadata["historical_observation_unit"] == "historical_change"
+    assert candidate.metadata["historical_evidence_qualities"] == ["rich"]
+    assert candidate.metadata["confirmatory_history"] is True
+    assert candidate.metadata["independent_change_units"] == 8
+
+    duplicate = replace(
+        observations[-1],
+        source={**observations[-1].source, "change_id": "pr-0"},
+    )
+    with pytest.raises(ModelError, match="more than one labeled snapshot"):
+        learn_candidate([*observations[:-1], duplicate], config)
+
+
+def test_exploratory_history_can_be_reviewed_but_never_approved() -> None:
+    config = replace(
+        _promotion_config(),
+        learner=LearnerConfig(
+            max_body=1,
+            max_rules=1,
+            min_support=1,
+            bootstrap_runs=1,
+            max_predicates=4,
+        ),
+        evaluation=EvaluationConfig(
+            test_fraction=0.25,
+            min_train_examples=4,
+            min_test_examples=2,
+        ),
+    )
+    observations = []
+    for index in range(8):
+        observation = _observation(
+            index,
+            LabelValue.POSITIVE if index % 2 == 0 else LabelValue.NEGATIVE,
+            {"large_change"} if index % 2 == 0 else {"touches_test"},
+            config=config,
+            kind="historical_change",
+        )
+        observations.append(
+            replace(
+                observation,
+                source={
+                    **observation.source,
+                    "change_id": f"commit-{index}",
+                    "evidence_quality": "git_only",
+                    "confirmatory": False,
+                },
+            )
+        )
+    candidate = learn_candidate(observations, config)
+    assert candidate.metadata["confirmatory_history"] is False
+    assert any("cannot be approved" in warning for warning in candidate.warnings)
+
+    decision = promotion_decision(
+        candidate,
+        config,
+        "approved",
+        shadow_recorded=True,
+        positive_count=100,
+        prospective_shadow=_passing_shadow_evidence(candidate),
+    )
+    assert any("non-confirmatory historical evidence" in item for item in decision.blocking)
+
+
 def test_prediction_builder_enforces_protocol_and_candidate_compatibility() -> None:
     config = _promotion_config()
     candidate = _candidate(status="approved", config=config)

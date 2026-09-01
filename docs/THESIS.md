@@ -52,7 +52,7 @@ Software repositories offer structured, repeated decisions. Some signals are
 language-neutral—change size, file distribution, tests, documentation, CI, and
 dependency manifests—while specialized packs can add facts about syntax and
 framework behavior such as state mutation, asynchronous code, or navigation.
-RuleLoom 0.3.0 encodes each change as Boolean unary predicates and represents
+RuleLoom 0.4.0 encodes each change as Boolean unary predicates and represents
 conjunctions of those properties as rules rather than opaque scores. It does not
 learn relations among multiple entities.
 
@@ -89,6 +89,15 @@ RuleLoom's additional bet is that logical rule induction is a useful abstraction
 mechanism for repository-change outcomes and, after prospective validation, for
 coding guidance. AutoSpec makes that link less speculative for agent safety,
 but it remains unvalidated for this product target.
+
+Cold start does not mean waiting for a year of future labels. Version 0.4.0 can
+ingest the complete reachable Git graph immediately and combine it with
+authorized, normalized forge/review/CI/revert/incident events already retained
+by the repository workflow. That accelerates instrumentation, not certainty:
+Git-only and final-state cases are exploratory; only a point-in-time change with
+strictly later, independent strong evidence can support confirmation. No fixed
+calendar window is assumed—readiness, class balance, chronology, baselines, and
+drift decide whether the existing evidence is usable.
 
 The implementation keeps the language boundary narrow. A selected, versioned
 evidence pack deterministically maps normalized Git evidence to facts and
@@ -152,9 +161,10 @@ policy set are captured before the outcome becomes knowable. Its protocol binds
 experiment, repository, unit, outcome definition, target, pack name/version,
 extractor, canonical pack configuration when present, and `EvidenceConfig`
 scopes and thresholds so incompatible evidence cannot be pooled. Historical H1
-training uses only a genuine pre-event `git_commit`; prospective H2 assessment
-may use a range/worktree snapshot. Neither may use a final diff containing the
-validation added because of review.
+training prefers one rich, point-in-time `ChangeUnit` per logical change; a raw
+commit cohort is supported separately but remains manually audited. Prospective
+H2 assessment may use a range/worktree snapshot. Neither may use a final diff
+containing validation added because of review.
 
 H2 fails when rules fire too often, rarely fire, become stale, generate mostly
 false positives, or require information that was not available at assessment
@@ -199,7 +209,7 @@ yet support third-party pack plugins, so broader extensibility remains unproven.
 - Collection does not alter application code.
 - The default evidence path is deterministic and the selected pack must attach
   provenance to every emitted fact. Although the artifact schema reserves
-  `agent`, `human`, and `imported` provenance kinds, version 0.3.0 accepts only
+  `agent`, `human`, and `imported` provenance kinds, version 0.4.0 accepts only
   exact deterministic built-in-pack provenance for validation, learning, and
   prediction; non-deterministic facts are future work.
 - Each experiment selects exactly one pack name/version. Pack identity,
@@ -221,9 +231,10 @@ yet support third-party pack plugins, so broader extensibility remains unproven.
   containing validation added because of review is not a valid review-time
   predictor, regardless of chronological ordering.
 - Training never uses observations newer than the holdout.
-- Version 0.3.0 retrospective `learn` accepts only `git_commit` and is not
-  group-aware. A confirmatory cohort admits one independently auditable commit
-  per real-world change; grouped change-ID/range training is future work.
+- Version 0.4.0 historical materialization emits one observation per stable
+  `ChangeUnit`; `learn` rejects duplicate mature `change_id` values and mixed
+  unit cohorts. `git_only`/`final_only` and weak-dependent cases are exploratory,
+  and approval requires rich point-in-time evidence.
 - Rule selection is compared with four simple baselines on the same later set.
 - A candidate is immutable and content-addressed by its inputs.
 - Candidate, shadow, and approved are distinct reviewed states; learning,
@@ -287,7 +298,7 @@ true after a representative pilot:
 Failure is an acceptable result. The pilot is designed to distinguish a useful
 repository-learning loop from a polished demonstration.
 
-## Scope of version 0.3.0
+## Scope of version 0.4.0
 
 Included:
 
@@ -304,10 +315,18 @@ Included:
   Riverpod `state =` mutations;
 - repository-relative include/exclude scopes, configurable large-change and
   multi-file thresholds, and compact metadata with a full manifest hash;
+- provider-neutral historical events, immutable logical `ChangeUnit` records,
+  full bounded Git-graph bootstrap, point-in-time materialization, and evidence
+  grades `rich`, `git_only`, and `final_only`;
+- four separate review/CI/revert/incident outcomes, strong-only derivation by
+  default, explicit weak-vote opt-in, provenance, and `unknown` on absence or
+  conflict;
+- grouped retrospective learning with duplicate-change rejection and a hard
+  approval block for non-confirmatory historical evidence;
 - a pack-agnostic ILP, evaluation, reporting, and policy lifecycle;
 - bounded Horn clauses with optional closed-world negation;
 - optional, externally provisioned Popper/MDL integration for noisy labels,
-  restricted in version 0.3.0 to one non-recursive rule and no bootstrap reruns;
+  restricted in version 0.4.0 to one non-recursive rule and no bootstrap reruns;
 - chronological holdout, baselines, confusion metrics, and bootstrap stability;
 - label-availability filtering at the holdout boundary;
 - candidate, shadow, approval, deprecation, local-trust, and agent-sync
@@ -330,6 +349,8 @@ Not included:
   predictively across repositories;
 - built-in language-specific extraction beyond Flutter/Dart;
 - loading third-party evidence packs through an external plugin API;
+- built-in network collectors for any hosted forge, CI, or incident provider;
+  those systems must currently export the normalized JSONL contract;
 - combining multiple packs within one experiment.
 
 ## Evidence boundary

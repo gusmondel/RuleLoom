@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ruleloom:schema:historical-event:v1",
+  "title": "RuleLoom historical event v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "id",
+    "repository_id",
+    "kind",
+    "occurred_at",
+    "available_at",
+    "provider",
+    "source_ref",
+    "change_id",
+    "independent_group",
+    "data"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "id": {"$ref": "#/$defs/subject"},
+    "repository_id": {"$ref": "#/$defs/subject"},
+    "kind": {"$ref": "#/$defs/subject"},
+    "occurred_at": {"type": "string", "format": "date-time"},
+    "available_at": {"type": "string", "format": "date-time"},
+    "provider": {"$ref": "#/$defs/subject"},
+    "source_ref": {
+      "type": "string",
+      "pattern": "^(?=.*\\S)[^\\u0000-\\u001F\\u007F]*$"
+    },
+    "change_id": {
+      "anyOf": [{"$ref": "#/$defs/subject"}, {"type": "null"}]
+    },
+    "independent_group": {"$ref": "#/$defs/subject"},
+    "data": {"type": "object"}
+  },
+  "$defs": {
+    "subject": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$"
+    }
+  }
+}

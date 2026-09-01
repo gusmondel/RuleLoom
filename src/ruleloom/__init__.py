@@ -1,5 +1,6 @@
 """RuleLoom: evidence-backed rule learning for coding agents."""
 
+from ruleloom.history.models import ChangeUnit, HistoricalEvent
 from ruleloom.models import (
     Candidate,
     FactEvidence,
@@ -15,7 +16,9 @@ from ruleloom.models import (
 
 __all__ = [
     "Candidate",
+    "ChangeUnit",
     "FactEvidence",
+    "HistoricalEvent",
     "HornClause",
     "LabelEvidence",
     "LabelValue",
@@ -26,4 +29,4 @@ __all__ = [
     "RuleSet",
 ]
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
