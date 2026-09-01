@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "labels": [
+    {
+      "name": "ruleloom:validation:positive",
+      "target": "validation_rework_required",
+      "value": "positive",
+      "evidence_complete": true,
+      "authorized_actor_ids": [123456]
+    }
+  ]
+}

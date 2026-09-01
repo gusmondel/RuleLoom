@@ -48,6 +48,71 @@ class GitHistoryError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class GitHistoryBudgets:
+    """Caller-reducible work budgets for one read-only Git traversal.
+
+    Defaults preserve the public v0.7 safety ceilings. Every value may only
+    reduce its built-in process or storage cap; this object cannot raise the
+    global limits.
+    """
+
+    timeout_seconds: float = _GIT_TIMEOUT_SECONDS
+    git_stdout_bytes: int = _MAX_GIT_STDOUT_BYTES
+    git_stderr_bytes: int = _MAX_GIT_STDERR_BYTES
+    storage_bytes: int | None = None
+    storage_line_bytes: int | None = None
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.timeout_seconds, bool)
+            or not isinstance(self.timeout_seconds, int | float)
+            or not 0 < float(self.timeout_seconds) <= _GIT_TIMEOUT_SECONDS
+        ):
+            raise GitHistoryError(
+                "history timeout_seconds must be greater than zero and at most "
+                f"{_GIT_TIMEOUT_SECONDS:g}"
+            )
+        for name, value, maximum in (
+            ("git_stdout_bytes", self.git_stdout_bytes, _MAX_GIT_STDOUT_BYTES),
+            ("git_stderr_bytes", self.git_stderr_bytes, _MAX_GIT_STDERR_BYTES),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+                raise GitHistoryError(f"history {name} must be between 1 and {maximum} bytes")
+        for storage_name, optional_value, storage_maximum in (
+            ("storage_bytes", self.storage_bytes, HISTORY_JSONL_MAX_BYTES),
+            ("storage_line_bytes", self.storage_line_bytes, HISTORY_JSONL_MAX_LINE_BYTES),
+        ):
+            if optional_value is not None and (
+                isinstance(optional_value, bool)
+                or not isinstance(optional_value, int)
+                or not 1 <= optional_value <= storage_maximum
+            ):
+                raise GitHistoryError(
+                    f"history {storage_name} must be null or between 1 and {storage_maximum} bytes"
+                )
+
+    @property
+    def effective_storage_bytes(self) -> int:
+        return min(self.storage_bytes or HISTORY_JSONL_MAX_BYTES, HISTORY_JSONL_MAX_BYTES)
+
+    @property
+    def effective_storage_line_bytes(self) -> int:
+        return min(
+            self.storage_line_bytes or HISTORY_JSONL_MAX_LINE_BYTES,
+            HISTORY_JSONL_MAX_LINE_BYTES,
+        )
+
+    def to_dict(self) -> JsonObject:
+        return {
+            "timeout_seconds": float(self.timeout_seconds),
+            "git_stdout_bytes": self.git_stdout_bytes,
+            "git_stderr_bytes": self.git_stderr_bytes,
+            "storage_bytes": self.effective_storage_bytes,
+            "storage_line_bytes": self.effective_storage_line_bytes,
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class GitHistoryReport:
     """Auditable result of a bounded traversal of one Git revision."""
 
@@ -59,8 +124,11 @@ class GitHistoryReport:
     warnings: tuple[str, ...]
     manifest_hash: str
     resolved_ref: str
+    after: str | None
+    incremental_boundary_is_ancestor: bool | None
     since: str | None
     requested_max_commits: int | None
+    budgets: GitHistoryBudgets
     storage_truncated: bool
     storage_byte_limit: int
     storage_line_byte_limit: int
@@ -85,8 +153,12 @@ class GitHistoryReport:
             "warnings": list(self.warnings),
             "manifest_hash": self.manifest_hash,
             "resolved_ref": self.resolved_ref,
+            "after": self.after,
+            "incremental": self.after is not None,
+            "incremental_boundary_is_ancestor": self.incremental_boundary_is_ancestor,
             "since": self.since,
             "requested_max_commits": self.requested_max_commits,
+            "budgets": self.budgets.to_dict(),
             "storage_truncated": self.storage_truncated,
             "storage_byte_limit": self.storage_byte_limit,
             "storage_line_byte_limit": self.storage_line_byte_limit,
@@ -111,10 +183,13 @@ def _run_git_bounded(
     *,
     input_bytes: bytes | None = None,
     stdout_limit: int = _MAX_GIT_STDOUT_BYTES,
+    budgets: GitHistoryBudgets | None = None,
 ) -> tuple[bytes, bytes, int]:
     """Execute Git without a shell while enforcing time and output budgets."""
     if input_bytes is not None and len(input_bytes) > _MAX_GIT_INPUT_BYTES:
         raise GitHistoryError(f"Git stdin exceeds {_MAX_GIT_INPUT_BYTES} bytes")
+    selected_budgets = budgets or GitHistoryBudgets()
+    effective_stdout_limit = min(stdout_limit, selected_budgets.git_stdout_bytes)
     try:
         process = subprocess.Popen(
             ("git", "-C", str(repo), *arguments),
@@ -156,19 +231,19 @@ def _run_git_bounded(
     readers = (
         threading.Thread(
             target=drain,
-            args=("stdout", process.stdout, stdout_limit),
+            args=("stdout", process.stdout, effective_stdout_limit),
             daemon=True,
         ),
         threading.Thread(
             target=drain,
-            args=("stderr", process.stderr, _MAX_GIT_STDERR_BYTES),
+            args=("stderr", process.stderr, selected_budgets.git_stderr_bytes),
             daemon=True,
         ),
     )
     for reader in readers:
         reader.start()
 
-    deadline = time.monotonic() + _GIT_TIMEOUT_SECONDS
+    deadline = time.monotonic() + float(selected_budgets.timeout_seconds)
     try:
         while process.poll() is None:
             if violation.is_set():
@@ -179,7 +254,8 @@ def _run_git_bounded(
                 process.kill()
                 process.wait()
                 raise GitHistoryError(
-                    f"git {' '.join(arguments)} exceeded {_GIT_TIMEOUT_SECONDS:g} seconds"
+                    f"git {' '.join(arguments)} exceeded "
+                    f"{float(selected_budgets.timeout_seconds):g} seconds"
                 )
             time.sleep(0.01)
 
@@ -204,12 +280,14 @@ def _git_bytes(
     *arguments: str,
     input_bytes: bytes | None = None,
     stdout_limit: int = _MAX_GIT_STDOUT_BYTES,
+    budgets: GitHistoryBudgets | None = None,
 ) -> bytes:
     stdout, stderr, returncode = _run_git_bounded(
         repo,
         arguments,
         input_bytes=input_bytes,
         stdout_limit=stdout_limit,
+        budgets=budgets,
     )
     if returncode != 0:
         detail = stderr.decode("utf-8", errors="replace").strip() or "unknown Git error"
@@ -231,6 +309,7 @@ def _git_text(
     *arguments: str,
     input_bytes: bytes | None = None,
     stdout_limit: int = _MAX_GIT_STDOUT_BYTES,
+    budgets: GitHistoryBudgets | None = None,
 ) -> str:
     return _decode_git_text(
         _git_bytes(
@@ -238,6 +317,7 @@ def _git_text(
             *arguments,
             input_bytes=input_bytes,
             stdout_limit=stdout_limit,
+            budgets=budgets,
         ),
         field_name="metadata",
     )
@@ -430,18 +510,34 @@ def collect_git_history(
     ref: str = "HEAD",
     max_commits: int | None = 1_000,
     since: str | datetime | None = None,
+    after: str | None = None,
     repository_id: str | None = None,
+    budgets: GitHistoryBudgets | None = None,
 ) -> GitHistoryReport:
     """Collect bounded historical evidence from one revision.
 
     The most recent ``max_commits`` reachable commits are selected and emitted
     oldest-first in reverse date/topological order.  ``None`` requests all
     reachable history up to the hard safety cap; truncation is always explicit
-    in the returned report.
+    in the returned report. ``after`` is an exclusive commit cursor and must be
+    an ancestor of the selected ref; divergent or rewritten history fails
+    closed. Incremental collection from a shallow repository is rejected because
+    local ancestry cannot prove that the interval is complete. Incremental ranges
+    must be complete: combining ``after`` with ``since``, or hitting a
+    commit/storage truncation after a cursor, raises instead of returning a range
+    whose tip could skip unseen commits. Explicit ``budgets`` may reduce, but
+    never raise, hard safety caps.
     """
     requested_ref = _validate_ref(ref)
+    requested_after = None if after is None else _validate_ref(after)
     effective_limit = _validate_max_commits(max_commits)
     normalized_since = _normalize_since(since)
+    if requested_after is not None and normalized_since is not None:
+        raise GitHistoryError(
+            "after and since are mutually exclusive; timestamp filtering can omit "
+            "intermediate commits from an incremental cursor range"
+        )
+    selected_budgets = budgets or GitHistoryBudgets()
     resolved_repo = repo.resolve()
     if not resolved_repo.is_dir():
         raise GitHistoryError(f"repository directory does not exist: {resolved_repo}")
@@ -450,6 +546,7 @@ def collect_git_history(
         "rev-parse",
         "--show-toplevel",
         stdout_limit=16 * 1024,
+        budgets=selected_budgets,
     ).strip()
     if not top_level_text:
         raise GitHistoryError("Git returned an empty repository root")
@@ -462,8 +559,37 @@ def collect_git_history(
         "--end-of-options",
         f"{requested_ref}^{{commit}}",
         stdout_limit=1024,
+        budgets=selected_budgets,
     ).strip()
     _validate_oid(resolved_ref, field_name="resolved revision")
+    resolved_after: str | None = None
+    boundary_is_ancestor: bool | None = None
+    if requested_after is not None:
+        resolved_after = _git_text(
+            top_level,
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            f"{requested_after}^{{commit}}",
+            stdout_limit=1024,
+            budgets=selected_budgets,
+        ).strip()
+        _validate_oid(resolved_after, field_name="incremental boundary")
+        _stdout, stderr, ancestry_returncode = _run_git_bounded(
+            top_level,
+            ("merge-base", "--is-ancestor", resolved_after, resolved_ref),
+            stdout_limit=1024,
+            budgets=selected_budgets,
+        )
+        if ancestry_returncode not in {0, 1}:
+            detail = stderr.decode("utf-8", errors="replace").strip() or "unknown Git error"
+            raise GitHistoryError(f"git merge-base --is-ancestor failed: {detail}")
+        if ancestry_returncode == 1:
+            raise GitHistoryError(
+                "incremental boundary is not an ancestor of the selected ref; refusing "
+                "to mix divergent or rewritten history"
+            )
+        boundary_is_ancestor = True
     effective_repository_id = _validate_repository_id(
         repository_id if repository_id is not None else repository_identity(top_level)
     )
@@ -473,10 +599,16 @@ def collect_git_history(
         "rev-parse",
         "--is-shallow-repository",
         stdout_limit=128,
+        budgets=selected_budgets,
     ).strip()
     if shallow_text not in {"true", "false"}:
         raise GitHistoryError(f"Git returned an invalid shallow status: {shallow_text!r}")
     shallow = shallow_text == "true"
+    if resolved_after is not None and shallow:
+        raise GitHistoryError(
+            "incremental collection is not supported in a shallow repository; "
+            "fetch complete history before advancing a cursor"
+        )
 
     empty_tree = _git_text(
         top_level,
@@ -486,6 +618,7 @@ def collect_git_history(
         "--stdin",
         input_bytes=b"",
         stdout_limit=1024,
+        budgets=selected_budgets,
     ).strip()
     _validate_oid(empty_tree, field_name="empty-tree object ID")
 
@@ -499,7 +632,9 @@ def collect_git_history(
     if normalized_since is not None:
         log_arguments.append(f"--since={normalized_since}")
     log_arguments.extend(("--end-of-options", resolved_ref))
-    newest_first = _parse_log(_git_bytes(top_level, *log_arguments))
+    if resolved_after is not None:
+        log_arguments.append(f"^{resolved_after}")
+    newest_first = _parse_log(_git_bytes(top_level, *log_arguments, budgets=selected_budgets))
 
     unique_newest_first: list[_CommitHeader] = []
     seen: set[str] = set()
@@ -517,6 +652,8 @@ def collect_git_history(
     change_unit_log_bytes = 0
     storage_truncated = False
     storage_truncation_detail = ""
+    storage_byte_limit = selected_budgets.effective_storage_bytes
+    storage_line_byte_limit = selected_budgets.effective_storage_line_bytes
     for header in unique_newest_first[:effective_limit]:
         event, unit = _event_and_unit(
             header,
@@ -526,23 +663,23 @@ def collect_git_history(
         event_record_bytes = _canonical_record_bytes(event)
         unit_record_bytes = _canonical_record_bytes(unit)
         if (
-            event_record_bytes > HISTORY_JSONL_MAX_LINE_BYTES
-            or unit_record_bytes > HISTORY_JSONL_MAX_LINE_BYTES
+            event_record_bytes > storage_line_byte_limit
+            or unit_record_bytes > storage_line_byte_limit
         ):
             storage_truncated = True
             storage_truncation_detail = (
-                f"the next canonical record exceeds {HISTORY_JSONL_MAX_LINE_BYTES} bytes"
+                f"the next canonical record exceeds {storage_line_byte_limit} bytes"
             )
             break
         event_line_bytes = event_record_bytes + 1
         unit_line_bytes = unit_record_bytes + 1
         if (
-            event_log_bytes + event_line_bytes > HISTORY_JSONL_MAX_BYTES
-            or change_unit_log_bytes + unit_line_bytes > HISTORY_JSONL_MAX_BYTES
+            event_log_bytes + event_line_bytes > storage_byte_limit
+            or change_unit_log_bytes + unit_line_bytes > storage_byte_limit
         ):
             storage_truncated = True
             storage_truncation_detail = (
-                f"the next record would exceed {HISTORY_JSONL_MAX_BYTES} bytes per log"
+                f"the next record would exceed {storage_byte_limit} bytes per log"
             )
             break
         selected_newest_first.append((event, unit))
@@ -550,6 +687,17 @@ def collect_git_history(
         change_unit_log_bytes += unit_line_bytes
 
     truncated = commit_limit_truncated or storage_truncated
+    if resolved_after is not None and truncated:
+        reasons: list[str] = []
+        if commit_limit_truncated:
+            reasons.append("the commit limit")
+        if storage_truncated:
+            reasons.append("the canonical storage budget")
+        raise GitHistoryError(
+            "incremental collection after the recorded boundary is incomplete; one or more "
+            f"safety limits were reached ({' and '.join(reasons)}); no partial cursor range may be "
+            "persisted or used to advance the cursor"
+        )
     warnings: list[str] = []
     if shallow:
         warnings.append("repository is shallow; history before the shallow boundary is unavailable")
@@ -576,13 +724,16 @@ def collect_git_history(
         "schema_version": 1,
         "repository_id": effective_repository_id,
         "resolved_ref": resolved_ref,
+        "after": resolved_after,
+        "incremental_boundary_is_ancestor": boundary_is_ancestor,
         "since": normalized_since,
         "requested_max_commits": max_commits,
+        "budgets": selected_budgets.to_dict(),
         "shallow": shallow,
         "truncated": truncated,
         "storage_truncated": storage_truncated,
-        "storage_byte_limit": HISTORY_JSONL_MAX_BYTES,
-        "storage_line_byte_limit": HISTORY_JSONL_MAX_LINE_BYTES,
+        "storage_byte_limit": storage_byte_limit,
+        "storage_line_byte_limit": storage_line_byte_limit,
         "event_log_bytes": event_log_bytes,
         "change_unit_log_bytes": change_unit_log_bytes,
         "events": [event.to_dict() for event in events],
@@ -597,11 +748,14 @@ def collect_git_history(
         warnings=tuple(warnings),
         manifest_hash=content_hash(manifest),
         resolved_ref=resolved_ref,
+        after=resolved_after,
+        incremental_boundary_is_ancestor=boundary_is_ancestor,
         since=normalized_since,
         requested_max_commits=max_commits,
+        budgets=selected_budgets,
         storage_truncated=storage_truncated,
-        storage_byte_limit=HISTORY_JSONL_MAX_BYTES,
-        storage_line_byte_limit=HISTORY_JSONL_MAX_LINE_BYTES,
+        storage_byte_limit=storage_byte_limit,
+        storage_line_byte_limit=storage_line_byte_limit,
         event_log_bytes=event_log_bytes,
         change_unit_log_bytes=change_unit_log_bytes,
     )
@@ -613,7 +767,9 @@ def ingest_git_history(
     ref: str = "HEAD",
     max_commits: int | None = 1_000,
     since: str | datetime | None = None,
+    after: str | None = None,
     repository_id: str | None = None,
+    budgets: GitHistoryBudgets | None = None,
 ) -> GitHistoryReport:
     """Compatibility alias using ingestion terminology."""
     return collect_git_history(
@@ -621,5 +777,7 @@ def ingest_git_history(
         ref=ref,
         max_commits=max_commits,
         since=since,
+        after=after,
         repository_id=repository_id,
+        budgets=budgets,
     )

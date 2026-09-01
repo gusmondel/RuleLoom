@@ -11,6 +11,7 @@ import pytest
 from ruleloom import cli
 from ruleloom.config import RuleLoomConfig
 from ruleloom.history.github import GitHubHistoryError, GitHubHistoryReport
+from ruleloom.history.github_webhooks import GitHubCaptureDirectoryReport
 from ruleloom.history.models import ChangeUnit, HistoricalEvent
 from ruleloom.history.storage import change_units_path, events_path, load_change_units, load_events
 from ruleloom.models import LabelValue
@@ -52,6 +53,291 @@ def _run(arguments: list[str], capsys: pytest.CaptureFixture[str]) -> dict[str, 
     result = json.loads(captured.out)
     assert isinstance(result, dict)
     return result
+
+
+def test_history_cli_exposes_fail_closed_incremental_git_cursor(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = tmp_path / "incremental-repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "History Test")
+    _git(repo, "config", "user.email", "history@example.invalid")
+    boundary = _commit(repo, "base.txt", "2025-01-01T00:00:00Z")
+    assert cli.main(["init", str(repo)]) == 0
+    capsys.readouterr()
+    initial = _run(
+        [
+            "history",
+            "--root",
+            str(repo),
+            "bootstrap-git",
+            "--all",
+            "--ref",
+            boundary,
+        ],
+        capsys,
+    )
+    assert initial["events_inserted"] == 1
+    expected = _commit(repo, "next.txt", "2025-01-02T00:00:00Z")
+
+    report = _run(
+        [
+            "history",
+            "--root",
+            str(repo),
+            "bootstrap-git",
+            "--after",
+            boundary,
+            "--ref",
+            expected,
+        ],
+        capsys,
+    )
+
+    assert report["after"] == boundary
+    assert report["resolved_ref"] == expected
+    assert report["incremental"] is True
+    assert report["incremental_boundary_is_ancestor"] is True
+    assert report["events_inserted"] == 1
+    assert report["units_inserted"] == 1
+
+
+def test_history_cli_rejects_unrecorded_incremental_boundary_before_collection(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "unrecorded-cursor"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "History Test")
+    _git(repo, "config", "user.email", "history@example.invalid")
+    boundary = _commit(repo, "base.txt", "2025-01-01T00:00:00Z")
+    assert cli.main(["init", str(repo)]) == 0
+    capsys.readouterr()
+    collection_called = False
+
+    def collect(*_args: object, **_kwargs: object) -> object:
+        nonlocal collection_called
+        collection_called = True
+        raise AssertionError("unrecorded cursor reached Git collection")
+
+    monkeypatch.setattr(cli, "collect_git_history", collect)
+
+    assert (
+        cli.main(
+            [
+                "history",
+                "--root",
+                str(repo),
+                "bootstrap-git",
+                "--after",
+                boundary,
+            ]
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert "already-recorded Git commit or merge" in captured.err
+    assert collection_called is False
+    assert load_events(events_path(repo)) == []
+    assert load_change_units(change_units_path(repo)) == []
+
+
+def test_history_cli_rejects_a_different_cursor_in_a_nonempty_ledger(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = tmp_path / "different-cursor"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "History Test")
+    _git(repo, "config", "user.email", "history@example.invalid")
+    recorded = _commit(repo, "recorded.txt", "2025-01-01T00:00:00Z")
+    assert cli.main(["init", str(repo)]) == 0
+    capsys.readouterr()
+    _run(
+        [
+            "history",
+            "--root",
+            str(repo),
+            "bootstrap-git",
+            "--all",
+            "--ref",
+            recorded,
+        ],
+        capsys,
+    )
+    unrecorded = _commit(repo, "unrecorded.txt", "2025-01-02T00:00:00Z")
+
+    assert (
+        cli.main(
+            [
+                "history",
+                "--root",
+                str(repo),
+                "bootstrap-git",
+                "--after",
+                unrecorded,
+            ]
+        )
+        == 2
+    )
+    assert "already-recorded Git commit or merge" in capsys.readouterr().err
+    assert {event.source_ref for event in load_events(events_path(repo))} == {recorded}
+
+
+def test_history_cli_never_persists_a_truncated_incremental_range(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = tmp_path / "truncated-cursor"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "History Test")
+    _git(repo, "config", "user.email", "history@example.invalid")
+    boundary = _commit(repo, "x.txt", "2025-01-01T00:00:00Z")
+    assert cli.main(["init", str(repo)]) == 0
+    capsys.readouterr()
+    _run(
+        [
+            "history",
+            "--root",
+            str(repo),
+            "bootstrap-git",
+            "--all",
+            "--ref",
+            boundary,
+        ],
+        capsys,
+    )
+    _commit(repo, "a.txt", "2025-01-02T00:00:00Z")
+    _commit(repo, "b.txt", "2025-01-03T00:00:00Z")
+    _commit(repo, "c.txt", "2025-01-04T00:00:00Z")
+
+    assert (
+        cli.main(
+            [
+                "history",
+                "--root",
+                str(repo),
+                "bootstrap-git",
+                "--after",
+                boundary,
+                "--max-commits",
+                "1",
+            ]
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert "no partial cursor range" in captured.err
+    assert {event.source_ref for event in load_events(events_path(repo))} == {boundary}
+    assert {unit.prediction_sha for unit in load_change_units(change_units_path(repo))} == {
+        boundary
+    }
+
+
+def test_history_cli_makes_after_and_since_mutually_exclusive(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    with pytest.raises(SystemExit) as raised:
+        cli.build_parser().parse_args(
+            [
+                "history",
+                "--root",
+                str(tmp_path),
+                "bootstrap-git",
+                "--after",
+                "1" * 40,
+                "--since",
+                "2025-01-01T00:00:00Z",
+            ]
+        )
+
+    assert raised.value.code == 2
+    assert "not allowed with argument" in capsys.readouterr().err
+
+
+def test_history_cli_ingests_capture_inbox_with_repository_pin_and_secret_env(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "capture-repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "History Test")
+    _git(repo, "config", "user.email", "history@example.invalid")
+    _commit(repo, "base.txt", "2025-01-01T00:00:00Z")
+    assert cli.main(["init", str(repo)]) == 0
+    capsys.readouterr()
+    config = RuleLoomConfig.load(repo)
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    monkeypatch.setenv("RULELOOM_TEST_ENVELOPE", "a-secret-key-long-enough")
+
+    def ingest(
+        root: Path,
+        selected_inbox: Path,
+        *,
+        expected_repository_id: str,
+        expected_label_policy_hash: str,
+        envelope_key: bytes,
+        max_bundles: int,
+    ) -> GitHubCaptureDirectoryReport:
+        assert root == repo.resolve()
+        assert selected_inbox == inbox
+        assert expected_repository_id == config.protocol.repository_id
+        assert expected_label_policy_hash == "a" * 64
+        assert envelope_key == b"a-secret-key-long-enough"
+        assert max_bundles == 7
+        return GitHubCaptureDirectoryReport(
+            processed_bundles=("delivery.json",),
+            unique_deliveries=1,
+            duplicate_replays=0,
+            events_inserted=2,
+            events_unchanged=0,
+            units_inserted=0,
+            units_unchanged=0,
+        )
+
+    monkeypatch.setattr(cli, "ingest_github_capture_directory", ingest)
+    report = _run(
+        [
+            "history",
+            "--root",
+            str(repo),
+            "ingest-github-captures",
+            str(inbox),
+            "--envelope-key-env",
+            "RULELOOM_TEST_ENVELOPE",
+            "--expected-label-policy-hash",
+            "a" * 64,
+            "--max-bundles",
+            "7",
+        ],
+        capsys,
+    )
+
+    assert report["unique_deliveries"] == 1
+    assert report["events_inserted"] == 2
+
+
+def test_history_cli_requires_an_independent_label_policy_pin() -> None:
+    parser = cli.build_parser()
+
+    with pytest.raises(SystemExit):
+        parser.parse_args(
+            [
+                "history",
+                "ingest-github-captures",
+                "/tmp/capture-inbox",
+            ]
+        )
 
 
 def test_history_cli_bootstraps_imports_materializes_and_reports(

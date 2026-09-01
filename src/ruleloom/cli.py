@@ -6,6 +6,7 @@ import argparse
 import csv
 import hashlib
 import json
+import os
 import shutil
 import sys
 from collections.abc import Sequence
@@ -17,6 +18,11 @@ from typing import Any, Protocol
 from ruleloom import __version__
 from ruleloom.agents import sync_agents
 from ruleloom.config import CONFIG_PATH, RuleLoomConfig, discover_root
+from ruleloom.first_hour import (
+    FirstHourAuditError,
+    RepositoryAuditLimits,
+    audit_repository,
+)
 from ruleloom.gitfacts import (
     BackfillReport,
     GitFactsError,
@@ -34,6 +40,7 @@ from ruleloom.history.github import (
     collect_github_history,
     github_repository_from_origin,
 )
+from ruleloom.history.github_webhooks import ingest_github_capture_directory
 from ruleloom.history.importing import import_change_units, import_events
 from ruleloom.history.materialize import materialize_history
 from ruleloom.history.models import ChangeUnit, HistoricalEvent
@@ -82,7 +89,14 @@ from ruleloom.packs import (
 from ruleloom.predicate_audit import audit_predicates
 from ruleloom.project import initialize_project, validate_observations, validate_project
 from ruleloom.reporting import build_pilot_report, build_pilot_reports
+from ruleloom.repository_assertions import (
+    audit_repository_assertions,
+    declare_repository_assertions,
+    load_repository_assertion_declaration,
+    load_repository_assertion_manifest,
+)
 from ruleloom.storage import (
+    _file_lock,
     append_prediction,
     candidate_path,
     dataset_path,
@@ -94,8 +108,12 @@ from ruleloom.storage import (
     load_shadow,
     load_trusted_predictions,
     predictions_path,
+    project_path,
     save_candidate,
+    write_json,
 )
+
+_REPOSITORY_ASSERTIONS_PATH = Path(".ruleloom/repository-assertions.json")
 
 
 def _json(value: object) -> None:
@@ -191,6 +209,35 @@ def _cmd_init(args: argparse.Namespace) -> int:
         )
     else:
         print("Agent skills: not installed (shadow-safe default)")
+    return 0
+
+
+def _cmd_audit(args: argparse.Namespace) -> int:
+    """Produce useful, outcome-blind repository evidence before initialization."""
+
+    if args.path == "":
+        raise ModelError("audit path must not be empty")
+    root = Path(args.path if args.path is not None else ".").resolve()
+    if not root.is_dir():
+        raise ModelError(f"audit path is not an existing directory: {root}")
+    report = audit_repository(
+        root,
+        ref=args.ref,
+        limits=RepositoryAuditLimits(
+            max_commits=args.max_commits,
+            max_hotspots=args.max_hotspots,
+            max_cochanges=args.max_cochanges,
+            min_cochange_count=args.min_cochange_count,
+            max_cochange_paths_per_commit=args.max_cochange_paths_per_commit,
+            max_pair_updates=args.max_pair_updates,
+            max_total_path_entries=args.max_path_entries,
+            diff_batch_size=args.diff_batch_size,
+        ),
+    )
+    if args.json:
+        _json(report.to_dict())
+    else:
+        print(report.render_text(), end="")
     return 0
 
 
@@ -325,9 +372,39 @@ def _ensure_history_repository(records: Sequence[_HistoricalRecord], repository_
         )
 
 
+def _require_recorded_git_boundary(
+    root: Path,
+    repository_id: str,
+    boundary: str,
+) -> None:
+    """Require an exact Git cursor already bound to this canonical ledger."""
+    existing_events, _existing_units = load_history_snapshot(
+        events_path(root), change_units_path(root)
+    )
+    recorded = any(
+        event.repository_id == repository_id
+        and event.provider == "git"
+        and event.kind in {"git_commit", "git_merge"}
+        and event.source_ref == boundary
+        and event.data.get("sha") == boundary
+        for event in existing_events
+    )
+    if not recorded:
+        raise ModelError(
+            "--after must exactly match the source_ref of an already-recorded Git commit "
+            "or merge in this repository's canonical history ledger"
+        )
+
+
 def _cmd_history_bootstrap_git(args: argparse.Namespace) -> int:
     root, config = _project(args)
     _ensure_repository_boundary(root, config)
+    if args.after is not None:
+        _require_recorded_git_boundary(
+            root,
+            config.protocol.repository_id,
+            args.after,
+        )
     maximum = args.max_commits
     if args.all or maximum is None:
         maximum = None
@@ -336,6 +413,7 @@ def _cmd_history_bootstrap_git(args: argparse.Namespace) -> int:
         ref=args.ref,
         max_commits=maximum,
         since=args.since,
+        after=args.after,
         repository_id=config.protocol.repository_id,
     )
     event_counts, unit_counts = upsert_history_batch(
@@ -401,6 +479,37 @@ def _cmd_history_import(args: argparse.Namespace) -> int:
             "units_unchanged": counts["units_unchanged"],
         }
     )
+    return 0
+
+
+def _cmd_history_ingest_github_captures(args: argparse.Namespace) -> int:
+    root, config = _project(args)
+    _ensure_repository_boundary(root, config)
+    variable = args.envelope_key_env
+    if (
+        not isinstance(variable, str)
+        or not variable
+        or len(variable) > 128
+        or "=" in variable
+        or any(ord(character) < 33 or ord(character) > 126 for character in variable)
+    ):
+        raise ModelError("--envelope-key-env must name one printable environment variable")
+    secret = os.environ.get(variable)
+    if secret is None or not secret:
+        raise ModelError(f"GitHub capture envelope key environment variable is not set: {variable}")
+    try:
+        envelope_key = secret.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ModelError("GitHub capture envelope key must be valid UTF-8") from exc
+    report = ingest_github_capture_directory(
+        root,
+        Path(args.inbox),
+        expected_repository_id=config.protocol.repository_id,
+        expected_label_policy_hash=args.expected_label_policy_hash,
+        envelope_key=envelope_key,
+        max_bundles=args.max_bundles,
+    )
+    _json(report.to_dict())
     return 0
 
 
@@ -1311,6 +1420,64 @@ def _cmd_predicates_audit(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_assertions_declare(args: argparse.Namespace) -> int:
+    root, config = _project(args)
+    _ensure_repository_boundary(root, config)
+    manifest = load_repository_assertion_manifest(Path(args.manifest))
+    declared_at = None if args.declared_at is None else parse_timestamp(args.declared_at)
+    declaration = declare_repository_assertions(
+        root,
+        manifest,
+        repository_id=config.protocol.repository_id,
+        protocol_hash=config.evidence_protocol_hash,
+        predicate_vocabulary=tuple(sorted(config.resolved_pack.predicates)),
+        declared_at=declared_at,
+    )
+    destination = project_path(root, _REPOSITORY_ASSERTIONS_PATH)
+    with _file_lock(destination):
+        if destination.exists() or destination.is_symlink():
+            raise ModelError(
+                f"refusing to overwrite repository assertion declaration: {destination}"
+            )
+        write_json(destination, declaration.to_dict())
+    _json(
+        {
+            "declaration_id": declaration.id,
+            "manifest_hash": declaration.manifest_hash,
+            "assertions": len(declaration.manifest.assertions),
+            "destination": str(_REPOSITORY_ASSERTIONS_PATH),
+            "outcome_blind": True,
+        }
+    )
+    return 0
+
+
+def _cmd_assertions_audit(args: argparse.Namespace) -> int:
+    root, config = _project(args)
+    _ensure_repository_boundary(root, config)
+    declaration = load_repository_assertion_declaration(
+        project_path(root, _REPOSITORY_ASSERTIONS_PATH)
+    )
+    observations = load_observations(dataset_path(root, config))
+    validate_observations(observations, config, as_of=datetime.now(UTC))
+    report = audit_repository_assertions(root, declaration, observations)
+    if args.json:
+        _json(report.to_dict())
+    else:
+        print(report.render_text(), end="")
+    return 0
+
+
+def _cmd_mcp_serve(args: argparse.Namespace) -> int:
+    """Run the optional official-SDK MCP server over local stdio only."""
+
+    root = _root(args)
+    from ruleloom.mcp_sdk import serve_sdk_stdio
+
+    serve_sdk_stdio(root)
+    return 0
+
+
 def _add_root(parser: argparse.ArgumentParser) -> None:
     parser.add_argument(
         "--root",
@@ -1325,6 +1492,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     subparsers = parser.add_subparsers(dest="command", required=True)
+
+    audit = subparsers.add_parser(
+        "audit",
+        help="get an outcome-blind repository structure report without initializing RuleLoom",
+    )
+    audit.add_argument("path", nargs="?", default=".")
+    audit.add_argument("--ref", default="HEAD")
+    audit.add_argument("--max-commits", type=int, default=500)
+    audit.add_argument("--max-hotspots", type=int, default=25)
+    audit.add_argument("--max-cochanges", type=int, default=50)
+    audit.add_argument("--min-cochange-count", type=int, default=2)
+    audit.add_argument("--max-cochange-paths-per-commit", type=int, default=200)
+    audit.add_argument("--max-pair-updates", type=int, default=2_000_000)
+    audit.add_argument("--max-path-entries", type=int, default=1_000_000)
+    audit.add_argument(
+        "--diff-batch-size",
+        type=int,
+        default=128,
+        help="commits per native Git diff batch (lower this for unusually large changes)",
+    )
+    audit.add_argument("--json", action="store_true")
+    audit.set_defaults(handler=_cmd_audit)
 
     init = subparsers.add_parser("init", help="initialize a repository")
     init.add_argument("path", nargs="?")
@@ -1392,6 +1581,41 @@ def build_parser() -> argparse.ArgumentParser:
     predicate_audit.add_argument("--overlap-threshold", type=float, default=0.90)
     predicate_audit.set_defaults(handler=_cmd_predicates_audit)
 
+    assertions = subparsers.add_parser(
+        "assertions",
+        help="freeze and audit explicit repository conventions without interpreting prose",
+    )
+    _add_root(assertions)
+    assertion_commands = assertions.add_subparsers(dest="assertions_command", required=True)
+    assertions_declare = assertion_commands.add_parser(
+        "declare",
+        help="bind a strict assertion manifest to repository sources and predicate vocabulary",
+    )
+    assertions_declare.add_argument("manifest")
+    assertions_declare.add_argument(
+        "--declared-at",
+        help="aware ISO-8601 declaration time for reproducible automation",
+    )
+    assertions_declare.set_defaults(handler=_cmd_assertions_declare)
+    assertions_audit = assertion_commands.add_parser(
+        "audit",
+        help="report structural adherence and exceptions without consulting outcomes",
+    )
+    assertions_audit.add_argument("--json", action="store_true")
+    assertions_audit.set_defaults(handler=_cmd_assertions_audit)
+
+    mcp = subparsers.add_parser(
+        "mcp",
+        help="serve approved-only agent guidance through the optional official MCP SDK",
+    )
+    mcp_commands = mcp.add_subparsers(dest="mcp_command", required=True)
+    mcp_serve = mcp_commands.add_parser(
+        "serve",
+        help="serve the initialized repository over local stdio",
+    )
+    _add_root(mcp_serve)
+    mcp_serve.set_defaults(handler=_cmd_mcp_serve)
+
     collect = subparsers.add_parser("collect", help="collect prediction-time facts")
     _add_root(collect)
     collect_types = collect.add_subparsers(dest="source", required=True)
@@ -1436,7 +1660,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="limit ingestion to the most recent N commits, still bounded by canonical storage",
     )
     bootstrap_git.add_argument("--ref", default="HEAD")
-    bootstrap_git.add_argument("--since", help="optional aware ISO-8601 lower timestamp bound")
+    bootstrap_window = bootstrap_git.add_mutually_exclusive_group()
+    bootstrap_window.add_argument(
+        "--since",
+        help="optional aware ISO-8601 lower timestamp bound (not valid with --after)",
+    )
+    bootstrap_window.add_argument(
+        "--after",
+        help=(
+            "ingest the complete range after this exact already-recorded Git source_ref; "
+            "divergence or truncation fails closed"
+        ),
+    )
     bootstrap_git.set_defaults(handler=_cmd_history_bootstrap_git)
 
     history_import = history_commands.add_parser(
@@ -1450,6 +1685,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="do not assemble change units from imported normalized events",
     )
     history_import.set_defaults(handler=_cmd_history_import)
+
+    github_capture_ingest = history_commands.add_parser(
+        "ingest-github-captures",
+        help="verify and atomically ingest a bounded point-in-time capture inbox",
+    )
+    github_capture_ingest.add_argument("inbox", help="owner-only bundle directory")
+    github_capture_ingest.add_argument(
+        "--envelope-key-env",
+        default="RULELOOM_GITHUB_ENVELOPE_KEY",
+        help=(
+            "environment variable containing the capture HMAC key "
+            "(default: RULELOOM_GITHUB_ENVELOPE_KEY)"
+        ),
+    )
+    github_capture_ingest.add_argument(
+        "--expected-label-policy-hash",
+        required=True,
+        help=("reviewed lowercase SHA-256 policy pin supplied independently of capture bundles"),
+    )
+    github_capture_ingest.add_argument("--max-bundles", type=int, default=1_000)
+    github_capture_ingest.set_defaults(handler=_cmd_history_ingest_github_captures)
 
     github_import = history_commands.add_parser(
         "import-github",
@@ -1662,6 +1918,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         GitFactsError,
         GitHistoryError,
         GitHubHistoryError,
+        FirstHourAuditError,
         PopperError,
     ) as exc:
         print(f"error: {exc}", file=sys.stderr)

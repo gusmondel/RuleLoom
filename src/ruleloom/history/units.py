@@ -18,6 +18,7 @@ _PREDICTION_EVENTS = frozenset({"change_opened", "change_snapshot"})
 _FINAL_EVENTS = frozenset({"change_finalized", "change_merged", "change_closed"})
 _VERIFIABLE_FINAL_EVENTS = _FINAL_EVENTS | {"git_merge"}
 _BUILTIN_GITHUB_ADAPTER = "ruleloom-github/1"
+_BUILTIN_GITHUB_WEBHOOK_ADAPTER = "ruleloom-github-webhook/1"
 _BUILTIN_GITHUB_UNIT_SOURCE_RE = re.compile(
     r"^github:(github\.github\.com\.repo\.[0-9a-f]{20}):pull:[0-9]+(?:$|:)"
 )
@@ -25,6 +26,15 @@ _BUILTIN_GITHUB_EVENT_SOURCE_RE = re.compile(
     r"^github:(github\.github\.com\.repo\.[0-9a-f]{20}):"
     r"(?:pull:[0-9]+|commit:[0-9a-f]{40}|commit:[0-9a-f]{64})(?:$|:)"
 )
+_BUILTIN_GITHUB_WEBHOOK_EVENT_SOURCE_RE = re.compile(
+    r"^github-webhook:(github\.github\.com\.repo\.[0-9a-f]{20}):"
+    r"(?:pull:[0-9]+|label:[0-9]+|check:[0-9]+):delivery:[0-9a-f]{20}$"
+)
+_CONTENT_HASH_RE = re.compile(r"^[0-9a-f]{64}$")
+_BUILTIN_GITHUB_EVENT_SOURCE_PATTERNS = {
+    _BUILTIN_GITHUB_ADAPTER: _BUILTIN_GITHUB_EVENT_SOURCE_RE,
+    _BUILTIN_GITHUB_WEBHOOK_ADAPTER: _BUILTIN_GITHUB_WEBHOOK_EVENT_SOURCE_RE,
+}
 
 
 def _string(data: dict[str, JsonValue], key: str) -> str | None:
@@ -163,6 +173,7 @@ def validate_history_snapshot(
         raise ModelError("historical events must have unique ids")
     validate_unique_event_ownership(units)
     github_keys_by_repository: dict[str, set[str]] = defaultdict(set)
+    github_webhook_policy_hashes_by_repository: dict[str, set[str]] = defaultdict(set)
     for unit in units:
         if unit.kind != "github_archive_change":
             continue
@@ -173,17 +184,38 @@ def validate_history_snapshot(
             )
         github_keys_by_repository[unit.repository_id].add(match.group(1))
     for event in events:
-        if event.data.get("adapter") != _BUILTIN_GITHUB_ADAPTER:
+        raw_adapter = event.data.get("adapter")
+        if not isinstance(raw_adapter, str):
             continue
-        match = _BUILTIN_GITHUB_EVENT_SOURCE_RE.match(event.source_ref)
+        source_pattern = _BUILTIN_GITHUB_EVENT_SOURCE_PATTERNS.get(raw_adapter)
+        if source_pattern is None:
+            continue
+        match = source_pattern.match(event.source_ref)
         if event.provider != "github" or match is None:
-            raise ModelError(f"built-in GitHub event {event.id!r} has invalid provider provenance")
+            raise ModelError(
+                f"built-in GitHub adapter {raw_adapter!r} event {event.id!r} "
+                "has invalid provider provenance"
+            )
         github_keys_by_repository[event.repository_id].add(match.group(1))
+        if raw_adapter == _BUILTIN_GITHUB_WEBHOOK_ADAPTER:
+            capture = event.data.get("capture")
+            policy_hash = capture.get("label_policy_hash") if isinstance(capture, dict) else None
+            if not isinstance(policy_hash, str) or _CONTENT_HASH_RE.fullmatch(policy_hash) is None:
+                raise ModelError(
+                    f"built-in GitHub webhook event {event.id!r} lacks a valid label-policy pin"
+                )
+            github_webhook_policy_hashes_by_repository[event.repository_id].add(policy_hash)
     for repository_id, keys in github_keys_by_repository.items():
         if len(keys) > 1:
             raise ModelError(
                 f"repository {repository_id!r} contains multiple built-in GitHub "
                 "repository identities; start a new experiment for a different provider repo"
+            )
+    for repository_id, policy_hashes in github_webhook_policy_hashes_by_repository.items():
+        if len(policy_hashes) > 1:
+            raise ModelError(
+                f"repository {repository_id!r} contains multiple GitHub label-policy pins; "
+                "start a new experiment when the exact-label policy changes"
             )
     events_by_change: dict[tuple[str, str], list[HistoricalEvent]] = defaultdict(list)
     for event in events:

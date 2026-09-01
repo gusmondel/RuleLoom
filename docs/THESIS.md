@@ -52,7 +52,7 @@ Software repositories offer structured, repeated decisions. Some signals are
 language-neutral—change size, file distribution, tests, documentation, CI, and
 dependency manifests—while specialized packs can add facts about syntax and
 framework behavior such as state mutation, asynchronous code, or navigation.
-RuleLoom 0.6.0 encodes each change as Boolean unary predicates and represents
+RuleLoom 0.7.0 encodes each change as Boolean unary predicates and represents
 conjunctions of those properties as rules rather than opaque scores. It does not
 learn relations among multiple entities.
 
@@ -90,7 +90,7 @@ mechanism for repository-change outcomes and, after prospective validation, for
 coding guidance. AutoSpec makes that link less speculative for agent safety,
 but it remains unvalidated for this product target.
 
-Cold start does not mean waiting for a year of future labels. Version 0.6.0 can
+Cold start does not mean waiting for a year of future labels. Version 0.7.0 can
 ingest a bounded recent prefix of the reachable Git graph immediately and
 combine it with authorized, normalized forge/review/CI/revert/incident events
 already retained by the repository workflow. A bounded built-in GitHub adapter
@@ -223,7 +223,7 @@ yet support third-party pack plugins, so broader extensibility remains unproven.
 - Collection does not alter application code.
 - The default evidence path is deterministic and the selected pack must attach
   provenance to every emitted fact. Although the artifact schema reserves
-  `agent`, `human`, and `imported` provenance kinds, version 0.6.0 accepts only
+  `agent`, `human`, and `imported` provenance kinds, version 0.7.0 accepts only
   exact deterministic built-in-pack provenance for validation, learning, and
   prediction; non-deterministic facts are future work.
 - Each experiment selects exactly one pack name/version. Pack identity,
@@ -248,13 +248,14 @@ yet support third-party pack plugins, so broader extensibility remains unproven.
 - GitHub archive timeline label names never become outcome evidence. Their
   mutable current names do not prove what a label was called at the historical
   application time. Strong label-backed outcomes require an external
-  point-in-time webhook/export/immutable ledger and normalized event import;
-  v0.6.0 does not ship that capturer.
+  point-in-time webhook/export/immutable ledger and normalized event import.
+  v0.7.0 includes a local GitHub Action/webhook capture substrate for future
+  deliveries; it cannot repair a mutable historical archive after the fact.
 - A predictor snapshot must precede its outcome-generating event. A final diff
   containing validation added because of review is not a valid review-time
   predictor, regardless of chronological ordering.
 - Training never uses observations newer than the holdout.
-- Version 0.6.0 historical materialization emits one observation per stable
+- Version 0.7.0 historical materialization emits one observation per stable
   `ChangeUnit`; `learn` rejects duplicate mature `change_id` values and mixed
   unit cohorts. `git_only`/`final_only` and weak-dependent cases are exploratory,
   and they cannot support approval of a learned historical candidate. A manual
@@ -323,7 +324,7 @@ true after a representative pilot:
 Failure is an acceptable result. The pilot is designed to distinguish a useful
 repository-learning loop from a polished demonstration.
 
-## Scope of version 0.6.0
+## Scope of version 0.7.0
 
 Included:
 
@@ -346,6 +347,9 @@ Included:
 - a bounded GitHub archive adapter through `gh`, with pseudonymized identities,
   explicit skip/truncation reporting, ignored archive timeline label names, and
   always-non-confirmatory `git_only` units;
+- a point-in-time GitHub Action/webhook capture substrate with strict label
+  policies, MAC-protected bundles, repository pinning, and bounded atomic local
+  inbox ingestion;
 - four separate review/CI/revert/incident outcomes, strong-only derivation by
   default, explicit weak-vote opt-in, provenance, and `unknown` on absence or
   conflict;
@@ -355,16 +359,20 @@ Included:
   prospective-only approval evidence;
 - a read-only human diagnosis of the evidence bottleneck and positive/class
   readiness gaps, without claiming to evaluate holdout or prospective gates;
+- a zero-configuration, outcome-blind repository topology audit and explicit
+  repository-assertion adherence audit;
 - a pack-agnostic ILP, evaluation, reporting, and policy lifecycle;
 - bounded Horn clauses with optional closed-world negation;
 - optional, externally provisioned Popper/MDL integration for noisy labels,
-  restricted in version 0.6.0 to one non-recursive rule and no bootstrap reruns;
+  restricted in version 0.7.0 to one non-recursive rule and no bootstrap reruns;
 - chronological holdout, baselines, confusion metrics, and bootstrap stability;
 - label-availability filtering at the holdout boundary;
 - candidate, shadow, approval, deprecation, local-trust, and agent-sync
   lifecycle;
 - immutable local prediction records, prospective reporting, and local
-  assessment for Codex and Claude skills.
+  assessment for Codex and Claude skills;
+- a repository-bound local stdio MCP server that records idempotent assessments
+  and returns approved-only guidance.
 
 Not included:
 
@@ -386,8 +394,9 @@ Not included:
   JSONL contract;
 - automatic interpretation of `AGENTS.md`, `CLAUDE.md`, review prose, issue
   text, or ordinary provider labels as rules or outcomes;
-- automatic point-in-time webhook or immutable ledger capture for label-backed
-  GitHub outcomes;
+- a hosted GitHub App, durable ingestion daemon, or demonstrated automatic-label
+  coverage; the supplied Action/webhook substrate still requires an operator-
+  controlled observer and prospective capture;
 - a confirmatory PR-opening snapshot reconstructed from the GitHub archive;
 - combining multiple packs within one experiment.
 

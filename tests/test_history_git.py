@@ -10,7 +10,12 @@ import pytest
 
 import ruleloom.history.git as history_git
 import ruleloom.history.storage as history_storage
-from ruleloom.history.git import GitHistoryError, collect_git_history, ingest_git_history
+from ruleloom.history.git import (
+    GitHistoryBudgets,
+    GitHistoryError,
+    collect_git_history,
+    ingest_git_history,
+)
 from ruleloom.history.storage import save_change_units, save_events
 from ruleloom.models import canonical_json
 
@@ -208,6 +213,132 @@ def test_overlapping_windows_keep_commit_records_immutable(
     assert overlapping == previous_tip
 
 
+def test_incremental_cursor_is_exclusive_and_reproducible(
+    history_repo: tuple[Path, tuple[str, ...], str],
+) -> None:
+    repo, commits, _ = history_repo
+
+    first = collect_git_history(
+        repo,
+        max_commits=None,
+        after=commits[1],
+        repository_id=REPOSITORY_ID,
+    )
+    second = collect_git_history(
+        repo,
+        max_commits=None,
+        after=commits[1],
+        repository_id=REPOSITORY_ID,
+    )
+
+    assert first == second
+    assert first.after == commits[1]
+    assert first.incremental_boundary_is_ancestor is True
+    assert {event.data["sha"] for event in first.events} == {commits[2], commits[3]}
+    assert commits[1] not in {unit.prediction_sha for unit in first.units}
+    assert first.to_dict()["incremental"] is True
+
+    empty = collect_git_history(
+        repo,
+        max_commits=None,
+        after=commits[3],
+        repository_id=REPOSITORY_ID,
+    )
+    assert empty.examined == 0
+    assert empty.after == commits[3]
+    assert empty.incremental_boundary_is_ancestor is True
+
+
+def test_incremental_cursor_refuses_commit_or_storage_truncation(
+    history_repo: tuple[Path, tuple[str, ...], str],
+) -> None:
+    repo, commits, _ = history_repo
+
+    with pytest.raises(GitHistoryError, match="no partial cursor range"):
+        collect_git_history(
+            repo,
+            max_commits=1,
+            after=commits[0],
+            repository_id=REPOSITORY_ID,
+        )
+    with pytest.raises(GitHistoryError, match="no partial cursor range"):
+        collect_git_history(
+            repo,
+            max_commits=None,
+            after=commits[0],
+            repository_id=REPOSITORY_ID,
+            budgets=GitHistoryBudgets(storage_bytes=1),
+        )
+
+
+def test_incremental_cursor_rejects_since_filtering(
+    history_repo: tuple[Path, tuple[str, ...], str],
+) -> None:
+    repo, commits, _ = history_repo
+
+    with pytest.raises(GitHistoryError, match="mutually exclusive"):
+        collect_git_history(
+            repo,
+            max_commits=None,
+            after=commits[0],
+            since="2026-01-02T00:00:00Z",
+            repository_id=REPOSITORY_ID,
+        )
+
+
+def test_incremental_cursor_fails_closed_on_divergent_history(
+    history_repo: tuple[Path, tuple[str, ...], str],
+) -> None:
+    repo, commits, _ = history_repo
+    _git(repo, "switch", "-c", "divergent", commits[0])
+    divergent = _commit(
+        repo,
+        "Divergent work",
+        "2026-01-05T10:00:00+00:00",
+        "divergent.asset",
+    )
+    _git(repo, "switch", "main")
+
+    with pytest.raises(GitHistoryError, match="not an ancestor"):
+        collect_git_history(
+            repo,
+            max_commits=None,
+            after=divergent,
+            repository_id=REPOSITORY_ID,
+        )
+
+
+def test_explicit_budgets_only_reduce_global_safety_caps(
+    history_repo: tuple[Path, tuple[str, ...], str],
+) -> None:
+    repo, _, _ = history_repo
+
+    with pytest.raises(GitHistoryError, match="timeout_seconds"):
+        GitHistoryBudgets(timeout_seconds=history_git._GIT_TIMEOUT_SECONDS + 1)
+    with pytest.raises(GitHistoryError, match="git_stdout_bytes"):
+        GitHistoryBudgets(git_stdout_bytes=history_git._MAX_GIT_STDOUT_BYTES + 1)
+    with pytest.raises(GitHistoryError, match="storage_bytes"):
+        GitHistoryBudgets(storage_bytes=history_storage.HISTORY_JSONL_MAX_BYTES + 1)
+
+    with pytest.raises(GitHistoryError, match="stdout exceeds 1 bytes"):
+        collect_git_history(
+            repo,
+            repository_id=REPOSITORY_ID,
+            budgets=GitHistoryBudgets(git_stdout_bytes=1),
+        )
+
+    storage_limited = collect_git_history(
+        repo,
+        max_commits=None,
+        repository_id=REPOSITORY_ID,
+        budgets=GitHistoryBudgets(storage_bytes=1),
+    )
+    assert storage_limited.examined == 0
+    assert storage_limited.storage_truncated is True
+    assert storage_limited.storage_byte_limit == 1
+    assert storage_limited.budgets.to_dict()["storage_bytes"] == 1
+
+
 def test_canonical_byte_budget_keeps_persistible_most_recent_prefix(
     history_repo: tuple[Path, tuple[str, ...], str],
     tmp_path: Path,
@@ -345,6 +476,42 @@ def test_detects_shallow_history(tmp_path: Path) -> None:
     assert any("shallow" in warning for warning in report.warnings)
 
 
+def test_incremental_cursor_rejects_locally_valid_shallow_ancestry(tmp_path: Path) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+    _git(source, "init", "-b", "main")
+    _git(source, "config", "user.name", "History Person")
+    _git(source, "config", "user.email", "private@example.test")
+    _commit(source, "First", "2026-01-01T10:00:00Z", "first")
+    _commit(source, "Second", "2026-01-02T10:00:00Z", "second")
+    _commit(source, "Third", "2026-01-03T10:00:00Z", "third")
+
+    shallow = tmp_path / "shallow"
+    subprocess.run(
+        ["git", "clone", "--depth", "2", f"file://{source}", str(shallow)],
+        check=True,
+        capture_output=True,
+    )
+    boundary = _git(shallow, "rev-parse", "HEAD^")
+    assert _git(shallow, "rev-parse", "--is-shallow-repository") == "true"
+    assert (
+        subprocess.run(
+            ["git", "-C", str(shallow), "merge-base", "--is-ancestor", boundary, "HEAD"],
+            check=False,
+            capture_output=True,
+        ).returncode
+        == 0
+    )
+
+    with pytest.raises(GitHistoryError, match="shallow repository"):
+        collect_git_history(
+            shallow,
+            max_commits=None,
+            after=boundary,
+            repository_id=REPOSITORY_ID,
+        )
+
+
 def test_deduplicates_unexpected_git_records(
     history_repo: tuple[Path, tuple[str, ...], str],
     monkeypatch: pytest.MonkeyPatch,
@@ -358,12 +525,14 @@ def test_deduplicates_unexpected_git_records(
         *,
         input_bytes: bytes | None = None,
         stdout_limit: int = history_git._MAX_GIT_STDOUT_BYTES,
+        budgets: history_git.GitHistoryBudgets | None = None,
     ) -> tuple[bytes, bytes, int]:
         stdout, stderr, returncode = original(
             target,
             arguments,
             input_bytes=input_bytes,
             stdout_limit=stdout_limit,
+            budgets=budgets,
         )
         if arguments and arguments[0] == "log":
             stdout += stdout
@@ -390,12 +559,14 @@ def test_rejects_non_utf8_commit_metadata(
         *,
         input_bytes: bytes | None = None,
         stdout_limit: int = history_git._MAX_GIT_STDOUT_BYTES,
+        budgets: history_git.GitHistoryBudgets | None = None,
     ) -> tuple[bytes, bytes, int]:
         stdout, stderr, returncode = original(
             target,
             arguments,
             input_bytes=input_bytes,
             stdout_limit=stdout_limit,
+            budgets=budgets,
         )
         if arguments and arguments[0] == "log":
             stdout = stdout.replace(b"Merge feature", b"\xff", 1)
@@ -420,6 +591,7 @@ def test_collection_never_invokes_content_or_language_inspection(
         *,
         input_bytes: bytes | None = None,
         stdout_limit: int = history_git._MAX_GIT_STDOUT_BYTES,
+        budgets: history_git.GitHistoryBudgets | None = None,
     ) -> tuple[bytes, bytes, int]:
         commands.append(arguments)
         return original(
@@ -427,6 +599,7 @@ def test_collection_never_invokes_content_or_language_inspection(
             arguments,
             input_bytes=input_bytes,
             stdout_limit=stdout_limit,
+            budgets=budgets,
         )
 
     monkeypatch.setattr(history_git, "_run_git_bounded", record_commands)

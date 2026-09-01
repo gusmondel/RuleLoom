@@ -149,17 +149,22 @@ process with the same OS-user access or a failing filesystem.
 GitHub archive timeline label names are not point-in-time evidence. The provider
 can return the label object's current name alongside an old application event;
 a later rename can therefore manufacture the appearance of a historical outcome
-assertion. RuleLoom v0.6.0 ignores every archive timeline label name during
+assertion. RuleLoom v0.7.0 ignores every archive timeline label name during
 outcome derivation, regardless of syntax, timestamp, or actor.
 
 A label-backed outcome may enter as strong evidence only through an authorized
 webhook, exporter, or append-only ledger that captured the application
-point-in-time and preserves immutable source provenance. That external system
-must establish actor authorization/independence, original timestamp, target,
-value, maturity, completeness, correction policy, and repository binding before
-emitting a normalized event for `history import`. Treat the exporter and its
-ledger as part of the trusted computing base. RuleLoom v0.6.0 does not provide
-this capturer and cannot prove an imported adjudication is truthful.
+point-in-time and preserves immutable source provenance. That system must
+establish actor authorization/independence, original timestamp, target, value,
+maturity, completeness, correction policy, and repository binding. RuleLoom
+v0.7.0 includes a local GitHub Actions capture path whose bundles are
+MAC-protected, repository-pinned, replay-checked, and ingested atomically. The
+workflow, its secret handling, artifact retention, configured label policy, and
+GitHub itself remain part of the trusted computing base; RuleLoom cannot prove
+that an upstream event or adjudication was truthful.
+The capture and convergence APIs require the configured RuleLoom repository ID
+and an independently frozen keyed label-policy hash on every call, including an
+empty ledger. Never derive that expected policy hash from an incoming bundle.
 
 Evidence packs are selected from a versioned built-in registry; this release
 does not discover or execute third-party pack code. For configuration schema v2
@@ -200,9 +205,15 @@ Review generated skill diffs before use. Shadow policies are never rendered by
 `sync-agents`; during shadow mode, do not make the policy artifacts, predictions,
 or observer output visible to the agent or people who determine outcome labels.
 
+The local MCP server validates both the Git top level and repository identity,
+caps complete SDK responses, and marks human-readable fact evidence as untrusted
+data. It does not execute that evidence. A hosted or otherwise networked MCP
+client can still transmit tool inputs and outputs to its configured model
+provider; local RuleLoom execution is not an end-to-end confidentiality claim.
+
 ## Dependency and release hygiene
 
-Version 0.6.0 supports macOS and Linux and relies on POSIX `fcntl` locking; Windows
+Version 0.7.0 supports macOS and Linux and relies on POSIX `fcntl` locking; Windows
 is not supported. The core intentionally has no runtime Python dependencies.
 Optional Popper and solver integrations expand the trusted computing base and
 must be pinned, recorded, and tested. RuleLoom does not download or install

@@ -79,6 +79,144 @@ def _run_cli(arguments: list[str], capsys: pytest.CaptureFixture[str]) -> tuple[
     return exit_code, captured.out, captured.err
 
 
+def test_cli_audit_delivers_read_only_value_before_initialization(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = tmp_path / "uninitialized"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "ruleloom@example.test")
+    _git(repo, "config", "user.name", "RuleLoom Test")
+    (repo / "src").mkdir()
+    (repo / "src" / "service.txt").write_text("first\n", encoding="utf-8")
+    _commit(repo, "Initial", "2026-01-01T10:00:00Z")
+    (repo / "src" / "service.txt").write_text("first\nsecond\n", encoding="utf-8")
+    _commit(repo, "Follow-up", "2026-01-02T10:00:00Z")
+
+    exit_code, stdout, stderr = _run_cli(
+        ["audit", str(repo), "--max-commits", "2", "--json"], capsys
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    payload = json.loads(stdout)
+    assert payload["outcome_blind"] is True
+    assert payload["read_only"] is True
+    assert payload["topology"]["commit_count"] == 2
+    assert payload["hotspots"][0]["path"] == "src/service.txt"
+
+    exit_code, stdout, stderr = _run_cli(["audit", str(repo), "--max-commits", "2"], capsys)
+    assert exit_code == 0
+    assert stderr == ""
+    assert stdout.startswith("RuleLoom repository structure audit\n")
+    assert "does not estimate risk" in stdout
+    assert not (repo / ".ruleloom").exists()
+
+    exit_code, stdout, stderr = _run_cli(
+        ["audit", str(repo), "--max-commits", "1", "--json"], capsys
+    )
+    assert exit_code == 0
+    assert stderr == ""
+    assert json.loads(stdout)["topology"]["commit_count"] == 1
+
+
+def test_cli_declares_and_audits_explicit_repository_assertions(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = tmp_path / "assertions"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "ruleloom@example.test")
+    _git(repo, "config", "user.name", "RuleLoom Test")
+    (repo / "CONVENTIONS.txt").write_text(
+        "Documentation changes should include a test change.\n", encoding="utf-8"
+    )
+    (repo / "source.txt").write_text("initial\n", encoding="utf-8")
+    _commit(repo, "Initial", "2026-01-01T10:00:00Z")
+    (repo / "guide.md").write_text("guide\n", encoding="utf-8")
+    _commit(repo, "Docs without test", "2026-01-02T10:00:00Z")
+    (repo / "guide.md").write_text("guide updated\n", encoding="utf-8")
+    (repo / "service_test.txt").write_text("test\n", encoding="utf-8")
+    _commit(repo, "Docs with test", "2026-01-03T10:00:00Z")
+
+    exit_code, _, stderr = _run_cli(["init", str(repo)], capsys)
+    assert exit_code == 0
+    assert stderr == ""
+    exit_code, _, stderr = _run_cli(["collect", "--root", str(repo), "git", "--last", "3"], capsys)
+    assert exit_code == 0
+    assert stderr == ""
+
+    manifest_path = tmp_path / "assertions.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "assertions": [
+                    {
+                        "assertion_id": "docs_expect_tests",
+                        "revision": 1,
+                        "summary": "Documentation changes expect a test change.",
+                        "category": "test_structure",
+                        "semantics": "antecedent_implies_expectation",
+                        "antecedent": [{"predicate": "touches_docs", "negated": False}],
+                        "expectation": [{"predicate": "touches_test", "negated": False}],
+                        "sources": [{"path": "CONVENTIONS.txt", "start_line": 1, "end_line": 1}],
+                    }
+                ],
+            }
+        ),
+        encoding="utf-8",
+    )
+    exit_code, stdout, stderr = _run_cli(
+        [
+            "assertions",
+            "--root",
+            str(repo),
+            "declare",
+            str(manifest_path),
+            "--declared-at",
+            "2026-01-04T10:00:00Z",
+        ],
+        capsys,
+    )
+    assert exit_code == 0
+    assert stderr == ""
+    assert json.loads(stdout)["assertions"] == 1
+
+    exit_code, stdout, stderr = _run_cli(
+        [
+            "assertions",
+            "--root",
+            str(repo),
+            "declare",
+            str(manifest_path),
+            "--declared-at",
+            "2026-01-04T10:00:00Z",
+        ],
+        capsys,
+    )
+    assert exit_code == 2
+    assert stdout == ""
+    assert "refusing to overwrite repository assertion declaration" in stderr
+
+    exit_code, stdout, stderr = _run_cli(
+        ["assertions", "--root", str(repo), "audit", "--json"], capsys
+    )
+    assert exit_code == 0
+    assert stderr == ""
+    audit = json.loads(stdout)
+    assert audit["outcome_blind"] is True
+    assert audit["rows"][0]["eligible_observations"] == 2
+    assert audit["rows"][0]["adherence_rate"] == 0.5
+
+    exit_code, stdout, stderr = _run_cli(["assertions", "--root", str(repo), "audit"], capsys)
+    assert exit_code == 0
+    assert stderr == ""
+    assert "docs_expect_tests: 50.0%; 2 eligible, 1 exceptions" in stdout
+
+
 def _label_history(
     repo: Path,
     commits: list[str],

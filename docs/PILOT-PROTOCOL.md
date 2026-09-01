@@ -374,7 +374,7 @@ ruleloom history materialize
 ruleloom history status
 ```
 
-The v0.6.0 adapter supports the explicit `github.com` host. By default it
+The v0.7.0 archive adapter supports the explicit `github.com` host. By default it
 requires `OWNER/NAME` to equal the repository parsed from an unambiguous
 public-GitHub HTTPS, SSH, or SCP-style `remote.origin.url`. A reviewed mirror or
 checkout without a verifiable matching origin requires
@@ -547,8 +547,9 @@ object. A rename after the PR event can therefore retroactively make an ordinary
 application look like a structured assertion. The archive cannot recover the
 original name, and an as-of cutoff or actor check does not fix the ambiguity.
 
-If the workflow uses labels for adjudication, install a separate authorized
-webhook, exporter, or append-only ledger **before** the relevant changes. It
+If the workflow uses labels for adjudication, install the supplied Action, an
+authorized webhook, an exporter, or an append-only ledger **before** the
+relevant changes. It
 must capture each application point-in-time and retain the original timestamp,
 repository/change identity, authorized independent actor, atomic target,
 positive/negative value, complete maturity evidence, and correction history.
@@ -557,11 +558,14 @@ Export that record as an immutable normalized outcome event and import it with
 at least one positive, one mature negative, one conflict, and one correction
 against the source ledger.
 
-RuleLoom v0.6.0 does not ship this GitHub webhook or label-ledger exporter. Until
-such point-in-time evidence exists, archive label names contribute no strong or
-weak vote; a label-only case remains `unknown`. The weak merge-result CI and Git
-revert heuristics above remain available only through `--include-weak` and are
-still non-confirmatory.
+RuleLoom v0.7.0 ships a local GitHub Action/webhook capture substrate and bounded
+inbox ingestion, not a hosted App or durable observer daemon. Follow
+[`integrations/GITHUB-CAPTURE.md`](integrations/GITHUB-CAPTURE.md), preregister
+the strict label policy, and measure delivery and maturity coverage. Until a
+point-in-time bundle exists for a change, archive label names contribute no
+strong or weak vote and a label-only case remains `unknown`. The weak
+merge-result CI and Git revert heuristics above remain available only through
+`--include-weak` and are still non-confirmatory.
 
 For a manually curated fallback on ordinary `git_commit` or prospective
 observations, apply labels from independent outcome evidence:

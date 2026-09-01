@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ruleloom:schema:github-label-policy:v1",
+  "title": "RuleLoom GitHub label outcome policy v1",
+  "description": "Pre-registered exact label assertions accepted by the point-in-time GitHub capture adapter.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "labels"],
+  "properties": {
+    "schema_version": {"const": 1},
+    "labels": {
+      "type": "array",
+      "maxItems": 1000,
+      "items": {"$ref": "#/$defs/label"}
+    }
+  },
+  "$defs": {
+    "label": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "target",
+        "value",
+        "evidence_complete",
+        "authorized_actor_ids"
+      ],
+      "properties": {
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]+$"
+        },
+        "target": {
+          "enum": [
+            "validation_rework_required",
+            "change_attributable_ci_failure",
+            "post_merge_revert_or_hotfix",
+            "post_merge_defect"
+          ]
+        },
+        "value": {"enum": ["positive", "negative"]},
+        "evidence_complete": {"const": true},
+        "authorized_actor_ids": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 9223372036854775807
+          }
+        }
+      }
+    }
+  },
+  "$comment": "The Python parser additionally enforces unique exact label names."
+}

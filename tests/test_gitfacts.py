@@ -246,6 +246,38 @@ def test_collection_is_reproducible(flutter_repo: tuple[Path, str, str]) -> None
     assert first.source["extractor"] == "ruleloom.flutter_testing.git.v1"
 
 
+def test_snapshot_can_omit_only_the_discarded_topological_index(
+    flutter_repo: tuple[Path, str, str],
+) -> None:
+    repo, base, head = flutter_repo
+
+    indexed = collect_snapshot(repo, base, head, protocol_hash=PROTOCOL_HASH)
+    unindexed = collect_snapshot(
+        repo,
+        base,
+        head,
+        protocol_hash=PROTOCOL_HASH,
+        include_topological_index=False,
+    )
+
+    indexed_payload = indexed.to_dict()
+    unindexed_payload = unindexed.to_dict()
+    indexed_metadata = indexed_payload["metadata"]
+    assert isinstance(indexed_metadata, dict)
+    del indexed_metadata["topological_index"]
+    assert indexed_payload == unindexed_payload
+    assert "topological_index" not in unindexed.metadata
+
+    with pytest.raises(GitFactsError, match="must be a boolean"):
+        collect_snapshot(
+            repo,
+            base,
+            head,
+            protocol_hash=PROTOCOL_HASH,
+            include_topological_index=1,  # type: ignore[arg-type]
+        )
+
+
 def test_legacy_config_and_bare_collector_defaults_remain_compatible(
     flutter_repo: tuple[Path, str, str],
 ) -> None:

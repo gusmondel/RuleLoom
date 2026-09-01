@@ -107,6 +107,7 @@ def _historical_observation(
         pack_config=config.pack_config,
         evidence_config=config.evidence,
         repository_id=config.protocol.repository_id,
+        include_topological_index=False,
     )
     evidence = derivation.evidence
     label = derivation.value

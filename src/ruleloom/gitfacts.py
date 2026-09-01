@@ -938,9 +938,17 @@ def collect_snapshot(
     pack_config: ConfiguredPathsConfig | None = None,
     evidence_config: EvidenceConfig | None = None,
     repository_id: str | None = None,
+    include_topological_index: bool = True,
 ) -> Observation:
-    """Collect one immutable observation for a committed ``base``/``head`` range."""
+    """Collect one immutable observation for a committed ``base``/``head`` range.
 
+    ``include_topological_index=False`` is reserved for callers, such as the
+    historical materializer, that deliberately omit the field from their final
+    observation. Standalone collection preserves the existing indexed behavior.
+    """
+
+    if not isinstance(include_topological_index, bool):
+        raise GitFactsError("include_topological_index must be a boolean")
     _pack(pack, pack_version, pack_config)
     extraction = _evidence_profile(pack, pack_version, evidence_config)
     root, repository_name = _repository(repo, repository_id)
@@ -960,7 +968,9 @@ def collect_snapshot(
         evidence_config=extraction,
         observation_id=f"range.{digest}",
         source_kind="git_range",
-        topological_index=_first_parent_position(root, head_commit),
+        topological_index=(
+            _first_parent_position(root, head_commit) if include_topological_index else None
+        ),
     )
 
 

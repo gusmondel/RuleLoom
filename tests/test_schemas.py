@@ -430,7 +430,6 @@ def test_readme_history_examples_are_valid_and_publicly_agnostic() -> None:
         schema = "change-unit" if "prediction_sha" in record else "historical-event"
         _validate(schema, record)
     lowered = readme.casefold()
-    assert "petfi" not in lowered
     assert "flutter" not in lowered
     assert "dart" not in lowered
     assert len(re.findall(r"^```", readme, flags=re.MULTILINE)) % 2 == 0

@@ -1,15 +1,18 @@
 # RuleLoom
 
-**Inductive logic programming for evidence-backed coding-agent policies.**
+**Evidence-backed guardrails for coding agents, learned from repository history.**
 
-RuleLoom is an experimental CLI that turns a repository's change history into
-small, inspectable Horn rules. It separates deterministic facts available at a
-prediction point from outcomes observed later, evaluates learned rules on a
-chronological holdout, and requires human review before any rule can reach a
-coding agent.
+[![CI](https://github.com/gusmondel/RuleLoom/actions/workflows/ci.yml/badge.svg)](https://github.com/gusmondel/RuleLoom/actions/workflows/ci.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/License-Apache--2.0-blue.svg)](https://github.com/gusmondel/RuleLoom/blob/main/LICENSE)
+
+RuleLoom is a local-first, experimental CLI that turns repository history into
+small, inspectable Horn rules. It can also audit repository structure and
+explicit engineering conventions before any labels exist. Every predictive
+claim keeps its point-in-time facts, later outcomes, chronological evaluation,
+and review state attached as evidence.
 
 > [!WARNING]
-> RuleLoom v0.6.0 is alpha research software. Start in blinded shadow mode. Do
+> RuleLoom v0.7.0 is alpha research software. Start in blinded shadow mode. Do
 > not use it as a merge gate, security control, or autonomous policy publisher.
 
 The core is language- and provider-neutral. Programming-language knowledge
@@ -20,10 +23,12 @@ only on persisted Boolean facts, timestamps, provenance, and stable change IDs.
 ## Table of contents
 
 - [Why RuleLoom](#why-ruleloom)
+- [First-five-minute structural audit](#first-five-minute-structural-audit)
 - [What it does—and does not do](#what-it-doesand-does-not-do)
 - [How it works](#how-it-works)
 - [Install](#install)
 - [Quick start: bootstrap an existing repository](#quick-start-bootstrap-an-existing-repository)
+- [Decision-time MCP integration](#decision-time-mcp-integration)
 - [Normalized history JSONL](#normalized-history-jsonl)
 - [Evidence grades and promotion gates](#evidence-grades-and-promotion-gates)
 - [What RuleLoom can learn](#what-ruleloom-can-learn)
@@ -58,17 +63,57 @@ It addresses four practical gaps:
 - **governance:** keep candidate, shadow, approved, and deprecated states
   separate and auditable.
 
+The intended owner is a Platform, DevEx, or agent-infrastructure team that needs
+repository-specific guidance with local evidence processing rather than a
+required hosted RuleLoom service.
+The differentiator is not merely generating a rule; it is being able to answer
+“why did this guidance appear, what evidence supported it, and is it still
+holding?”
+
+## First-five-minute structural audit
+
+From any Git checkout, before initialization or labels:
+
+```bash
+ruleloom audit .
+```
+
+The command is read-only and outcome-blind. It reports change-size quantiles,
+frequently changed paths, bounded co-change pairs, coverage, truncation, and the
+limits of the evidence. It does **not** call co-change a dependency or estimate
+defect risk. Use `--json` for automation. Lower `--diff-batch-size` to reduce
+RuleLoom's aggregate subprocess output when several commits are large; it cannot
+split the numstat of one megachange.
+
+```mermaid
+flowchart LR
+    C[Git checkout] --> A[ruleloom audit]
+    A --> T[Repository topology]
+    A --> H[Hotspots and co-change]
+    A --> Q[Change-size quantiles]
+    T --> R[Readable report + JSON manifest]
+    H --> R
+    Q --> R
+    R --> N[Choose the next evidence experiment]
+```
+
+That is immediate structural evidence. Whether teams find it actionable remains
+an adoption hypothesis with an explicit usability gate. Predictive value is a
+separate, higher evidence level and requires later outcomes.
+
 The approach is supported—not proven—by research on just-in-time defect
 prediction, temporal evaluation, noisy CI and defect labels, and repository
 experience. The evidence matrix and limitations are documented in
-[docs/RESEARCH.md](docs/RESEARCH.md); the product hypothesis and falsification
-criteria are in [docs/THESIS.md](docs/THESIS.md).
+[docs/RESEARCH.md](https://github.com/gusmondel/RuleLoom/blob/main/docs/RESEARCH.md);
+the product hypothesis and falsification criteria are in
+[docs/THESIS.md](https://github.com/gusmondel/RuleLoom/blob/main/docs/THESIS.md).
 
 ## What it does—and does not do
 
 RuleLoom does:
 
 - collect language-neutral Git topology and deterministic change facts;
+- produce a zero-configuration, read-only structural audit;
 - import provider-neutral historical events and logical `ChangeUnit` records;
 - collect a bounded GitHub PR/review/check/revert archive through the authenticated
   `gh` CLI;
@@ -76,12 +121,14 @@ RuleLoom does:
   incident evidence;
 - freeze explicit, hand-authored Horn risk rules and audit their historical
   coverage before a prospective shadow pilot;
+- bind explicit repository conventions to hashed source spans and audit their
+  structural adherence without interpreting prose;
 - keep unknown outcomes unknown instead of silently treating absence as a
   negative;
 - learn non-recursive unary Horn rules and compare them with simple baselines;
 - split evidence chronologically and record the exact train/holdout IDs;
-- assess reviewed rules prospectively and render approved rules for Codex or
-  Claude Code.
+- assess reviewed rules prospectively, expose approved-only guidance through a
+  local stdio MCP server, and render approved rules for supported agents.
 
 RuleLoom does not:
 
@@ -92,7 +139,7 @@ RuleLoom does not:
 - infer a negative outcome merely because no failure was recorded;
 - interpret `AGENTS.md`, `CLAUDE.md`, issue text, review prose, or ordinary
   GitHub labels as rules or outcomes;
-- invent new predicates in v0.6.0;
+- invent or activate new predicates in v0.7.0;
 - implement full relational ILP with joins, recursion, entity variables, or
   unrestricted predicate invention;
 - automatically fetch data from every forge or project-management provider.
@@ -101,7 +148,8 @@ RuleLoom does not:
 
 ```mermaid
 flowchart LR
-    G[Git object graph] --> H[Historical events and ChangeUnits]
+    G[Git object graph] --> D[Day-one structural audit]
+    G --> H[Historical events and ChangeUnits]
     P[Forge / review / CI / incident exporter] --> H
     H --> S[Prediction-time snapshot]
     S --> E[Versioned evidence pack]
@@ -116,7 +164,8 @@ flowchart LR
     R -->|accepted for observation| SH[Blinded shadow]
     SH --> PG{Prospective gates}
     PG -->|pass + explicit approval| A[Approved policy]
-    A --> X[Codex / Claude adapters]
+    A --> X[Agent adapters]
+    A --> MCP[Local approved-only MCP]
 ```
 
 The important boundary is time. For each logical change, facts must be
@@ -148,12 +197,14 @@ Requirements:
 - Git;
 - the authenticated GitHub CLI (`gh`) only when using
   `history import-github`;
-- macOS or Linux. v0.6.0 uses POSIX `fcntl` locking and does not support
+- macOS or Linux. v0.7.0 uses POSIX `fcntl` locking and does not support
   Windows.
 
 From a checkout:
 
 ```bash
+git clone https://github.com/gusmondel/RuleLoom.git
+cd RuleLoom
 uv tool install .
 ```
 
@@ -170,19 +221,44 @@ initialized RuleLoom project, so run it after step 1 below:
 
 ```bash
 ruleloom --version
+ruleloom audit /path/to/repository
 ```
+
+For local MCP serving, choose the optional official SDK integration instead of
+the core-only install command:
+
+```bash
+uv tool install '.[mcp]'
+```
+
+The repository does not claim a PyPI release until a versioned/tagged release has
+actually been published. Release automation is prepared for PyPI Trusted
+Publishing; see
+[docs/RELEASING.md](https://github.com/gusmondel/RuleLoom/blob/main/docs/RELEASING.md).
 
 The built-in Horn engine has no runtime Python dependencies. The optional
 Popper adapter requires a separately provisioned, pinned Popper checkout,
 SWI-Prolog, GNU `timeout`, and a compatible Python runtime. RuleLoom never clones
 or installs those dependencies while learning; see
-[docs/PILOT-PROTOCOL.md](docs/PILOT-PROTOCOL.md) before enabling it.
+[docs/PILOT-PROTOCOL.md](https://github.com/gusmondel/RuleLoom/blob/main/docs/PILOT-PROTOCOL.md)
+before enabling it.
 
 ## Quick start: bootstrap an existing repository
 
 Run these commands from the repository whose evidence you want to study. It
 must have either `remote.origin.url` or at least one commit so RuleLoom can
 derive a stable repository identity.
+
+### 0. Audit without creating state
+
+```bash
+ruleloom audit .
+ruleloom audit . --json > ruleloom-structure-audit.json
+```
+
+The audit does not create `.ruleloom/`, read outcomes, infer a programming
+language, or require a forge account. Decide whether the structural findings
+are useful before starting an evidence experiment.
 
 At any point after initialization, run:
 
@@ -234,10 +310,36 @@ the exact event/unit byte totals, both limits, and a manifest hash that binds
 those values. Re-running the command is idempotent for identical immutable
 records.
 
-Git topology is useful on day one, but it is **exploratory**: it cannot prove a
+Git topology is available on day one, but it is **exploratory**: it cannot prove a
 PR-time snapshot or an independent outcome. Shallow, commit-limited, and
 storage-limited histories are reported explicitly. Raw Git output has a separate
 bounded safety limit and fails closed when unusually large metadata exceeds it.
+
+For later observer runs, keep the exact `resolved_ref` from a successfully
+persisted Git bootstrap and collect only its descendants:
+
+```bash
+ruleloom history bootstrap-git --after <previous-resolved-ref>
+```
+
+The boundary must already exist as a Git commit or merge `source_ref` in this
+repository's canonical ledger and must still be an ancestor of the selected
+ref. A cursor from an empty, foreign, or different ledger is rejected before
+collection. Force-pushed, rewritten, or divergent history is rejected instead
+of silently combined. Incremental collection from a shallow clone is also
+rejected: fetch the complete history before advancing a cursor. A shallow
+bootstrap without `--after` remains available only as explicitly incomplete,
+exploratory evidence.
+
+An incremental interval must be complete. If `--max-commits`, the hard commit
+cap, or canonical storage budgets would truncate the range, the command fails
+without persisting it and its `resolved_ref` must not be used as the next
+cursor. `--after` and `--since` are mutually exclusive because commit timestamps
+are not a safe contiguous cursor. Advance the saved cursor only after a
+successful, non-truncated collection. Git traversal is then bounded to new
+commits, but the v1 JSONL upsert still validates and rewrites the retained
+ledger. See
+[Git history performance and storage](https://github.com/gusmondel/RuleLoom/blob/main/docs/PERFORMANCE.md).
 
 ### 3. Audit the frozen vocabulary before opening outcomes
 
@@ -285,9 +387,50 @@ An LLM may inspect outcome-blind repository structure, architecture documents,
 and this audit to propose candidate concepts. It cannot activate them: a human
 must review the semantics, deterministic extraction must verify them, and the
 new vocabulary must be frozen before outcomes are opened. RuleLoom does not
-perform automatic predicate invention in v0.6.0.
+perform automatic predicate invention in v0.7.0.
+
+If an existing convention can already be expressed using the frozen predicate
+vocabulary, encode it explicitly rather than asking RuleLoom to parse prose.
+For example, copy `examples/repository-assertions.json` into the target
+repository, then edit its predicates and `sources` span so it cites the real
+file that declares the convention:
+
+```bash
+ruleloom assertions --root . declare examples/repository-assertions.json
+ruleloom assertions --root . audit
+```
+
+The declaration hashes its source span and binds the vocabulary and evidence
+protocol. The audit reports structural adherence and exceptions only; it does
+not claim that adherence prevented failures.
 
 ### 4. Import provider evidence when available
+
+For new GitHub activity, the point-in-time capture integration is the preferred
+evidence path. The included Action reads the trusted `GITHUB_EVENT_PATH` before
+any checkout or repository code runs, normalizes an allow-list of structured
+fields, and writes a MAC-protected immutable bundle to operator-controlled
+storage. The Action does not make network calls and does not claim that an
+Actions event file carries a provider webhook signature.
+
+After durable bundles are copied to an observer inbox, ingest them atomically:
+
+```bash
+export RULELOOM_GITHUB_ENVELOPE_KEY='<at-least-16-byte-secret>'
+export RULELOOM_FROZEN_LABEL_POLICY_HASH='reviewed-64-hex-policy-pin'
+ruleloom history ingest-github-captures /absolute/path/to/inbox \
+  --envelope-key-env RULELOOM_GITHUB_ENVELOPE_KEY \
+  --expected-label-policy-hash "$RULELOOM_FROZEN_LABEL_POLICY_HASH"
+```
+
+Every bundle is verified before one history transaction begins. A corrupt
+bundle, symlink, cross-repository record, conflicting replay, or archive upgrade
+rejects the complete inbox; files are never deleted or moved. Exact setup,
+trust boundaries, label-policy requirements, and the pinning placeholder are in
+[the GitHub capture guide](https://github.com/gusmondel/RuleLoom/blob/main/docs/integrations/GITHUB-CAPTURE.md).
+Capturing events
+is not yet the same as demonstrating automatic label supply: that claim remains
+gated on coverage and audited precision.
 
 For a public GitHub repository, authenticate the official CLI and collect a
 bounded archive:
@@ -302,7 +445,7 @@ or SCP-style `remote.origin.url`. A reviewed mirror or checkout whose origin
 cannot establish that equality requires the explicit
 `--allow-unverified-repository` override;
 the report records `repository_binding` and the manifest hash binds that choice.
-The adapter does not support a GitHub Enterprise host in v0.6.0.
+The archive adapter does not support a GitHub Enterprise host in v0.7.0.
 
 `--since` filters PRs by `created_at` and also bounds the repository-commit scan.
 `--until` is an inclusive as-of cutoff for PR creation and finalization and for
@@ -363,9 +506,10 @@ or append-only adjudication ledger captured the label application point-in-time
 and can emit a normalized immutable outcome event with its original timestamp,
 target, value, evidence completeness, and independent provenance. Import that
 event through `ruleloom history import`; retain and audit the external source.
-RuleLoom v0.6.0 does not ship this point-in-time label capturer. The archive
-adapter itself produces no strong outcome from label names and cannot upgrade
-its exploratory `git_only` units.
+RuleLoom v0.7.0 ships the local point-in-time Action/webhook capture substrate
+described above. The archive adapter itself still produces no strong outcome
+from label names and cannot upgrade an existing exploratory `git_only` unit;
+start a clean experiment for point-in-time capture of that change.
 
 For another provider, export review, CI, change-snapshot, revert, and incident
 data into the normalized JSONL contract, then import it:
@@ -543,7 +687,52 @@ ACL, or CI job.
 
 Approval and `sync-agents` belong to a later, separately reviewed rollout after
 prospective gates pass. The complete runbook is in
-[docs/PILOT-PROTOCOL.md](docs/PILOT-PROTOCOL.md).
+[docs/PILOT-PROTOCOL.md](https://github.com/gusmondel/RuleLoom/blob/main/docs/PILOT-PROTOCOL.md).
+
+## Decision-time MCP integration
+
+The optional MCP server runs locally over stdio and is bound to one initialized
+Git top level. It uses the official Python MCP SDK and exposes three tools:
+
+| Tool | Result |
+| --- | --- |
+| `assess_change` | Extract deterministic facts and durably record an idempotent prediction |
+| `get_guidance` | Return approved-only guidance for that prediction |
+| `explain_evidence` | Expand the facts, provenance, and approved matches on request |
+
+Shadow policies may be evaluated internally for the pilot, but their matches
+are never returned to the agent. `assess_change` writes a local observation and
+prediction; the other two tools read that trusted record. Human-readable
+`fact_evidence` comes from the repository: the response marks it as untrusted
+data, caps the complete payload, and never treats it as agent instructions.
+
+After installing the `[mcp]` extra, register the same server command in any
+stdio-capable MCP client. For Codex:
+
+```bash
+codex mcp add ruleloom -- \
+  ruleloom mcp serve --root /absolute/path/to/repository
+codex mcp list
+```
+
+For Claude Code:
+
+```bash
+claude mcp add --transport stdio --scope project ruleloom -- \
+  ruleloom mcp serve --root /absolute/path/to/repository
+claude mcp get ruleloom
+```
+
+Both clients require the user to trust the local server configuration. Keep the
+server repository-scoped: it refuses a nested directory and never serves a
+checkout whose derived identity differs from the initialized experiment.
+RuleLoom itself opens no network connection in MCP mode, but an MCP client may
+send tool arguments or results to its configured model provider. Review that
+client's data path before exposing private filenames or evidence. Codex's
+current stdio configuration is documented in the
+[official OpenAI MCP guide](https://developers.openai.com/codex/mcp/); Claude
+Code documents the equivalent command in its
+[MCP guide](https://docs.anthropic.com/en/docs/claude-code/mcp).
 
 ## Normalized history JSONL
 
@@ -588,7 +777,7 @@ repository identities are rejected. Every `ChangeUnit.event_ids` reference must
 exist in the same repository and either name that logical change or be an
 explicitly attached unscoped event (`change_id: null`). Full field semantics and
 limits are in
-[docs/DATA-SCHEMA.md](docs/DATA-SCHEMA.md).
+[docs/DATA-SCHEMA.md](https://github.com/gusmondel/RuleLoom/blob/main/docs/DATA-SCHEMA.md).
 
 ## Evidence grades and promotion gates
 
@@ -692,7 +881,7 @@ predicate configuration, pack name, and pack version are bound into the
 evidence protocol hash. Freeze them before inspecting labels, candidate rules,
 or holdout errors.
 
-Adapters have two independent roles:
+Adapters have three independent roles:
 
 1. **Evidence adapters** normalize a provider's change, review, CI, revert, and
    incident records into historical-event JSONL. The built-in GitHub archive
@@ -701,6 +890,9 @@ Adapters have two independent roles:
 2. **Agent adapters** render only approved policies into
    `.agents/skills/ruleloom/SKILL.md` for Codex and
    `.claude/skills/ruleloom/SKILL.md` for Claude Code.
+3. **MCP transport** lets a compatible local client record a prediction and
+   request approved-only guidance at decision time without changing the
+   provider-neutral policy model.
 
 The canonical policy remains provider-neutral. Generated agent files are
 derived artifacts and should be reviewed like source code.
@@ -709,11 +901,14 @@ derived artifacts and should be reviewed like source code.
 
 | Command | Purpose |
 | --- | --- |
+| `ruleloom audit` | Produce a read-only, outcome-blind structural report before initialization |
 | `ruleloom init` | Initialize one frozen experiment and local data layout |
 | `ruleloom packs list` | Inspect registered evidence packs and predicates |
 | `ruleloom predicates audit` | Audit frozen predicate coverage and drift without outcomes |
+| `ruleloom assertions declare/audit` | Bind explicit conventions and audit structural adherence |
 | `ruleloom diagnose` | Explain the evidence bottleneck, positive/class readiness gaps, and next safe actions without mutation |
 | `ruleloom history bootstrap-git` | Ingest bounded Git topology as exploratory history |
+| `ruleloom history ingest-github-captures` | Verify and atomically ingest point-in-time bundles |
 | `ruleloom history import-github` | Collect a bounded, exploratory GitHub archive through `gh` |
 | `ruleloom history import` | Import normalized events and/or change units |
 | `ruleloom history materialize` | Reconstruct prediction-time facts and conservative labels |
@@ -729,6 +924,7 @@ derived artifacts and should be reviewed like source code.
 | `ruleloom assess` | Evaluate reviewed policies on a stable prospective change ID |
 | `ruleloom report` | Report leakage-aware prospective association metrics |
 | `ruleloom sync-agents` | Render approved policies for selected coding agents |
+| `ruleloom mcp serve` | Serve repository-bound, approved-only guidance over local stdio |
 | `ruleloom deprecate` | Tombstone an active policy with review provenance |
 | `ruleloom trust` | Attest a reviewed artifact in the current checkout/worktree |
 | `ruleloom doctor` | Check the initialized project, Git/Python, and optional learner prerequisites |
@@ -766,8 +962,10 @@ Those controls do not eliminate:
 The design therefore treats retrospective learning as candidate generation and
 requires a blinded prospective shadow period. A later controlled rollout is
 needed to measure whether visible guidance changes outcomes. See the
-[research basis](docs/RESEARCH.md) and
-[pilot protocol](docs/PILOT-PROTOCOL.md) for the pre-registration checklist and
+[research basis](https://github.com/gusmondel/RuleLoom/blob/main/docs/RESEARCH.md)
+and
+[pilot protocol](https://github.com/gusmondel/RuleLoom/blob/main/docs/PILOT-PROTOCOL.md)
+for the pre-registration checklist and
 reporting requirements.
 
 ## Data and security
@@ -784,12 +982,14 @@ notes. Paths alone may disclose sensitive system structure.
 - Treat imported event text, rule explanations, and generated skills as
   untrusted repository data.
 - Do not upload evidence without repository-owner authorization.
+- A local MCP server is not an end-to-end privacy guarantee: the configured
+  agent client may transmit returned paths and evidence to its model provider.
 
 Reviewed artifacts copied through Git are not locally trusted automatically.
 `ruleloom trust` records a checkout-specific attestation after inspection. This
 detects ordinary copying and accidental tampering; it is not a security boundary
 against a malicious same-user process. Report vulnerabilities according to
-[SECURITY.md](SECURITY.md).
+[SECURITY.md](https://github.com/gusmondel/RuleLoom/blob/main/SECURITY.md).
 
 ## Development and contributing
 
@@ -807,17 +1007,27 @@ language/provider boundary, add deterministic provenance for new facts, include
 tests, and update versioned schemas or protocol documentation when contracts
 change.
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) and
-[CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md) before opening a change.
+Read
+[CONTRIBUTING.md](https://github.com/gusmondel/RuleLoom/blob/main/CONTRIBUTING.md)
+and
+[CODE_OF_CONDUCT.md](https://github.com/gusmondel/RuleLoom/blob/main/CODE_OF_CONDUCT.md)
+before opening a change.
 
 ## Documentation
 
-- [Product thesis and falsification criteria](docs/THESIS.md)
-- [Research evidence matrix](docs/RESEARCH.md)
-- [Shadow-pilot protocol](docs/PILOT-PROTOCOL.md)
-- [Versioned data schema](docs/DATA-SCHEMA.md)
-- [Security policy](SECURITY.md)
+- [Product thesis and falsification criteria](https://github.com/gusmondel/RuleLoom/blob/main/docs/THESIS.md)
+- [Research evidence matrix](https://github.com/gusmondel/RuleLoom/blob/main/docs/RESEARCH.md)
+- [Shadow-pilot protocol](https://github.com/gusmondel/RuleLoom/blob/main/docs/PILOT-PROTOCOL.md)
+- [Versioned data schema](https://github.com/gusmondel/RuleLoom/blob/main/docs/DATA-SCHEMA.md)
+- [Git history performance and storage](https://github.com/gusmondel/RuleLoom/blob/main/docs/PERFORMANCE.md)
+- [Point-in-time GitHub capture](https://github.com/gusmondel/RuleLoom/blob/main/docs/integrations/GITHUB-CAPTURE.md)
+- [Adoption roadmap and claim gates](https://github.com/gusmondel/RuleLoom/blob/main/docs/ADOPTION-ROADMAP.md)
+- [Case-study protocol](https://github.com/gusmondel/RuleLoom/blob/main/docs/CASE-STUDY-PROTOCOL.md)
+- [Release process](https://github.com/gusmondel/RuleLoom/blob/main/docs/RELEASING.md)
+- [Security policy](https://github.com/gusmondel/RuleLoom/blob/main/SECURITY.md)
 
 ## License
 
-Apache License 2.0. See [LICENSE](LICENSE) and [NOTICE](NOTICE).
+Apache License 2.0. See
+[LICENSE](https://github.com/gusmondel/RuleLoom/blob/main/LICENSE) and
+[NOTICE](https://github.com/gusmondel/RuleLoom/blob/main/NOTICE).

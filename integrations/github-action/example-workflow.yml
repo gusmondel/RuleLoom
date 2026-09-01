@@ -1,0 +1,31 @@
+name: Capture RuleLoom evidence
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize, closed, labeled, unlabeled]
+  pull_request_review:
+    types: [submitted, edited, dismissed]
+  check_run:
+    types: [completed]
+  label:
+    types: [created, edited, deleted]
+
+# The action reads only GitHub's event file. It does not require GITHUB_TOKEN
+# access to repository contents, checks, pull requests, issues, or Actions APIs.
+permissions: {}
+
+jobs:
+  capture:
+    # Durable local-first capture requires a trusted runner with an owner-only
+    # mounted directory. A GitHub-hosted runner is ephemeral.
+    runs-on: [self-hosted, ruleloom-evidence]
+    steps:
+      # Replace the placeholder with the audited full commit SHA. Do not use a
+      # branch or floating tag for evidence capture.
+      - uses: gusmondel/RuleLoom/integrations/github-action@FULL_40_CHARACTER_COMMIT_SHA
+        with:
+          repository-id: repository.example
+          output-directory: /var/lib/ruleloom/github-captures
+          identity-key: ${{ secrets.RULELOOM_IDENTITY_KEY }}
+          envelope-key: ${{ secrets.RULELOOM_ENVELOPE_KEY }}
+          label-policy-json: ${{ vars.RULELOOM_LABEL_POLICY_JSON }}

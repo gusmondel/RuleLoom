@@ -18,6 +18,7 @@ test:
 	uv run pytest --cov=ruleloom --cov-report=term-missing
 
 build:
-	uv build
+	uv build --no-sources
+	uv run --frozen twine check --strict dist/*.whl dist/*.tar.gz
 
 check: lint typecheck test build

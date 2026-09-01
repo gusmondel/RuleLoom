@@ -1,0 +1,45 @@
+name: RuleLoom point-in-time GitHub capture
+description: Normalize one GitHub event file without checkout, network calls, or PR code execution.
+
+inputs:
+  repository-id:
+    description: Stable local RuleLoom repository identifier.
+    required: true
+  output-directory:
+    description: Existing owner-only durable directory on a trusted self-hosted runner.
+    required: true
+  identity-key:
+    description: Secret key used to pseudonymize identities and derive the reviewed policy pin.
+    required: true
+  envelope-key:
+    description: Secret key used to authenticate normalized capture bundles.
+    required: true
+  label-policy-json:
+    description: Reviewed strict JSON whose independently frozen hash pins ingestion.
+    required: false
+    default: '{"schema_version":1,"labels":[]}'
+
+outputs:
+  capture-path:
+    description: Absolute path of the immutable capture bundle.
+    value: ${{ steps.capture.outputs.capture-path }}
+  envelope-sha256:
+    description: Content hash of the normalized envelope.
+    value: ${{ steps.capture.outputs.envelope-sha256 }}
+  capture-created:
+    description: True for a new bundle and false for an exact run replay.
+    value: ${{ steps.capture.outputs.capture-created }}
+
+runs:
+  using: composite
+  steps:
+    - id: capture
+      shell: bash
+      env:
+        RULELOOM_REPOSITORY_ID: ${{ inputs.repository-id }}
+        RULELOOM_CAPTURE_OUTPUT_DIRECTORY: ${{ inputs.output-directory }}
+        RULELOOM_CAPTURE_IDENTITY_KEY: ${{ inputs.identity-key }}
+        RULELOOM_CAPTURE_ENVELOPE_KEY: ${{ inputs.envelope-key }}
+        RULELOOM_CAPTURE_LABEL_POLICY_JSON: ${{ inputs.label-policy-json }}
+      run: >-
+        python3 -I "$GITHUB_ACTION_PATH/capture.py" >> "$GITHUB_OUTPUT"

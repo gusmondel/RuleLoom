@@ -7,7 +7,9 @@ from pathlib import Path
 
 import pytest
 
+import ruleloom.gitfacts as gitfacts_module
 from ruleloom.config import RuleLoomConfig
+from ruleloom.gitfacts import collect_snapshot
 from ruleloom.history.git import collect_git_history
 from ruleloom.history.materialize import (
     materialize_history,
@@ -327,3 +329,71 @@ def test_materialization_manifest_is_independent_of_input_unit_order(
 
     assert forward.manifest_hash == reverse.manifest_hash
     assert forward.observations == reverse.observations
+
+
+def test_materialization_skips_discarded_first_parent_traversal(
+    materialization_repo: tuple[Path, RuleLoomConfig, str, str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, config, base, head = materialization_repo
+    original = gitfacts_module._run_git_capped
+    commands: list[tuple[str, ...]] = []
+
+    def record_commands(
+        target: Path,
+        arguments: tuple[str, ...],
+        *,
+        input_bytes: bytes | None = None,
+        timeout_seconds: float = gitfacts_module._GIT_TIMEOUT_SECONDS,
+    ) -> tuple[bytes, bytes, int]:
+        commands.append(arguments)
+        return original(
+            target,
+            arguments,
+            input_bytes=input_bytes,
+            timeout_seconds=timeout_seconds,
+        )
+
+    monkeypatch.setattr(gitfacts_module, "_run_git_capped", record_commands)
+    indexed = collect_snapshot(
+        repo,
+        base,
+        head,
+        protocol_hash=config.evidence_protocol_hash,
+        target=config.target,
+        pack=config.pack,
+        pack_version=config.pack_version,
+        pack_config=config.pack_config,
+        evidence_config=config.evidence,
+        repository_id=config.protocol.repository_id,
+    )
+    assert (
+        sum(arguments[:3] == ("rev-list", "--count", "--first-parent") for arguments in commands)
+        == 1
+    )
+
+    commands.clear()
+    unit = ChangeUnit(
+        id="change-no-topology",
+        repository_id=config.protocol.repository_id,
+        kind="git_only",
+        base_sha=base,
+        prediction_sha=head,
+        prediction_at="2025-01-02T00:00:00Z",
+        commits=(head,),
+        event_ids=(),
+        provider="git",
+        source_ref=head,
+        evidence_quality="git_only",
+        confirmatory=False,
+    )
+    report = materialize_history(repo, config, [unit], [])
+
+    assert not any(
+        arguments[:3] == ("rev-list", "--count", "--first-parent") for arguments in commands
+    )
+    materialized = report.observations[0]
+    expected_metadata = {
+        key: value for key, value in indexed.metadata.items() if key != "topological_index"
+    }
+    assert {key: materialized.metadata[key] for key in expected_metadata} == expected_metadata

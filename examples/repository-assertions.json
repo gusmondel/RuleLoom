@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "assertions": [
+    {
+      "assertion_id": "docs_expect_tests",
+      "revision": 1,
+      "summary": "Documentation changes are expected to include a test change.",
+      "category": "test_structure",
+      "semantics": "antecedent_implies_expectation",
+      "antecedent": [
+        {
+          "predicate": "touches_docs",
+          "negated": false
+        }
+      ],
+      "expectation": [
+        {
+          "predicate": "touches_test",
+          "negated": false
+        }
+      ],
+      "sources": [
+        {
+          "path": "CONVENTIONS.md",
+          "start_line": 1,
+          "end_line": 1
+        }
+      ]
+    }
+  ]
+}
