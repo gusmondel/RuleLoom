@@ -7,6 +7,58 @@ always require a new explicit schema, adapter, pack, or experiment version.
 
 ## Unreleased
 
+## 0.10.0 - 2026-09-01
+
+### Added
+
+- Configuration schema v5 with frozen Horn search controls (`search_strategy`,
+  `beam_width`, `predicate_ranking`, `precision_estimate`,
+  `require_temporal_consistency`, `prune_fraction`, `permutation_runs`,
+  `tree_seeds`) and a registered `outcomes.git_window_days` revert window bound
+  into the evidence protocol.
+- Horn engine 0.6: beam search over every eligible predicate with a train-only
+  Laplace heuristic, logistic-weight predicate ordering, Wilson lower-bound
+  precision for the absolute gate and selection order, a cross-half
+  temporal-consistency gate, RIPPER-style chronological grow/prune windows with
+  complete-window re-gating, tree seed bodies, and a within-block
+  label-permutation null with an empirical p-value.
+- `history bootstrap-git` now emits weak `revert` events from exact
+  `This reverts commit <sha>` trailers (`link_kind: git_trailer`) and one
+  `git_history_horizon` event per run, so a Git-only cohort can mature both
+  classes for `post_merge_revert_or_hotfix` under `--include-weak`.
+- `generic_changes@3`: cumulative `churn_at_least_*` and `files_at_least_*`
+  literals, `touches_generated_artifact` from documented path conventions and
+  base-snapshot `linguist-generated` attributes, `owner_areas_at_least_2/3`
+  from `CODEOWNERS`, and reviewed instantiated `touches_*` and
+  `missing_partner_*` predicates via `pack_config`.
+- `ruleloom predicates propose`: an outcome-blind, deterministic proposer for
+  hotspots, owner areas (globs only, identities hashed), directional co-change
+  pairs, and assertion-manifest drafts, bounded to the frozen holdout when a
+  project exists. `ruleloom init --pack-config` freezes the reviewed draft.
+- `predicates audit` reports missing partners, path examples for every
+  predicate, and time-window span/warm-up warnings.
+
+### Changed
+
+- New projects initialize with schema v5, `generic_changes@3`, and the search
+  controls enabled; schema v4 and older keep Horn 0.5 behaviour, exact hashes,
+  and `generic_changes@2`.
+- Git bootstrap `examined` counts commits; `event_count` includes revert and
+  horizon events; the report exposes `revert_events`, `horizon_at`, and the
+  adapter version.
+- Sealed-snapshot errors now recommend starting a new experiment instead of
+  re-materializing under the same protocol hash.
+
+### Scientific integrity
+
+- Trailer reverts and window negatives are weak, opt-in, and never
+  confirmatory; the window negative is the one deliberate absence-based label
+  and requires a preregistered window plus a persisted horizon.
+- The permutation null and Wilson lower bounds are descriptive calibration
+  aids; no post-selection inference is claimed.
+- Proposed predicates are drafts: activation requires human review and a new
+  frozen experiment with an untouched confirmation window.
+
 ## 0.9.0 - 2026-09-01
 
 ### Added

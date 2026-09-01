@@ -52,7 +52,7 @@ Software repositories offer structured, repeated decisions. Some signals are
 language-neutral—change size, file distribution, tests, documentation, CI, and
 dependency manifests—while specialized packs can add facts about syntax and
 framework behavior such as state mutation, asynchronous code, or navigation.
-RuleLoom 0.9.0 encodes each change as Boolean unary predicates and represents
+RuleLoom 0.10.0 encodes each change as Boolean unary predicates and represents
 conjunctions of those properties as rules rather than opaque scores. It does not
 learn relations among multiple entities.
 
@@ -92,7 +92,7 @@ mechanism for repository-change outcomes and, after prospective validation, for
 coding guidance. AutoSpec makes that link less speculative for agent safety,
 but it remains unvalidated for this product target.
 
-Cold start does not mean waiting for a year of future labels. Version 0.9.0 can
+Cold start does not mean waiting for a year of future labels. Version 0.10.0 can
 ingest a bounded recent prefix of the reachable Git graph immediately and
 combine it with authorized, normalized forge/review/CI/revert/incident events
 already retained by the repository workflow. A bounded built-in GitHub adapter
@@ -227,7 +227,7 @@ yet support third-party pack plugins, so broader extensibility remains unproven.
 - Collection does not alter application code.
 - The default evidence path is deterministic and the selected pack must attach
   provenance to every emitted fact. Although the artifact schema reserves
-  `agent`, `human`, and `imported` provenance kinds, version 0.9.0 accepts only
+  `agent`, `human`, and `imported` provenance kinds, version 0.10.0 accepts only
   exact deterministic built-in-pack provenance for validation, learning, and
   prediction; non-deterministic facts are future work.
 - Each experiment selects exactly one pack name/version. Pack identity,

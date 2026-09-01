@@ -12,7 +12,7 @@ claim keeps its point-in-time facts, later outcomes, chronological evaluation,
 and review state attached as evidence.
 
 > [!WARNING]
-> RuleLoom v0.9.0 is alpha research software. Start in blinded shadow mode. Do
+> RuleLoom v0.10.0 is alpha research software. Start in blinded shadow mode. Do
 > not use it as a merge gate, security control, or autonomous policy publisher.
 
 The core is language- and provider-neutral. Programming-language knowledge
@@ -155,6 +155,16 @@ RuleLoom does:
 - keep unknown outcomes unknown instead of silently treating absence as a
   negative;
 - learn non-recursive unary Horn rules and compare them with simple baselines;
+- search that space with a beam over every eligible predicate, gate clauses on
+  Wilson lower-bound precision and cross-half temporal consistency, prune them
+  on a chronological window, and calibrate the best train statistic against a
+  label-permutation null;
+- derive weak, opt-in exploratory labels from Git alone: exact `git revert`
+  trailers and a registered revert window whose observability is proven by a
+  recorded history horizon;
+- propose an outcome-blind instantiated vocabulary (hotspots, owner areas,
+  missing co-change partners) plus assertion drafts for human review before a
+  new experiment is frozen;
 - probe pre-holdout signal with rolling-origin logistic and shallow-tree models
   before allowing the learner to spend the frozen holdout;
 - report train-only near-miss clauses and relative-to-base-rate diagnostics when
@@ -172,7 +182,8 @@ RuleLoom does not:
 - infer a negative outcome merely because no failure was recorded;
 - interpret `AGENTS.md`, `CLAUDE.md`, issue text, review prose, or ordinary
   GitHub labels as rules or outcomes;
-- invent or activate new predicates in v0.9.0;
+- activate a proposed predicate without human review and a new frozen
+  experiment;
 - pool training evidence across repositories automatically;
 - implement full relational ILP with joins, recursion, entity variables, or
   unrestricted predicate invention;
@@ -235,7 +246,7 @@ Requirements:
 - Git;
 - the authenticated GitHub CLI (`gh`) only when using
   `history import-github`;
-- macOS or Linux. v0.9.0 uses POSIX `fcntl` locking and does not support
+- macOS or Linux. v0.10.0 uses POSIX `fcntl` locking and does not support
   Windows.
 
 From a checkout:
@@ -333,6 +344,25 @@ ruleloom init . \
 That command is an alternative initialization for a clean experiment, not a
 second command to run over an existing `.ruleloom/` directory.
 
+Two optional registrations belong to the same frozen moment. `--git-window-days
+N` registers a revert window for `post_merge_revert_or_hotfix`: a landed change
+with no revert trailer before the window closes, inside history the recorded
+horizon proves complete, becomes an opt-in *weak* negative. `--pack-config
+FILE` freezes a reviewed `generic_changes@3` vocabulary, typically the output of
+`ruleloom predicates propose` described in step 3:
+
+```bash
+ruleloom init . \
+  --project revert-experiment \
+  --target post_merge_revert_or_hotfix \
+  --git-window-days 30 \
+  --pack-config reviewed-pack-config.json
+```
+
+Both values are bound into the evidence protocol hash. Weak labels never make a
+unit confirmatory, so a Git-only cohort can feed the signal probe and the
+learner but cannot approve a policy.
+
 ### 2. Ingest a bounded prefix of Git history
 
 ```bash
@@ -352,6 +382,15 @@ Git topology is available on day one, but it is **exploratory**: it cannot prove
 PR-time snapshot or an independent outcome. Shallow, commit-limited, and
 storage-limited histories are reported explicitly. Raw Git output has a separate
 bounded safety limit and fails closed when unusually large metadata exceeds it.
+
+The bootstrap also records two Git-native outcome signals without reading prose
+as instructions. Every exact `This reverts commit <sha>` trailer that `git
+revert` generates becomes a weak `revert` event linked to the reverted change
+(`link_kind: git_trailer`), and one `git_history_horizon` event stores the
+newest committer timestamp of the retained prefix. The report shows
+`revert_events` and `horizon_at`. Reverts on branches unreachable from the
+selected ref and fix-forward hotfixes without a revert remain invisible; that is
+why these votes stay weak.
 
 For later observer runs, keep the exact `resolved_ref` from a successfully
 persisted Git bootstrap and collect only its descendants:
@@ -421,11 +460,28 @@ experiment and protocol hash. Preserve the old attempt, initialize the revised
 vocabulary separately, rematerialize, and repeat the outcome-blind audit. Do not
 reinterpret existing observations under the new meaning.
 
-An LLM may inspect outcome-blind repository structure, architecture documents,
-and this audit to propose candidate concepts. It cannot activate them: a human
-must review the semantics, deterministic extraction must verify them, and the
-new vocabulary must be frozen before outcomes are opened. RuleLoom does not
-perform automatic predicate invention in v0.9.0.
+Coarse Booleans cap what any learner can find: if thousands of changes share
+the same sixteen facts, no conjunction can beat the base rate of its equivalence
+class. `ruleloom predicates propose` therefore drafts an *instantiated*
+vocabulary from Git structure only, bounded to commits before the frozen
+holdout when a project exists:
+
+```bash
+ruleloom predicates propose . \
+  --pack-config-output proposed-pack-config.json \
+  --assertions-output proposed-assertions.json
+```
+
+It emits exact-path hotspot predicates, `CODEOWNERS` owner-area predicates
+(globs only; owner identities are hashed and never stored),
+`missing_partner_*` predicates for strong directional co-change pairs, and an
+assertion manifest that translates each pair into `antecedent → expectation`
+form. Review the draft, delete anything that is not a real repository concept,
+then freeze it with `ruleloom init --pack-config` in a fresh experiment and
+declare the assertions with `ruleloom assertions declare`. Proposal is
+deterministic and outcome-blind; activation is always a human decision. An LLM
+may still suggest concepts, but they enter through the same reviewed
+`pack_config`, never through the learner.
 
 If an existing convention can already be expressed using the frozen predicate
 vocabulary, encode it explicitly rather than asking RuleLoom to parse prose.
@@ -483,7 +539,7 @@ or SCP-style `remote.origin.url`. A reviewed mirror or checkout whose origin
 cannot establish that equality requires the explicit
 `--allow-unverified-repository` override;
 the report records `repository_binding` and the manifest hash binds that choice.
-The archive adapter does not support a GitHub Enterprise host in v0.9.0.
+The archive adapter does not support a GitHub Enterprise host in v0.10.0.
 
 `--since` filters PRs by `created_at` and also bounds the repository-commit scan.
 `--until` is an inclusive as-of cutoff for PR creation and finalization and for
@@ -544,7 +600,7 @@ or append-only adjudication ledger captured the label application point-in-time
 and can emit a normalized immutable outcome event with its original timestamp,
 target, value, evidence completeness, and independent provenance. Import that
 event through `ruleloom history import`; retain and audit the external source.
-RuleLoom v0.9.0 ships the local point-in-time Action/webhook capture substrate
+RuleLoom v0.10.0 ships the local point-in-time Action/webhook capture substrate
 described above. The archive adapter itself still produces no strong outcome
 from label names and cannot upgrade an existing exploratory `git_only` unit;
 start a clean experiment for point-in-time capture of that change.
@@ -656,9 +712,17 @@ The five historical targets are deliberately separate:
 Weak heuristics are excluded by default. `--include-weak` is an explicit
 exploratory opt-in and makes dependent cases non-confirmatory.
 
+With `--include-weak`, a Git-only cohort can now mature both classes for
+`post_merge_revert_or_hotfix`: trailer reverts vote positive, and a registered
+`outcomes.git_window_days` window that closed before the recorded history
+horizon votes negative when no revert vote exists. The materialization report
+shows `git_window` and `git_window_negatives`, and every observation records the
+window it was judged against. These labels are exploratory by construction;
+provider evidence remains the confirmatory path.
+
 ### 6. Learn a candidate—or seed one explicit existing rule
 
-Continue only after `readiness` reports both mature classes. Schema v4 first
+Continue only after `readiness` reports both mature classes. Schema v5 first
 runs the registered signal-availability probe over pre-holdout observations:
 
 ```bash
@@ -679,7 +743,7 @@ ruleloom candidate list
 ruleloom candidate show <candidate-id>
 ```
 
-New schema-v4 projects freeze `evaluation.test_start_at` at initialization;
+New schema-v5 projects freeze `evaluation.test_start_at` at initialization;
 existing evidence is pre-holdout and later observations form the untouched
 prospective holdout. A retrospective public experiment may set a different
 aware boundary only before collection or outcome access, then preserve that
@@ -696,7 +760,7 @@ reported by the separate outcome-blind audit. The later chronological holdout
 evaluates that frozen selection—even if aliases diverge there—and never chooses
 predicates, thresholds, or rules.
 
-Schema v4 defaults Horn gates to lift relative to the training prevalence plus
+Schema v5 defaults Horn gates to lift relative to the training prevalence plus
 a minimum alert rate. The stored “lift lower” is a deliberately conservative
 descriptive diagnostic made from Wilson endpoints, not a formal post-selection
 confidence interval. If Horn finds no qualifying clause after a passing probe,
@@ -704,6 +768,21 @@ the candidate records the top rejected train-only clauses, their support and
 confusion counts, rejection reasons, and total hypotheses examined. These
 near-misses guide a separately registered redesign; they are never
 confirmatory evidence or permission to relax the current gates.
+
+Horn 0.6 also freezes five train-only search controls in schema v5. A beam
+search refines bodies over every eligible predicate instead of enumerating
+conjunctions over a small marginal-ranked prefix, and predicates are ordered by
+the magnitude of their train-only logistic weight so a fact that matters only
+in conjunction is not discarded first. The absolute precision gate and the
+selection order use the Wilson lower bound, so two clean examples no longer
+look like a perfect rule. A clause must beat the base rate in both
+chronological halves of the training window. Clauses are grown on the first
+80% of that window, pruned on the last 20% in the RIPPER style, and re-gated on
+the complete window. Finally, labels are permuted within chronological blocks
+and the search is repeated to report how often chance alone reaches the best
+observed train statistic; the resulting `permutation_null` is a descriptive
+calibration, not a hypothesis test, and every one of these controls is off for
+schema-v4 and older configurations so their candidates stay reproducible.
 
 Every learned candidate is compared on the same holdout with never alert,
 always alert, train-majority, the best train-selected literal, a fixed
@@ -921,8 +1000,12 @@ Strong evidence includes an independent validation-related change request, an
 attributable CI fail–code-change–same-check-pass sequence, an explicitly linked
 revert/incident, or an explicit matured outcome with complete evidence. Test
 changes alone, fix keywords, SZZ links, an unattributed failed merge-result
-check, and a heuristic Git revert-trailer link are weak. Missing, immature, or
-conflicting evidence produces `unknown`, never an inferred negative.
+check, a Git revert-trailer link, and a registered Git revert window that
+closed before the recorded history horizon are weak. Missing, immature, or
+conflicting evidence produces `unknown`, never an inferred negative; the window
+negative is the one deliberate exception, and it exists only because the window
+was registered before labels were inspected, the horizon proves the window was
+observable, and the resulting label can never become confirmatory.
 
 The CI sequence must be strictly ordered. Its failure and success events must
 use the same provider and stable provider-scoped check identity; the intervening
@@ -938,7 +1021,7 @@ cannot repair biased sampling or incorrect labels.
 
 ## Signal-first learning
 
-The deployment holdout is a scarce resource. RuleLoom schema v4 protects it
+The deployment holdout is a scarce resource. RuleLoom schema v5 protects it
 with a train-only stage before Horn learning:
 
 ```mermaid
@@ -958,11 +1041,17 @@ pre-holdout manifest. Low-prevalence rule gates are relative to the cohort base
 rate, but the Wilson-endpoint ratio is explicitly descriptive rather than a
 formal confidence interval.
 
-`generic_changes@2` supplies language-neutral ordinal size and diffusion facts,
-strictly prior path hotspots and dormancy, bounded missing co-change partners,
-and prior-snapshot ownership-boundary facts. Exact-path predicates abstain when
-the file manifest is truncated; time-window predicates abstain after timestamp
-disorder; ownership identities are counted transiently but never stored.
+`generic_changes@3` supplies language-neutral ordinal size and diffusion facts,
+cumulative `churn_at_least_*` and `files_at_least_*` thresholds, strictly prior
+path hotspots and dormancy, bounded missing co-change partners, prior-snapshot
+ownership-boundary and owner-area counts, generated-artifact hints from
+documented path conventions and `linguist-generated` attributes, and any
+reviewed instantiated predicates from `pack_config`. Exact-path predicates
+abstain when the file manifest is truncated; time-window predicates abstain
+after timestamp disorder; ownership identities are counted transiently but
+never stored. The outcome-blind audit now also reports which usual partner was
+missing and warns when a time window exceeds the observed history span or when
+a large share of observations sit in its left-censored warm-up period.
 
 The full statistical rationale, defaults, failure interpretation, and
 multi-repository protocol are in
@@ -987,14 +1076,22 @@ RuleLoom can combine:
   `touches_dependencies`, `touches_docs`, and `touches_test`;
 - repository-defined path concepts such as `touches_public_api` or
   `touches_shared_contract`;
+- reviewed instantiated concepts proposed from Git structure, such as
+  `touches_hotspot_registry_go_3f9a1c`, `touches_owner_area_8b1d2e4f00`, or
+  `missing_partner_registry_go_ab12cd` (the registry changed and its usual
+  JSON partner did not);
 - deterministic predicates from a specialized, versioned pack.
 
 It cannot learn a predicate that was never declared and extracted. New concepts
-enter through a reviewed evidence-pack or configured-path experiment, receive a
-new protocol hash, and require a new untouched future confirmation window. An
-LLM may propose candidate concepts, but deterministic code must extract them and
-a human must approve the vocabulary before labels or holdout results are
-inspected.
+enter through a reviewed evidence-pack, configured-path, or proposed
+`pack_config` experiment, receive a new protocol hash, and require a new
+untouched future confirmation window. `ruleloom predicates propose` is a
+deterministic, outcome-blind proposer; an LLM may also suggest concepts, but
+deterministic code must extract them and a human must approve the vocabulary
+before labels or holdout results are inspected. A `missing_partner_*` predicate
+is the propositional instantiation of the relational pattern “this path
+changed, its usual partner did not”; the learner still evaluates one change at
+a time.
 
 ## Evidence packs and adapters
 
@@ -1006,11 +1103,14 @@ ruleloom packs list
 ruleloom packs list --json
 ```
 
-The schema-v4 default `generic_changes@2` reads change shape, well-known path
-roles, ordinal size/diffusion, and bounded point-in-time history; it does not
-parse programming-language syntax. `generic_changes@1` remains available for
-old experiment reproducibility. `configured_paths@1` adds a frozen,
-repository-specific component vocabulary while remaining language-neutral:
+The schema-v5 default `generic_changes@3` reads change shape, well-known path
+roles, ordinal size/diffusion and cumulative thresholds, bounded point-in-time
+history, owner-area counts, generated-artifact hints, and an optional reviewed
+`pack_config` of instantiated path and missing-partner predicates; it does not
+parse programming-language syntax. `generic_changes@2` (schema v4) and
+`generic_changes@1` remain available for old experiment reproducibility.
+`configured_paths@1` adds a frozen, repository-specific component vocabulary
+while remaining language-neutral:
 
 ```bash
 ruleloom init . \
@@ -1022,10 +1122,19 @@ ruleloom init . \
   --path-exclude 'touches_shared_contract=contracts/generated/**'
 ```
 
+For `generic_changes@3`, pass the reviewed proposal instead of individual flags:
+
+```bash
+ruleloom init . \
+  --project instantiated-experiment \
+  --pack generic_changes \
+  --pack-config reviewed-pack-config.json
+```
+
 Evidence scope (`include_paths`/`exclude_paths`), large-change thresholds,
-predicate configuration, pack name, and pack version are bound into the
-evidence protocol hash. Freeze them before inspecting labels, candidate rules,
-or holdout errors.
+predicate configuration, pack name, pack version, and the registered Git revert
+window are bound into the evidence protocol hash. Freeze them before inspecting
+labels, candidate rules, or holdout errors.
 
 Adapters have three independent roles:
 
@@ -1048,9 +1157,10 @@ derived artifacts and should be reviewed like source code.
 | Command | Purpose |
 | --- | --- |
 | `ruleloom audit` | Produce a read-only, outcome-blind structural report before initialization |
-| `ruleloom init` | Initialize one frozen experiment and local data layout |
+| `ruleloom init` | Initialize one frozen experiment and local data layout; `--pack-config` freezes a reviewed vocabulary and `--git-window-days` registers a revert window |
 | `ruleloom packs list` | Inspect registered evidence packs and predicates |
-| `ruleloom predicates audit` | Audit frozen predicate coverage and drift without outcomes |
+| `ruleloom predicates audit` | Audit frozen predicate coverage, missing partners, window warm-up, and drift without outcomes |
+| `ruleloom predicates propose` | Draft instantiated hotspot, owner-area, and missing-partner predicates plus assertion drafts from Git structure only |
 | `ruleloom assertions declare/audit` | Bind explicit conventions and audit structural adherence |
 | `ruleloom diagnose` | Explain the evidence bottleneck, positive/class readiness gaps, and next safe actions without mutation |
 | `ruleloom history bootstrap-git` | Ingest bounded Git topology as exploratory history |
@@ -1091,6 +1201,8 @@ RuleLoom enforces several useful invariants:
 - chronological train/holdout evaluation with label-availability filtering;
 - comparison against `never_alert`, `always_alert`, training-majority, and the
   best training-selected single literal;
+- a within-block label-permutation null that reports how often chance reaches
+  the best observed train statistic (descriptive, never a formal test);
 - explicit abstention and human-reviewed lifecycle transitions;
 - approval blocking for non-confirmatory historical evidence.
 

@@ -43,7 +43,7 @@ model fitting.
 
 ## Frozen defaults
 
-Schema v4 records these defaults in `.ruleloom/config.json`:
+Schema v5 records these defaults in `.ruleloom/config.json` (schema v4 uses the same probe fields):
 
 | Decision | Default |
 | --- | ---: |
@@ -103,9 +103,29 @@ the number of hypotheses examined. Near-misses are explicitly
 they are debugging evidence, never confirmatory claims or automatically relaxed
 gates.
 
+### Horn 0.6 search controls (schema v5)
+
+Schema v5 freezes five additional train-only controls. Each addresses a
+specific way the Horn 0.5 search could miss or overstate a rule:
+
+| Control | Default | Problem it addresses |
+| --- | --- | --- |
+| `search_strategy: beam` with `beam_width: 20` and `max_predicates: 64` | on | Exhaustive enumeration over a marginal-ranked top-12 prefix discards predicates that matter only in conjunction; the beam refines bodies over every eligible predicate using a Laplace precision heuristic on newly covered positives. |
+| `predicate_ranking: logistic_weight` | on | The prefix that enters the search is ordered by the magnitude of the train-only class-balanced logistic weight rather than the marginal rate gap. |
+| `precision_estimate: wilson_lower` | on | Point precision lets a two-example clause pass an absolute 0.70 gate; the Wilson lower bound at the registered confidence gates and orders clauses instead. |
+| `require_temporal_consistency` | on | A clause must cover at least one positive and beat the base rate in both chronological halves of the training window, otherwise it is rejected as `unstable_across_train_halves`. |
+| `prune_fraction: 0.2` | on | Clauses are grown on the first 80% of the training window, literals are deleted while the RIPPER prune value on the last 20% does not decrease, every gate is re-evaluated on the complete window, and clauses that do not improve prune-window MCC are dropped. Pruning is skipped when either window lacks a class. |
+| `permutation_runs: 100` | on | Labels are shuffled within four chronological blocks and the first-rule search is repeated; the report gives the best train statistic under the null, its quantiles, and `(1 + exceedances) / (runs + 1)`. This is a calibration of the near-miss table, not a hypothesis test. |
+| `tree_seeds` | on | Root-to-leaf conjunctions of the probe's shallow tree whose leaf favours positives are evaluated as extra bodies under the same gates. |
+
+All controls are disabled for schema v4 and older configurations, and a v5
+configuration with the Horn 0.5 defaults reproduces Horn 0.5 exactly. Bootstrap
+stability reruns reuse the same controls without the permutation null.
+
 ## Language-neutral historical facts
 
-`generic_changes@2` adds deterministic ordinal and point-in-time predicates:
+`generic_changes@2` adds deterministic ordinal and point-in-time predicates,
+and `generic_changes@3` (schema v5) extends them with the last five rows:
 
 | Predicate family | Meaning | Guardrail |
 | --- | --- | --- |
@@ -116,6 +136,11 @@ gates.
 | `touches_dormant_area` | A known path had not changed for more than 365 days | Left-censored; never treats unseen as dormant |
 | `missing_usual_cochange_partner` | A path omitted a partner seen in at least five prior co-changes with confidence at least 0.70 | Exact path manifests only; current-path and cumulative pair budgets abstain |
 | `crosses_codeowners_boundary` | Changed paths map to at least two distinct owner sets in the prior `CODEOWNERS` snapshot | Owners are counted but never persisted; unsupported syntax and excessive match work abstain |
+| `churn_at_least_*` / `files_at_least_*` | Cumulative thresholds over the same frozen band boundaries | Lets one clause express a threshold instead of one exclusive band |
+| `owner_areas_at_least_2` / `owner_areas_at_least_3` | Number of distinct owner sets touched in the prior `CODEOWNERS` snapshot | Same transient counting and abstention rules as the boundary fact |
+| `touches_generated_artifact` | A changed path follows a documented generated-file naming convention or carries `linguist-generated` in the base `.gitattributes` | Naming conventions are heuristics; the attribute is the repository-declared signal |
+| `touches_*` instantiated paths | Reviewed exact paths, owner-area globs, or pair endpoints frozen in `pack_config` | Proposed outcome-blind; activation needs human review and a new experiment |
+| `missing_partner_*` | A reviewed `path` glob changed and no `partner` glob changed | One frozen pair per predicate; the relational pattern is instantiated, not learned |
 
 The co-change predicate compresses relational history into a unary fact that
 the bounded Horn learner can consume. It is an empirical coupling signal, not a
@@ -131,6 +156,14 @@ negative, and unknown derived outcomes. Weak SZZ/fix evidence remains an
 explicit, non-confirmatory opt-in in the outcome layer.
 
 ## Outcomes, retention, and cold start
+
+Git alone can now supply *exploratory* labels for `post_merge_revert_or_hotfix`.
+`history bootstrap-git` records exact `git revert` trailers as weak positive
+votes and a `git_history_horizon` proving how far the retained prefix reaches;
+a schema-v5 `outcomes.git_window_days` window that closed before that horizon
+with no revert vote is a weak negative. Both need `--include-weak`, are never
+confirmatory, and miss fix-forward hotfixes, so use them to run the probe and
+the learner while provider evidence is being connected, not as ground truth.
 
 Prefer defect-oriented atomic targets such as `post_merge_defect` or
 `post_merge_revert_or_hotfix` when the provider evidence can attribute them to a
@@ -159,7 +192,7 @@ cross-project examples can influence a policy.
 ## Portability protocol
 
 To distinguish “this target lacks signal here” from “the vocabulary lacks
-portable signal,” run the same frozen schema-v4 protocol on at least three
+portable signal,” run the same frozen schema-v5 protocol on at least three
 repositories:
 
 1. register one operationally identical atomic target and maturity rule;

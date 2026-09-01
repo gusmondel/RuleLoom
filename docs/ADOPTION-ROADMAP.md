@@ -123,6 +123,29 @@ Acceptance targets:
    requires provider outcomes and each surviving rule still requires
    repository-local prospective confirmation.
 
+### v0.10: vocabulary resolution and Git-native exploratory labels
+
+1. Horn 0.6 searches with a beam over every eligible predicate, gates on Wilson
+   lower-bound precision and cross-half temporal consistency, prunes on a
+   chronological window, and calibrates near-misses with a label-permutation
+   null. Schema v4 and older keep Horn 0.5 behaviour and hashes.
+2. `history bootstrap-git` records exact revert trailers and a history horizon;
+   a preregistered `outcomes.git_window_days` window yields weak, opt-in,
+   non-confirmatory negatives so a Git-only cohort can exercise the probe and
+   the learner before provider evidence arrives.
+3. `generic_changes@3` adds cumulative ordinals, generated-artifact hints,
+   owner-area counts, and reviewed instantiated `touches_*` and
+   `missing_partner_*` predicates. `ruleloom predicates propose` drafts them
+   outcome-blind from Git structure, together with co-change assertion drafts,
+   and `ruleloom init --pack-config` freezes the reviewed result.
+4. The outcome-blind audit names the missing partner behind each co-change
+   omission and warns when a time-window feature cannot fire within the
+   observed history or is dominated by its warm-up period.
+
+None of this changes the evidence levels above: a proposed predicate is a
+draft, a Git-window label is exploratory, and a learned clause still needs the
+chronological holdout and a blinded prospective shadow.
+
 ## Adoption gates
 
 The following are release claims, not aspirational metrics:
