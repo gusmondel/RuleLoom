@@ -47,6 +47,8 @@ record with the pilot artifacts if the repository owner's data policy permits it
 | Negative label | Maturity condition plus absence of a positive event |
 | Unknown label | Every case not yet mature or not adjudicable |
 | Maturation window | Time or workflow event after which negative is allowed |
+| Outcome adjudication transport | Normalized immutable events; capture mechanism, authorized independent actors, retained point-in-time evidence, maturity/completeness, conflict/correction policy, and exporter version. Archive timeline label names are ineligible. |
+| Candidate origin | Learned from the locked training partition, or one explicit reviewed manual Horn seed; never describe the latter as learned |
 | Retrospective window | Oldest and newest eligible historical change |
 | Holdout rule | Latest chronological grouped changes, never random. In a raw-commit fallback, admit only one independently audited commit per real-world change or classify it as exploratory. |
 | Confirmation window | Untouched future interval reserved for any design selected after exploratory analysis |
@@ -136,8 +138,8 @@ exploratory and cannot support approval. If reliable event ordering is
 unavailable, keep the case `unknown` or collect prospectively; never rewrite its
 timestamps.
 
-Post-merge regressions should be a separate target with a longer maturity
-window, such as `linked_regression`. Combining review requests and production
+Post-merge regressions should use the separate `post_merge_defect` target with a
+longer registered maturity window. Combining review requests and production
 defects in one label makes the learned rule difficult to interpret.
 
 ## Phase 0 — privacy and workflow mapping
@@ -297,6 +299,7 @@ ruleloom history bootstrap-git --all
 ruleloom history materialize
 ruleloom history status
 ruleloom predicates audit
+ruleloom diagnose
 ```
 
 `--all` retains the most recent reachable prefix until the first of three bounds:
@@ -308,6 +311,11 @@ sample is not mistaken for complete history. This step is language-neutral and
 immediately measures repository volume, but its `git_only`/`final_only` units
 are exploratory because Git alone does not prove a PR-time decision point or
 independent outcome.
+
+`ruleloom diagnose` is a read-only onboarding summary over readiness, history
+status, and the outcome-blind predicate audit. Archive its JSON output when it
+helps explain a decision, but do not treat its recommended next command as
+evidence. It neither imports data nor changes a threshold or gate.
 
 Run `predicates audit` and preserve its JSON **before exporting, opening, or
 importing outcome sources**. The command is outcome-blind and reports:
@@ -355,6 +363,58 @@ a fresh experiment and protocol hash followed by rematerialization and a new
 pre-outcome audit. Never rewrite old observations to adopt the new meaning. If
 outcomes were already opened, the old sample is design data and the revision
 needs an untouched future confirmation window.
+
+For an authorized GitHub repository, the built-in adapter can group bounded
+archived evidence without a custom exporter:
+
+```bash
+gh auth status --hostname github.com
+ruleloom history import-github --repository OWNER/NAME
+ruleloom history materialize
+ruleloom history status
+```
+
+The v0.6.0 adapter supports the explicit `github.com` host. By default it
+requires `OWNER/NAME` to equal the repository parsed from an unambiguous
+public-GitHub HTTPS, SSH, or SCP-style `remote.origin.url`. A reviewed mirror or
+checkout without a verifiable matching origin requires
+`--allow-unverified-repository`; preserve the resulting `repository_binding`
+value as a protocol deviation, never as proof of identity.
+
+`--since` filters PR `created_at` values and the repository-commit scan.
+`--until` is an inclusive as-of cutoff for PR creation/finalization and retained
+review, check, and revert events; PRs finalized afterward are
+skipped. If omitted it defaults to collection time, and in neither case does it
+reconstruct a historical provider snapshot. Because import is append-only, a
+later run with an earlier cutoff does not retract existing events; use a clean
+experiment/log for that as-of sample. Record the exact command, complete
+JSON report, canonical history logs, requested window, bounds, warnings, skipped
+PR count, truncation status,
+`repository_binding`, global API/record limits and use, and `manifest_hash`. The
+CLI also emits the compact pre-hash `manifest`, which binds the per-endpoint
+limits, warnings/counts, and content hashes of the normalized records without
+duplicating those records in stdout. Verify it against the canonical logs. A
+global-budget exhaustion is a failed import with no persistence, not a partial
+sample; per-endpoint truncation remains explicit in a successful report.
+
+The adapter requests closed PRs only and skips an unexpectedly non-closed or
+force-pushed PR it cannot reconstruct safely. It
+collects provider metadata but does not fetch Git objects. Ensure every recorded
+`base_sha` and `prediction_sha` needed for extraction exists in the observer
+clone, and treat `history materialize`'s `skipped`/`skipped_preview` as part of
+the sampling denominator. More importantly, the reconstructed archive snapshot
+has `point_in_time=false`, so every resulting unit remains exploratory
+`git_only` and non-confirmatory. Reviews are category-unspecified, checks are
+unattributed, and exact Git revert trailers are weak heuristic links. Do not
+present this convenient grouping as PR-opening history or use it to satisfy a
+confirmatory historical gate.
+
+Treat provider mutation as append-only evidence, not as a historical rewind.
+Review submissions are state-neutral, and check events are versioned by PR plus
+normalized check content; later provider changes therefore append rather than
+rewrite. The first built-in GitHub numeric repository identity stored for a
+RuleLoom `repository_id` is pinned across both history logs. A different
+provider repository requires a fresh experiment.
 
 For confirmatory reconstruction, export authorized forge/review/CI/incident
 history into the normalized historical-event v1 JSONL contract, then run:
@@ -476,8 +536,32 @@ Use separate atomic targets: `validation_rework_required`,
 `post_merge_defect`. Absence, disagreement, malformed linkage, or an unfinished
 maturity window remains `unknown`; a normal merge is not a negative. Review
 requests and attributable fail-change-pass CI sequences are strong positives.
-Test changes alone, message keywords, and SZZ linkage are weak and disabled by
-default.
+Test changes alone, message keywords, SZZ linkage, and an exact Git revert
+trailer without an explicit provider link are weak and disabled by default. A
+failed GitHub check on the recorded merge result is likewise an unattributed
+weak vote for `change_attributable_ci_failure`, not strong CI evidence.
+
+Do not derive an outcome from names found in the GitHub archive timeline. Those
+historical application records can expose the current name of a mutable Label
+object. A rename after the PR event can therefore retroactively make an ordinary
+application look like a structured assertion. The archive cannot recover the
+original name, and an as-of cutoff or actor check does not fix the ambiguity.
+
+If the workflow uses labels for adjudication, install a separate authorized
+webhook, exporter, or append-only ledger **before** the relevant changes. It
+must capture each application point-in-time and retain the original timestamp,
+repository/change identity, authorized independent actor, atomic target,
+positive/negative value, complete maturity evidence, and correction history.
+Export that record as an immutable normalized outcome event and import it with
+`ruleloom history import`. Pre-register the capturer/exporter version and audit
+at least one positive, one mature negative, one conflict, and one correction
+against the source ledger.
+
+RuleLoom v0.6.0 does not ship this GitHub webhook or label-ledger exporter. Until
+such point-in-time evidence exists, archive label names contribute no strong or
+weak vote; a label-only case remains `unknown`. The weak merge-result CI and Git
+revert heuristics above remain available only through `--include-weak` and are
+still non-confirmatory.
 
 For a manually curated fallback on ordinary `git_commit` or prospective
 observations, apply labels from independent outcome evidence:
@@ -563,6 +647,37 @@ local transition attestations, and locally attested prediction records. A
 successful result establishes structural/provenance consistency, not label
 truth or predictive value.
 
+There is a separate, prospective-only track for one already-reviewed manual
+risk assertion. A human must translate it into the strict manifest documented
+in `DATA-SCHEMA.md`, using only predicates declared by this experiment, then
+run:
+
+```bash
+ruleloom rules import /absolute/path/to/manual-rule.json
+ruleloom candidate show <candidate-id>
+```
+
+RuleLoom hashes optional cited source spans but never interprets `AGENTS.md`,
+`CLAUDE.md`, or other prose. An LLM may draft a manifest for human review; it
+cannot activate a rule or invent a predicate. Verify the target, every literal,
+closed-world negation, source span, configured pack, and intended risk meaning
+before promotion.
+
+The import reports outcome-blind trigger coverage plus post-hoc association with
+whatever labels were mature at audit time. Coverage is useful for detecting an
+empty or over-broad trigger, but it does not prove validity. The complete manual
+audit remains `confirmatory=false`; do not compare it with learned temporal
+holdout metrics as if it were a pre-specified test. Preserve it as hypothesis
+provenance.
+
+After human review, a non-empty, reproducible manual rule may enter shadow even
+with zero retrospective positives. Its cited sources must remain unchanged and
+available at the first transition. It can reach approval only through the exact
+prior shadow artifact and the non-overridable prospective requirements below:
+distinct predictions, later mature outcomes, both classes, elapsed time,
+aggregate precision/recall/MCC, and per-rule matches/precision. Retrospective
+coverage or post-hoc manual metrics never substitute for those gates.
+
 When all eligible raw commits carry compatible repository topology, the latest
 first-parent positions form the holdout; grouped historical changes use their
 prediction times. Ties and non-monotonic timestamps produce warnings.
@@ -617,18 +732,20 @@ demonstrated value from ILP complexity. Never edit the path library after seeing
 target-aware training or holdout results and continue to call the same holdout a
 test.
 
-The default `shadow` gate requires at least 20 positive outcomes and a non-empty
-learned rule set. Before this first reviewed transition, RuleLoom requires the
+For a learned candidate, the default `shadow` gate requires at least 20 positive
+outcomes and a non-empty learned rule set. Before this first reviewed transition, RuleLoom requires the
 current dataset hash to match, relearns the candidate from the exact
 evidence/configuration, and requires an identical identity payload; a
 non-reproducible manifest cannot enter shadow. The built-in Horn path is
 deterministic; an optional external engine still has to reproduce exactly.
 
-The default `approved` gate expects at least 50 positives, a non-empty
+For a learned candidate, the retrospective portion of the default `approved`
+gate expects at least 50 positives, a non-empty
 chronological test set, aggregate holdout precision at least 0.75, recall at
 least 0.50, stability at least 0.40, and holdout MCC strictly greater than the
-best of all four baselines. It also requires the exact prior shadow artifact and
-the following attributable prospective evidence:
+best of all four baselines. Approval of either a learned or manual candidate
+also requires the exact prior shadow artifact and the following attributable
+prospective evidence:
 
 - at least 30 shadow predictions on distinct stable units;
 - at least 30 outcomes that became knowable strictly after prediction, including
@@ -638,13 +755,14 @@ the following attributable prospective evidence:
 - aggregate shadow precision with a Wilson 95% lower bound of at least 0.70,
   recall with a Wilson 95% lower bound of at least 0.50, and point-estimate MCC
   at least 0.10; and
-- for every learned clause, at least one temporal-holdout match, at least 10
-  prospective matches, temporal point precision at least 0.75, and a
-  prospective Wilson 95% precision lower bound of at least 0.70.
+- for every clause, at least 10 prospective matches and a prospective Wilson
+  95% precision lower bound of at least 0.70; a learned clause additionally
+  needs at least one temporal-holdout match and temporal point precision at
+  least 0.75.
 
 Dataset, configuration, pack version/configuration, scope, threshold, and target
 identity; candidate reproduction; the recorded shadow transition; temporal sample/metrics
-completeness, and the prospective/per-clause requirements are non-overridable.
+completeness when applicable, and the prospective/per-clause requirements are non-overridable.
 The positive-count, aggregate retrospective
 performance, baseline, and stability thresholds can be overridden only where
 the implementation classifies them as non-blocking, with a recorded note. These

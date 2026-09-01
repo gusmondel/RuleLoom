@@ -21,7 +21,9 @@ from ruleloom.gitfacts import (
     collect_worktree,
     extract_flutter_testing_facts,
     extract_generic_change_facts,
+    missing_commit_objects,
     repository_identity,
+    repository_origin_url,
 )
 from ruleloom.models import LabelValue, ModelError, Observation, canonical_json
 from ruleloom.packs import ConfiguredPathsConfig, PathPredicateConfig
@@ -371,6 +373,33 @@ def test_repository_identity_rejects_unanchored_empty_repository(tmp_path: Path)
 
     with pytest.raises(GitFactsError, match=r"remote\.origin\.url or at least one commit"):
         repository_identity(repo)
+
+
+def test_repository_origin_and_commit_object_preflight(
+    flutter_repo: tuple[Path, str, str],
+) -> None:
+    repo, _base, head = flutter_repo
+    assert repository_origin_url(repo) is None
+    _git(repo, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+    assert repository_origin_url(repo) == "https://github.com/acme/widgets.git"
+
+    tree = _git(repo, "rev-parse", f"{head}^{{tree}}")
+    absent = "f" * 40
+    assert set(missing_commit_objects(repo, [head, tree, absent])) == {tree, absent}
+    with pytest.raises(GitFactsError, match="full SHA"):
+        missing_commit_objects(repo, ["HEAD"])
+
+
+def test_commit_object_preflight_streams_large_valid_batches_without_pipe_deadlock(
+    flutter_repo: tuple[Path, str, str],
+) -> None:
+    repo, _base, head = flutter_repo
+    absent = [f"{index:040x}" for index in range(5_000)]
+
+    result = missing_commit_objects(repo, [head, *absent])
+
+    assert len(result) == len(absent)
+    assert set(result) == set(absent)
 
 
 def test_collect_worktree_includes_tracked_and_untracked_flutter_changes(

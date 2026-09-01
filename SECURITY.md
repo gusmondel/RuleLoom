@@ -36,8 +36,8 @@ to expose user data.
 
 RuleLoom processes repositories that may be untrusted. Relevant attacker-
 controlled input includes filenames, file content, diffs, commit metadata,
-configuration, JSONL evidence, labels, candidate artifacts, Prolog output, and
-generated agent-skill text.
+configuration, JSONL evidence, GitHub API responses and mutable timeline objects,
+candidate artifacts, Prolog output, and generated agent-skill text.
 
 High-priority vulnerability classes include:
 
@@ -117,8 +117,49 @@ review references, and evidence excerpts. Before committing or sharing them:
 - remember that deleting the source repository does not delete published agent
   transcripts or copied artifacts.
 
-RuleLoom should not make network requests or upload telemetry without an
-explicit, documented feature and user action.
+RuleLoom does not upload telemetry. The explicit
+`ruleloom history import-github` command invokes the authenticated `gh api`
+client on the explicit `github.com` host and therefore makes bounded GitHub
+requests using the caller's existing credentials. Review the requested
+repository and credential scope first. The CLI verifies it against an
+unambiguous public-GitHub HTTPS, SSH, or SCP-style `remote.origin.url` unless the
+operator explicitly records `--allow-unverified-repository`; that override is
+provenance, not proof that two repositories are identical.
+The adapter does not persist free-form PR/review text or account/check names,
+but API responses exist transiently in process memory and stable PR/event
+numbers remain as provenance. Each process call has time/output bounds and one
+collection has global request and top-level record budgets. If a global budget
+is exhausted, collection raises before the CLI persistence phase; successful
+reports emit a compact manifest and bind configured limits, actual use,
+warnings/counts, and hashes of both normalized record sets into its hash. The
+adapter requests closed PRs only. Review submissions are normalized without
+mutable review state, and check events are versioned by PR plus normalized
+content so later provider changes append instead of overwriting prior evidence.
+The paired history-log validator pins the first built-in GitHub numeric
+repository identity used for a RuleLoom `repository_id`; a different provider
+repository must use a new experiment.
+
+Historical events and change units are persisted as one recoverable batch. Its
+bounded write-ahead journal and stages are stored under Git-private RuleLoom
+state, outside repository-controlled `.ruleloom/history`; readers recover an
+interrupted prepared transaction before returning either canonical log. This
+protects consistency across process interruption, not against a malicious
+process with the same OS-user access or a failing filesystem.
+
+GitHub archive timeline label names are not point-in-time evidence. The provider
+can return the label object's current name alongside an old application event;
+a later rename can therefore manufacture the appearance of a historical outcome
+assertion. RuleLoom v0.6.0 ignores every archive timeline label name during
+outcome derivation, regardless of syntax, timestamp, or actor.
+
+A label-backed outcome may enter as strong evidence only through an authorized
+webhook, exporter, or append-only ledger that captured the application
+point-in-time and preserves immutable source provenance. That external system
+must establish actor authorization/independence, original timestamp, target,
+value, maturity, completeness, correction policy, and repository binding before
+emitting a normalized event for `history import`. Treat the exporter and its
+ledger as part of the trusted computing base. RuleLoom v0.6.0 does not provide
+this capturer and cannot prove an imported adjudication is truthful.
 
 Evidence packs are selected from a versioned built-in registry; this release
 does not discover or execute third-party pack code. For configuration schema v2
@@ -161,7 +202,7 @@ or observer output visible to the agent or people who determine outcome labels.
 
 ## Dependency and release hygiene
 
-Version 0.5.0 supports macOS and Linux and relies on POSIX `fcntl` locking; Windows
+Version 0.6.0 supports macOS and Linux and relies on POSIX `fcntl` locking; Windows
 is not supported. The core intentionally has no runtime Python dependencies.
 Optional Popper and solver integrations expand the trusted computing base and
 must be pinned, recorded, and tested. RuleLoom does not download or install

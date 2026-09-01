@@ -31,6 +31,13 @@ from ruleloom.learners.horn import (
     learn_horn,
     select_train_predicates,
 )
+from ruleloom.manual_rules import (
+    ManualRuleDeclaration,
+    audit_manual_rule,
+    manual_candidate_from_audit,
+    validate_manual_candidate,
+    verify_manual_rule_sources,
+)
 from ruleloom.models import (
     Candidate,
     HornClause,
@@ -919,6 +926,14 @@ def promotion_decision(
 ) -> PromotionDecision:
     if destination not in {"shadow", "approved"}:
         raise ModelError("promotion destination must be shadow or approved")
+    manual = candidate.engine == "manual"
+    if manual:
+        validate_manual_candidate(candidate, config)
+    claims_manual_provenance = (
+        candidate.metadata.get("candidate_origin") == "manual_declaration"
+        or "manual_declaration" in candidate.metadata
+        or "manual_audit" in candidate.metadata
+    )
     unmet: list[str] = []
     blocking: list[str] = []
 
@@ -930,7 +945,11 @@ def promotion_decision(
         block(f"source status {candidate.status!r} is not 'candidate'")
     if candidate.rules.target != config.target:
         block(f"candidate target {candidate.rules.target!r} != configured target {config.target!r}")
-    if candidate.engine != config.learner.engine:
+    if manual and candidate.metadata.get("candidate_origin") != "manual_declaration":
+        block("manual candidate lacks declared-rule provenance")
+    if not manual and claims_manual_provenance:
+        block("declared-rule provenance is incompatible with a learned candidate")
+    if not manual and candidate.engine != config.learner.engine:
         block(
             f"candidate engine {candidate.engine!r} != configured engine {config.learner.engine!r}"
         )
@@ -960,19 +979,23 @@ def promotion_decision(
         if destination == "shadow"
         else config.promotion.min_positive_for_approval
     )
-    if positive < required_positive:
+    if not manual and positive < required_positive:
         unmet.append(f"positive outcomes {positive} < required {required_positive}")
     if not candidate.rules.clauses:
-        block("candidate contains no learned rules")
-    if "train" not in candidate.metrics:
+        block(
+            "candidate contains no declared rules"
+            if manual
+            else "candidate contains no learned rules"
+        )
+    if not manual and "train" not in candidate.metrics:
         block("train metrics are missing")
     if destination == "approved":
-        if len(candidate.train_ids) < config.evaluation.min_train_examples:
+        if not manual and len(candidate.train_ids) < config.evaluation.min_train_examples:
             block(
                 f"temporally eligible training examples {len(candidate.train_ids)} < required "
                 f"{config.evaluation.min_train_examples}"
             )
-        if len(candidate.test_ids) < config.evaluation.min_test_examples:
+        if not manual and len(candidate.test_ids) < config.evaluation.min_test_examples:
             block(
                 f"temporal test examples {len(candidate.test_ids)} < required "
                 f"{config.evaluation.min_test_examples}"
@@ -1045,7 +1068,21 @@ def promotion_decision(
                     f"negative shadow outcomes {negative_outcomes} < required "
                     f"{promotion.min_shadow_negative_outcomes_for_approval}"
                 )
-            for signature, metrics in sorted(prospective_shadow.rule_metrics.items()):
+            expected_rule_signatures = set(candidate.rules.signatures)
+            reported_rule_signatures = set(prospective_shadow.rule_metrics)
+            if reported_rule_signatures != expected_rule_signatures:
+                missing = sorted(expected_rule_signatures - reported_rule_signatures)
+                unexpected = sorted(reported_rule_signatures - expected_rule_signatures)
+                details: list[str] = []
+                if missing:
+                    details.append("missing " + ", ".join(missing))
+                if unexpected:
+                    details.append("unexpected " + ", ".join(unexpected))
+                block(
+                    "shadow per-rule evidence does not match the candidate: " + "; ".join(details)
+                )
+            for signature in sorted(expected_rule_signatures & reported_rule_signatures):
+                metrics = prospective_shadow.rule_metrics[signature]
                 predicted_positive = metrics.true_positive + metrics.false_positive
                 if predicted_positive < promotion.min_shadow_matches_per_rule_for_approval:
                     block(
@@ -1062,6 +1099,8 @@ def promotion_decision(
                             f"shadow rule {signature} precision 95% Wilson lower bound "
                             f"{rule_precision_lower:.3f} < {promotion.min_shadow_precision:.3f}"
                         )
+        if manual:
+            return PromotionDecision(not unmet, tuple(unmet), tuple(blocking))
         test = candidate.metrics.get("test")
         if config.promotion.require_test_set and not candidate.test_ids:
             block("a temporal test set is required")
@@ -1151,14 +1190,37 @@ def promote_candidate(
     shadow_file = shadow_path(root, config, candidate_id)
     shadow_recorded = shadow_file.exists()
     observations = load_observations(dataset_path(root, config))
+    declaration: ManualRuleDeclaration | None = None
+    if source.engine == "manual":
+        declaration, _audit = validate_manual_candidate(source, config)
+        drifted = [
+            item
+            for item in verify_manual_rule_sources(root, declaration)
+            if item.status != "unchanged"
+        ]
+        if drifted:
+            raise ModelError(
+                "manual rule source changed or became unavailable; declare a new revision "
+                "instead of promoting stale policy text"
+            )
     if destination == "shadow" or not shadow_recorded:
         current_hash = observations_hash(observations)
         if source.dataset_hash != current_hash:
             raise ModelError(
-                "candidate dataset snapshot no longer matches current evidence; relearn before "
-                "the first reviewed transition"
+                "candidate dataset snapshot no longer matches current evidence; recreate the "
+                "candidate before the first reviewed transition"
             )
-        reproduced = learn_candidate(observations, config, as_of=cutoff)
+        if declaration is None:
+            reproduced = learn_candidate(observations, config, as_of=cutoff)
+        else:
+            audit = audit_manual_rule(
+                root,
+                config,
+                declaration,
+                observations,
+                as_of=parse_timestamp(source.created_at),
+            )
+            reproduced = manual_candidate_from_audit(declaration, audit, config)
         if source.identity_payload() != reproduced.identity_payload():
             raise ModelError(
                 "candidate manifest cannot be reproduced from the current evidence and config"

@@ -1,0 +1,104 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:ruleloom:schema:manual-rule-manifest:v1",
+  "title": "RuleLoom manual rule manifest v1",
+  "description": "An explicit, human-reviewed risk-rule declaration accepted by `ruleloom rules import`.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "policy_id",
+    "revision",
+    "claim_kind",
+    "summary",
+    "rules"
+  ],
+  "properties": {
+    "schema_version": {"const": 1},
+    "policy_id": {"$ref": "#/$defs/subject"},
+    "revision": {"type": "integer", "minimum": 1},
+    "claim_kind": {"const": "risk_trigger"},
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 500,
+      "pattern": "^(?=.*\\S)[^\\u0000-\\u001F\\u007F]+$"
+    },
+    "rules": {"$ref": "#/$defs/ruleSet"},
+    "sources": {
+      "type": "array",
+      "maxItems": 16,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/sourceRef"}
+    }
+  },
+  "$defs": {
+    "predicate": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]*$"
+    },
+    "subject": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9_.-]*$"
+    },
+    "literal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["predicate"],
+      "properties": {
+        "predicate": {"$ref": "#/$defs/predicate"},
+        "negated": {"type": "boolean"}
+      }
+    },
+    "clause": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "body"],
+      "properties": {
+        "target": {"$ref": "#/$defs/predicate"},
+        "body": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 4,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/literal"}
+        }
+      }
+    },
+    "ruleSet": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["target", "clauses"],
+      "properties": {
+        "target": {"$ref": "#/$defs/predicate"},
+        "clauses": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 10,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/clause"}
+        }
+      }
+    },
+    "sourceRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path"],
+      "dependentRequired": {
+        "start_line": ["end_line"],
+        "end_line": ["start_line"]
+      },
+      "properties": {
+        "path": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512,
+          "pattern": "^(?!/)(?!.*//)(?!.*\\\\)(?!.*(?:^|/)\\.{1,2}(?:/|$))(?!\\.git(?:/|$))(?!\\.ruleloom/)(?!\\.agents/skills/ruleloom/)(?!\\.claude/skills/ruleloom/)(?!.*[\\uD800-\\uDFFF])[^\\u0000-\\u001F\\u007F]*[^/\\u0000-\\u001F\\u007F]$"
+        },
+        "start_line": {"type": "integer", "minimum": 1},
+        "end_line": {"type": "integer", "minimum": 1}
+      }
+    }
+  },
+  "$comment": "The Python model additionally enforces cross-value invariants that portable JSON Schema cannot express: every clause target equals rules.target, a body cannot contain both signs of one predicate, source ranges are ordered and at most 500 lines, and clauses are unique after canonical ordering."
+}

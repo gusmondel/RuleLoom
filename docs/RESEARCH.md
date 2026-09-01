@@ -3,7 +3,7 @@
 ## Scope and evidence standard
 
 This review was checked against primary papers and official project
-documentation available on 31 August 2026. Peer-reviewed work is distinguished
+documentation available on 1 September 2026. Peer-reviewed work is distinguished
 from preprints. Benchmark results are treated as evidence of plausibility within
 their evaluated settings, not as expected effect sizes for a target repository.
 
@@ -21,7 +21,7 @@ specific repository.
 The exact RuleLoom integration therefore remains a new product hypothesis even
 when each component has supporting evidence.
 
-The term ILP is deliberately scoped: RuleLoom 0.5.0 propositionalizes each change
+The term ILP is deliberately scoped: RuleLoom 0.6.0 propositionalizes each change
 into Boolean unary predicates over one variable and learns bounded Horn
 conjunctions. It is not a full relational ILP implementation with multiple
 entities, joins, recursion, predicate invention, or arbitrary logic programs.
@@ -48,10 +48,10 @@ transfer across languages or repositories.
 | Cropper & Morel, *Learning Programs by Learning from Failures* | Peer-reviewed, Machine Learning, 2021 | Popper's generate-test-constrain loop prunes failed hypothesis regions and learns textually minimal logic programs in its evaluated domains. | Offer Popper as an optional serious ILP engine; bound and record its hypothesis bias. | The original clean-example objective is not a license to treat repository labels as noise-free. |
 | Cropper & Cerna, *Efficient Rule Induction by Ignoring Pointless Rules* (REDUCER) | Peer-reviewed, AAAI 2026 | REDUCER identifies reducible rules containing redundant literals and indiscriminate rules that cannot distinguish negative training examples, then soundly prunes their specializations under its formal assumptions. Across the evaluated visual-reasoning, game-playing, and other domains, the authors report learning-time reductions up to 99% while maintaining predictive accuracy. | Flag observed equivalence and implication as candidates for redundancy review, exclude constant facts from the bounded search, and assess outcome discrimination only on training data. | RuleLoom's finite-sample co-occurrence relations are empirical diagnostics, not REDUCER's semantic entailments or sound pruning constraints. REDUCER's indiscrimination test reads negative training examples; it cannot justify outcome-blind deletion or automatic activation. |
 | Hocquette et al., *Learning MDL Logic Programs from Noisy Data* | Peer-reviewed, AAAI 2024 | MAXSYNTH trades program size against fit and outperformed compared approaches in several domains under moderate label noise. | Prefer an MDL/noisy mode when labels are imperfect; record engine revision and cost assumptions. | The evaluated domains were not coding-agent policy learning. Current Popper behavior must be tested against a pinned revision rather than inferred from the paper artifact. |
-| Law et al., *FastLAS* | Peer-reviewed, AAAI 2020 | FastLAS supports user-defined hypothesis scoring; the evaluated access-control tasks showed that scoring can target domain-specific objectives and that the system was faster and more scalable than compared ILP systems. | A future engine could encode asymmetric interruption and missed-risk costs explicitly. | RuleLoom 0.5.0 does not implement FastLAS, and access-control results do not establish coding-agent value. |
+| Law et al., *FastLAS* | Peer-reviewed, AAAI 2020 | FastLAS supports user-defined hypothesis scoring; the evaluated access-control tasks showed that scoring can target domain-specific objectives and that the system was faster and more scalable than compared ILP systems. | A future engine could encode asymmetric interruption and missed-risk costs explicitly. | RuleLoom 0.6.0 does not implement FastLAS, and access-control results do not establish coding-agent value. |
 | Law, *Conflict-driven ILP* | Peer-reviewed, TPLP 2023 | Formalizes conflict-driven ILP and reports ILASP3/4 scalability gains over earlier ILASP systems, particularly with noise. | Constraint learning from failed hypotheses is a credible route beyond exhaustive rule enumeration. | It learns answer-set programs, not RuleLoom's current bounded Horn model. |
 | Ma et al., *AutoSpec* | arXiv preprint v3, 7 July 2026 | ILP-guided CEGIS evolves expert LLM-agent safety rules from safe/unsafe trace annotations. Across 291 code-execution and embodied-agent traces, the authors report F1 0.98 and 0.933, up to 94% false-positive reduction, and convergence in 4–5 iterations. | This is the closest direct evidence that ILP can turn agent feedback into readable, auditable rule revisions. Counterexamples, review, and selective rule lifecycle are well-motivated. | It covers two safety domains, assumes fixed domain predicate libraries and usually an expert seed rule, and relies on human labels. Its RQ3 generalization analysis uses a random 70/30 split, not temporal validation. Its 10-practitioner study evaluates four supplied scenarios rather than field maintenance. Candidate evaluation against labeled traces is not formal verification. Web/database agents and native temporal operators remain untested; it is a preprint and does not test coding-quality guidance. |
-| Yu et al., *ADVENT: LLM-Driven Automatic Predicate Invention for ILP* | arXiv preprint v1, 2 July 2026 | ADVENT couples LLM predicate proposals with Prolog execution and refinement. On nine transformed poker-hand concepts across seven LLMs, the authors report 58% success without verification, 80% with formal deductive feedback, and cross-task gains up to 31 percentage points for some compositional concepts. | LLM-assisted predicate invention is a credible future research direction only when proposals are deterministically executable, reviewed, versioned, and evaluated as a new experiment. An LLM should be a proposer, never an activator. | The study is a preprint on one transformed poker domain. Its verifier exposes labeled positive/negative examples, its unfiltered knowledge pool hurt a simpler task, and neither its relational predicates nor results validate repository-path concepts, temporal evaluation, or autonomous policy publication. RuleLoom v0.5.0 does not implement ADVENT or predicate invention. |
+| Yu et al., *ADVENT: LLM-Driven Automatic Predicate Invention for ILP* | arXiv preprint v1, 2 July 2026 | ADVENT couples LLM predicate proposals with Prolog execution and refinement. On nine transformed poker-hand concepts across seven LLMs, the authors report 58% success without verification, 80% with formal deductive feedback, and cross-task gains up to 31 percentage points for some compositional concepts. | LLM-assisted predicate invention is a credible future research direction only when proposals are deterministically executable, reviewed, versioned, and evaluated as a new experiment. An LLM should be a proposer, never an activator. | The study is a preprint on one transformed poker domain. Its verifier exposes labeled positive/negative examples, its unfiltered knowledge pool hurt a simpler task, and neither its relational predicates nor results validate repository-path concepts, temporal evaluation, or autonomous policy publication. RuleLoom v0.6.0 does not implement ADVENT or predicate invention. |
 | Mehta et al., *Rex* | Peer-reviewed, NSDI 2020 | Rex learns correlated file-change rules using machine learning and program analysis. In a 14-month deployment over 360 Microsoft repositories, the authors counted 4,926 suggestions as true positives when engineers added the suggested related change. | Repository-specific change suggestions can be learned and surfaced at change time. | Suggestion acceptance is a dependent operational outcome, not independent ground truth that a bug was prevented. The proprietary, non-randomized deployment is not outcome-labeled ILP or a causal estimate. |
 | Kamei et al., *A Large-Scale Empirical Study of Just-in-Time Quality Assurance* | Peer-reviewed, IEEE TSE 2013 | Establishes change-level, effort-aware defect prediction as a practical quality-assurance setting across a large empirical study. | The observation unit and decision point should be a change, and evaluation should reflect review effort rather than accuracy alone. | Defect-inducing labels and conventional change metrics are not RuleLoom's `needs_extra_validation` target or an agent intervention. |
 | Falessi et al., *On the Need of Preserving Order of Data* | Peer-reviewed, Empirical Software Engineering 2020 | Across nine classifiers and 15 projects, walk-forward statistically outperformed 10-fold cross-validation and bootstrap in the reported classifier-selection AUC, bias, and absolute-bias metrics. | Preserve chronological order; a random split can answer the wrong deployment question. | Component-defect classification is not RuleLoom, and temporal splitting alone does not remove label leakage or drift. |
@@ -131,7 +131,7 @@ in a finite repository sample. Those relations can prompt review, but they are
 not logical entailments and do not reproduce REDUCER's pruning theorem.
 RuleLoom is a portable baseline, not a reimplementation of REDUCER, Popper,
 FastLAS, ILASP, or AutoSpec's CEGIS loop. Although the Prolog rendering uses a
-variable, every literal refers to the same change observation; the v0.5.0
+variable, every literal refers to the same change observation; the v0.6.0
 learner does not discover relations among entities.
 
 The evidence-pack boundary preserves that same core across languages. The
@@ -160,7 +160,7 @@ and a full change-manifest hash. These are reproducibility and integrity
 controls; they do not establish that the extracted facts are useful predictors.
 
 The optional Popper adapter should not be confused with a reproduced paper
-artifact. Version 0.5.0 accepts only one non-recursive learned rule, disables
+artifact. Version 0.6.0 accepts only one non-recursive learned rule, disables
 RuleLoom bootstrap reruns, fingerprints an explicitly configured checkout, and
 requires an already provisioned compatible Python environment, SWI-Prolog, and
 GNU `timeout`. The adapter boundary is tested with controlled process output,
@@ -243,6 +243,19 @@ change creates a new protocol hash and experiment before outcomes are opened. If
 labels informed the proposal or verification, the affected sample is design
 data and confirmation requires an untouched future window.
 
+The same boundary applies to existing repository guidance. AutoSpec usually
+starts from an expert rule, and the broader ILP literature treats background
+knowledge as a substantive modeling decision. Together they support an expert
+rule as an auditable seed hypothesis, not as a validated policy. No cited result
+shows that an instruction in `AGENTS.md`, `CLAUDE.md`, or another document is
+correct, current, predictive, or safe merely because it already exists.
+RuleLoom therefore requires an explicit human translation, hashes optional
+source spans without parsing their prose, and treats historical
+coverage/association as post-hoc diagnostics. This seed does not create or
+mature outcomes, so it does not solve the label cold start. A manual rule skips
+claims of retrospective discovery and can earn approval only from later
+prospective shadow evidence.
+
 ### 5. Time, labels, and simple baselines are part of the problem
 
 Kamei establishes the practical change-level quality-assurance setting. Falessi
@@ -275,7 +288,7 @@ settings, so independent reports must preserve the canonical config.
 
 A chronological split cannot repair outcome-caused features. For a review-time
 target, the final merge/squash diff may already contain validation added in
-response to review. Version 0.5.0 represents one logical `ChangeUnit` with an
+response to review. Version 0.6.0 represents one logical `ChangeUnit` with an
 exact point-in-time base/prediction SHA and groups it by stable `change_id`.
 Materialization emits one observation per unit and rejects duplicate mature
 change IDs, preventing related snapshots from crossing train and test. A
@@ -304,7 +317,7 @@ initial review patch must be separated from later revisions and why a later test
 change without an explicit trigger is ambiguous. Gallaba et al. and Huang et al.
 show why CI status alone is noisy and why attribution to the current patch is a
 separate question. Herbold et al. show why SZZ-derived links are not ground
-truth. RuleLoom v0.4 therefore implements three evidence grades:
+truth. RuleLoom v0.6.0 therefore implements three evidence grades:
 
 - `rich`: a point-in-time logical change plus ordered independent events;
 - `git_only`: topology/metadata without a provider decision point; and
@@ -314,9 +327,25 @@ All three can be inspected on day one. Only rich units with strong, strictly
 later evidence are confirmatory. Strong labels require an explicit completed
 outcome, an independent review validation request, an attributable CI
 fail–code-change–same-check-pass sequence, or an explicit revert/incident link.
-Later test changes, fix keywords, and SZZ are weak opt-in votes. Absence and
+Later test changes, fix keywords, SZZ, an unattributed merge-result failure, and
+an exact Git revert-trailer association are weak opt-in votes. Absence and
 conflict remain `unknown`. This is a conservative weak-supervision layer, not a
 claim that archive mining recovers truth.
+
+The built-in GitHub adapter implements the conservative archive case: it groups
+closed PR lineage, review/check events, and bounded revert evidence, while
+marking the reconstructed predictor snapshot `point_in_time=false` and every
+unit `git_only`. It deliberately ignores archive timeline label names: the
+provider can join an old application event to a Label object's current mutable
+name, so a rename can create retrospective temporal leakage. Strong label-backed
+evidence requires a separate point-in-time webhook/export/immutable ledger and
+normalized event import. This is a measurement-integrity requirement derived
+from the provider contract: GitHub's GraphQL reference exposes
+[`LabeledEvent.label` as a `Label` object](https://docs.github.com/en/graphql/reference/issues#labeledevent),
+that object has mutable `updatedAt`, and the REST API explicitly permits
+[renaming a label](https://docs.github.com/en/rest/issues/labels#update-a-label).
+It is not a claim established by the cited research literature; RuleLoom v0.6.0
+does not ship that capturer.
 
 This design reduces several leakage paths but does not eliminate all leakage.
 Feature-library selection, outcome-caused diffs, label definitions, duplicated
@@ -337,6 +366,11 @@ No cited result establishes that:
   to another repository;
 - an outcome-blind prevalence, overlap, or drift flag establishes predictive
   relevance or irrelevance;
+- an existing hand-authored instruction is valid because it has broad
+  historical trigger coverage;
+- an archived provider label name records what that label was called when the
+  historical application occurred, or is ground truth because it matches a
+  chosen syntax;
 - an LLM-proposed predicate is correct, safe to activate, or portable merely
   because it has a meaningful name or executes successfully;
 - `needs_extra_validation` is a valid proxy for defects or product quality;
@@ -362,10 +396,12 @@ and deprecation.
 | Extractor semantics drift or vocabularies are mixed | One versioned pack/configuration per experiment; pack, extractor, canonical `pack_config`, scopes, and thresholds bound into `evidence_protocol_hash` |
 | Configured vocabulary is chosen using outcomes or holdout errors | Outcome-blind feature-design roles, pre-registered config hash and attempt log, plus an untouched future confirmation window after any informed revision |
 | Predicate library is mechanically empty, constant, redundant, saturated, or drifting before labels | Outcome-blind `predicates audit` over prevalence, bounded path examples, observed relations, and early/late windows; semantic repairs start a new experiment/hash |
+| Existing guidance is mistaken for a learned or validated rule | Strict human-authored Horn manifest, source hashing without prose interpretation, explicitly post-hoc audit, and prospective-only approval evidence |
 | Final diff contains files added because of the outcome | Reconstruct one point-in-time `ChangeUnit` from its pre-event base/prediction SHA; mark Git-only/final-only cases exploratory and block their approval |
 | Related commits cross train and test | Materialize one observation per stable `change_id`; reject duplicate mature IDs and mixed observation-unit cohorts |
 | CI status is noisy or unrelated to the patch | Require explicit attribution plus fail–code-change–same-check-pass for the strong CI target; otherwise abstain |
 | Weak archive heuristic is mistaken for ground truth | Strong-only labels by default; weak votes require opt-in, retain provenance, and make the dependent case non-confirmatory |
+| A mutable archive label name is mistaken for point-in-time adjudication | Ignore GitHub archive timeline label names; require a separately captured immutable webhook/export/ledger event for any strong label-backed outcome |
 | Very large changes exceed practical artifact limits | Bounded path/per-file metadata, explicit truncation counts, aggregate totals, and a full manifest hash |
 | Raw memory distracts agents | Compact matching rules only |
 | Labels contain noise | Required `label_evidence`, `unknown` state, maturation policy, optional MDL engine |
@@ -395,6 +431,19 @@ Every RuleLoom evaluation should report:
 - number of eligible, collected, labeled, positive, negative, and unknown cases;
 - historical event/change-unit counts by `rich`, `git_only`, and `final_only`,
   plus strong/weak/conflicting vote counts and shallow/truncated Git status;
+- for a GitHub archive import: exact command and JSON report, public-host/origin
+  verification or explicit `repository_binding` override, the precise
+  `created_at`/as-of window semantics, per-endpoint and global bounds, global
+  budget policy/limits/use, `manifest_hash`, normalized/skipped PRs,
+  materialization skips caused by unavailable Git objects,
+  truncation/warnings, evidence-grade counts, and confirmation that archive
+  timeline label names contributed no outcomes; verify the emitted compact
+  pre-hash `manifest` and preserve the canonical logs containing the exact
+  normalized records alongside the report;
+- for any external label-backed evidence: point-in-time capturer/exporter
+  version, immutable source-ledger reference, original event timestamp,
+  repository/change binding, actor authorization/independence, target/value,
+  maturity/completeness, conflicts, and corrections;
 - class prevalence and missing/extraction errors;
 - the pre-outcome predicate-audit artifact, its ordering/window sizes and
   thresholds, repository/experiment/target/config/protocol identity,
@@ -411,6 +460,10 @@ Every RuleLoom evaluation should report:
 - confusion counts, precision, recall, F1, accuracy, balanced accuracy, MCC,
   prevalence, and predicted-positive rate;
 - rule count, literals per clause, support, and bootstrap stability;
+- for a manual rule: exact declaration/source hashes and statuses, historical
+  coverage, censored/unknown count, post-hoc metrics/baselines, and an explicit
+  statement that the audit was non-confirmatory and approval evidence is
+  prospective-only;
 - label-evidence coverage and the number of training labels excluded because
   they were not available at the holdout boundary;
 - warnings, overrides, shadow/approval rationale, and unmet gates;

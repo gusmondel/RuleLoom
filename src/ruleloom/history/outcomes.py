@@ -12,6 +12,7 @@ may emit the following semantic event taxonomy:
     ``check_id``, ``conclusion``, and (for failures)
     ``attributable_to_change``.  A strong CI outcome additionally requires a
     later code-changing snapshot and a later successful run of the same check.
+    An unattributed merge-result failure is only an opt-in weak vote.
 ``change_snapshot``
     Boolean ``code_changed`` and ``test_changed`` signals.  A test change alone
     is deliberately weak evidence.
@@ -21,7 +22,7 @@ may emit the following semantic event taxonomy:
     finalization never implies a negative label.
 ``revert``
     ``linked_change_id`` and ``link_kind``.  Only ``link_kind=explicit`` is
-    strong evidence.
+    strong evidence.  ``link_kind=heuristic`` is an opt-in weak vote.
 ``incident``
     ``category`` (``hotfix`` or ``defect``), ``linked_change_id``, and
     ``link_kind``.  ``explicit`` is strong; ``fix_keyword`` and ``szz`` are weak.
@@ -67,6 +68,7 @@ VoteStrength = Literal["strong", "weak"]
 _VOTE_VALUES = frozenset({"positive", "negative", "abstain"})
 _VOTE_STRENGTHS = frozenset({"strong", "weak"})
 _WEAK_LINK_KINDS = frozenset({"fix_keyword", "szz"})
+_WEAK_REVERT_LINK_KINDS = frozenset({"heuristic"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -333,6 +335,31 @@ def _ci_failure_votes(
 ) -> tuple[OutcomeVote, ...]:
     del change_unit
     votes: list[OutcomeVote] = []
+    for event in events:
+        if not (
+            event.kind == "ci_run"
+            and event.data.get("conclusion") == "failure"
+            and event.data.get("attributable_to_change") is False
+            and event.data.get("attribution") == "unattributed_merge_result"
+            and event.data.get("evidence_grade") == "weak_heuristic"
+        ):
+            continue
+        confidence = _event_confidence(event, default=0.4, maximum=0.7)
+        if confidence is None:
+            continue
+        votes.append(
+            OutcomeVote(
+                value="positive",
+                strength="weak",
+                target=CHANGE_ATTRIBUTABLE_CI_FAILURE,
+                available_at=event.available_at,
+                source_kind=event.kind,
+                event_ids=(event.id,),
+                independent_group=event.independent_group,
+                confidence=confidence,
+                reason="merge-result check failed without change attribution",
+            )
+        )
     for failure_index, failure in enumerate(events):
         if (
             failure.kind != "ci_run"
@@ -408,27 +435,45 @@ def _revert_or_hotfix_votes(
     votes: list[OutcomeVote] = []
     for event in _post_merge_events(change_unit, events):
         is_explicit_revert = event.kind == "revert" and _is_linked(event, change_unit, "explicit")
+        raw_link_kind = event.data.get("link_kind")
+        is_weak_revert = (
+            event.kind == "revert"
+            and isinstance(raw_link_kind, str)
+            and raw_link_kind in _WEAK_REVERT_LINK_KINDS
+            and _is_linked(event, change_unit, raw_link_kind)
+            and event.data.get("evidence_grade") == "weak_heuristic"
+        )
         is_explicit_hotfix = (
             event.kind == "incident"
             and event.data.get("category") == "hotfix"
             and _is_linked(event, change_unit, "explicit")
         )
-        if not (is_explicit_revert or is_explicit_hotfix):
+        if not (is_explicit_revert or is_weak_revert or is_explicit_hotfix):
             continue
-        confidence = _event_confidence(event, default=1.0, maximum=1.0)
+        strength: VoteStrength = "weak" if is_weak_revert else "strong"
+        maximum = 0.7 if strength == "weak" else 1.0
+        confidence = _event_confidence(
+            event,
+            default=0.6 if strength == "weak" else 1.0,
+            maximum=maximum,
+        )
         if confidence is None:
             continue
         votes.append(
             OutcomeVote(
                 value="positive",
-                strength="strong",
+                strength=strength,
                 target=POST_MERGE_REVERT_OR_HOTFIX,
                 available_at=event.available_at,
                 source_kind=event.kind,
                 event_ids=(event.id,),
                 independent_group=event.independent_group,
                 confidence=confidence,
-                reason="post-merge revert or hotfix explicitly linked to the change",
+                reason=(
+                    "post-merge revert heuristically linked to the change"
+                    if is_weak_revert
+                    else "post-merge revert or hotfix explicitly linked to the change"
+                ),
             )
         )
     return tuple(votes)

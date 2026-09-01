@@ -14,7 +14,7 @@ from ruleloom.config import LearnerConfig, RuleLoomConfig
 from ruleloom.gitfacts import collect_snapshot
 from ruleloom.learners.popper import PopperDoctorReport
 from ruleloom.models import LabelValue, ModelError, content_hash
-from ruleloom.storage import dataset_path, load_observations, load_predictions
+from ruleloom.storage import dataset_path, load_observations, load_predictions, load_shadow
 
 
 def _git(repo: Path, *arguments: str) -> str:
@@ -172,6 +172,102 @@ def test_cli_defaults_to_generic_pack_and_lists_versioned_packs(
         ]
         == 2
     )
+
+
+def test_cli_imports_manual_rule_for_immediate_shadow_without_claiming_validity(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    repo = tmp_path / "manual_rule_repo"
+    repo.mkdir()
+    _git(repo, "init")
+    _git(repo, "config", "user.email", "ruleloom@example.test")
+    _git(repo, "config", "user.name", "RuleLoom Test")
+    workflow = repo / ".github/workflows/ci.yml"
+    workflow.parent.mkdir(parents=True)
+    workflow.write_text("name: CI\n", encoding="utf-8")
+    _commit(repo, "Add CI", "2026-01-01T10:00:00Z")
+
+    assert _run_cli(["init", str(repo)], capsys)[0] == 0
+    assert _run_cli(["collect", "--root", str(repo), "git", "--last", "1"], capsys)[0] == 0
+    exit_code, stdout, stderr = _run_cli(["diagnose", "--root", str(repo), "--json"], capsys)
+    assert exit_code == 0
+    assert stderr == ""
+    diagnosis = json.loads(stdout)
+    assert diagnosis["stage"] == "collect_outcomes"
+    assert diagnosis["gate_gaps"]["positive_for_shadow"] == 20
+    assert any(item["code"] == "import_outcome_evidence" for item in diagnosis["actions"])
+    manifest = repo / "manual-rule.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "policy_id": "ci_without_tests",
+                "revision": 1,
+                "claim_kind": "risk_trigger",
+                "summary": "CI changes without tests may require validation.",
+                "rules": {
+                    "target": "needs_extra_validation",
+                    "clauses": [
+                        {
+                            "target": "needs_extra_validation",
+                            "body": [
+                                {"predicate": "touches_ci", "negated": False},
+                                {"predicate": "touches_test", "negated": True},
+                            ],
+                        }
+                    ],
+                },
+                "sources": [],
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    exit_code, stdout, stderr = _run_cli(
+        [
+            "rules",
+            "--root",
+            str(repo),
+            "import",
+            str(manifest),
+            "--json",
+        ],
+        capsys,
+    )
+
+    assert exit_code == 0
+    assert stderr == ""
+    payload = json.loads(stdout)
+    candidate = payload["candidate"]
+    assert candidate["engine"] == "manual"
+    assert candidate["metadata"]["evaluation"]["approval_basis"] == "prospective_shadow_only"
+    assert payload["audit"]["matched_observations"] == 1
+    assert payload["audit"]["mature_labels"] == 0
+    assert payload["audit"]["confirmatory"] is False
+
+    candidate_id = candidate["id"]
+    exit_code, stdout, stderr = _run_cli(
+        [
+            "promote",
+            "--root",
+            str(repo),
+            candidate_id,
+            "--to",
+            "shadow",
+            "--reviewer",
+            "Rule Owner",
+            "--note",
+            "Start prospective audit",
+        ],
+        capsys,
+    )
+    assert exit_code == 0
+    assert f"Promoted {candidate_id} to shadow" in stdout
+    assert stderr == ""
+    active = load_shadow(repo, RuleLoomConfig.load(repo))
+    assert [item.id for item in active] == [candidate_id]
+    assert active[0].engine == "manual"
 
 
 def test_cli_freezes_custom_target_and_outcome_definition(

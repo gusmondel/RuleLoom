@@ -16,8 +16,7 @@ from ruleloom.history.models import HistoricalEvent
 from ruleloom.history.storage import (
     change_units_path,
     events_path,
-    load_change_units,
-    load_events,
+    load_history_snapshot,
 )
 from ruleloom.history.units import (
     validate_change_unit_event_links,
@@ -227,8 +226,7 @@ def validate_project(root: Path, config: RuleLoomConfig) -> Readiness:
         )
     observations = load_observations(dataset_path(root, config))
     report = validate_observations(observations, config, as_of=as_of)
-    events = load_events(events_path(root))
-    units = load_change_units(change_units_path(root))
+    events, units = load_history_snapshot(events_path(root), change_units_path(root))
     for event in events:
         if event.repository_id != config.protocol.repository_id:
             raise ModelError(f"historical event {event.id!r} belongs to a different repository")

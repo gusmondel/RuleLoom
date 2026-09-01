@@ -471,6 +471,25 @@ def load_candidate(path: Path) -> Candidate:
     return candidate
 
 
+def _validate_manual_candidate_runtime(
+    candidate: Candidate,
+    config: RuleLoomConfig,
+) -> None:
+    """Import lazily to preserve ``manual_rules -> storage`` low-level IO use."""
+
+    from ruleloom.manual_rules import validate_manual_candidate
+
+    validate_manual_candidate(candidate, config)
+
+
+def _claims_manual_provenance(candidate: Candidate) -> bool:
+    return (
+        candidate.metadata.get("candidate_origin") == "manual_declaration"
+        or "manual_declaration" in candidate.metadata
+        or "manual_audit" in candidate.metadata
+    )
+
+
 def load_approved(root: Path, config: RuleLoomConfig) -> list[Candidate]:
     deprecated = _deprecated_ids(root, config)
     candidates: list[Candidate] = []
@@ -548,8 +567,14 @@ def _validate_deprecated(
         raise ModelError(f"invalid deprecation tombstone identity or status: {path}")
     if candidate.config_hash != config.hash:
         raise ModelError(f"deprecation tombstone belongs to a different configuration: {path}")
-    if candidate.rules.target != config.target or candidate.engine != config.learner.engine:
+    if candidate.rules.target != config.target:
         raise ModelError(f"deprecation tombstone has incompatible learner provenance: {path}")
+    if candidate.engine == "manual":
+        _validate_manual_candidate_runtime(candidate, config)
+    elif candidate.engine != config.learner.engine:
+        raise ModelError(f"deprecation tombstone has incompatible learner provenance: {path}")
+    elif _claims_manual_provenance(candidate):
+        raise ModelError(f"deprecation tombstone has incompatible manual provenance: {path}")
     if (
         candidate.metadata.get("pack") != config.pack
         or candidate.metadata.get("repository_id") != config.protocol.repository_id
@@ -661,7 +686,12 @@ def _validate_active(
         raise ModelError(
             f"active policy {candidate.id} does not match the current configuration hash"
         )
-    if candidate.engine != config.learner.engine:
+    manual = candidate.engine == "manual"
+    if manual:
+        _validate_manual_candidate_runtime(candidate, config)
+    elif _claims_manual_provenance(candidate):
+        raise ModelError(f"active policy {candidate.id} has incompatible manual provenance")
+    elif candidate.engine != config.learner.engine:
         raise ModelError(
             f"active policy {candidate.id} uses engine {candidate.engine!r}, not "
             f"{config.learner.engine!r}"

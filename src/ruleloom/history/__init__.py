@@ -43,15 +43,18 @@ from ruleloom.history.storage import (
     events_path,
     load_change_units,
     load_events,
+    load_history_snapshot,
     save_change_units,
     save_events,
     upsert_change_units,
     upsert_events,
+    upsert_history_batch,
 )
 from ruleloom.history.units import (
     assemble_change_units,
     validate_change_unit_event_links,
     validate_change_unit_evidence,
+    validate_history_snapshot,
     validate_unique_event_ownership,
 )
 
@@ -88,15 +91,18 @@ __all__ = [
     "ingest_git_history",
     "load_change_units",
     "load_events",
+    "load_history_snapshot",
     "materialize_history",
     "resolve_outcome_target",
     "save_change_units",
     "save_events",
     "upsert_change_units",
     "upsert_events",
+    "upsert_history_batch",
     "validate_change_unit_event_links",
     "validate_change_unit_evidence",
     "validate_git_sha",
+    "validate_history_snapshot",
     "validate_materialized_outcome",
     "validate_unique_event_ownership",
 ]

@@ -28,6 +28,12 @@ from ruleloom.lifecycle import (
     readiness,
     trust_reviewed_artifact,
 )
+from ruleloom.manual_rules import (
+    ManualRuleManifest,
+    audit_manual_rule,
+    declare_manual_rule,
+    manual_candidate_from_audit,
+)
 from ruleloom.models import (
     Candidate,
     FactEvidence,
@@ -44,11 +50,13 @@ from ruleloom.packs import ConfiguredPathsConfig, PathPredicateConfig, get_pack
 from ruleloom.project import initialize_project, validate_observations, validate_project
 from ruleloom.storage import (
     append_prediction,
+    approved_path,
     candidate_path,
     dataset_path,
     deprecated_path,
     load_approved,
     load_candidate,
+    load_reviewed_artifact_untrusted,
     load_shadow,
     predictions_path,
     read_json,
@@ -212,6 +220,32 @@ def _candidate(
         ),
         status=status,
     ).with_identity()
+
+
+def _manual_candidate(root: Path, config: RuleLoomConfig) -> Candidate:
+    declared_at = datetime(2026, 8, 31, 11, tzinfo=UTC)
+    declaration = declare_manual_rule(
+        root,
+        config,
+        ManualRuleManifest(
+            policy_id="large-change-risk",
+            revision=1,
+            summary="Large changes may require additional validation.",
+            rules=RuleSet(
+                config.target,
+                (HornClause(config.target, (RuleLiteral("large_change"),)),),
+            ),
+        ),
+        declared_at=declared_at,
+    )
+    audit = audit_manual_rule(
+        root,
+        config,
+        declaration,
+        [],
+        as_of=declared_at + timedelta(hours=1),
+    )
+    return manual_candidate_from_audit(declaration, audit, config)
 
 
 def _passing_shadow_evidence(candidate: Candidate) -> ShadowEvidence:
@@ -565,6 +599,58 @@ def test_shadow_gate_uses_minimum_positive_outcomes_and_rules() -> None:
     assert decision.unmet == ("positive outcomes 19 < required 20",)
     with pytest.raises(ModelError, match="shadow or approved"):
         promotion_decision(_candidate(), config, "production")
+
+
+def test_manual_rule_uses_prospective_only_gates_and_can_start_shadow_without_labels(
+    tmp_path: Path,
+) -> None:
+    config = _promotion_config()
+    declared_at = datetime(2026, 8, 31, 11, tzinfo=UTC)
+    declaration = declare_manual_rule(
+        tmp_path,
+        config,
+        ManualRuleManifest(
+            policy_id="large-change-risk",
+            revision=1,
+            summary="Large changes may require additional validation.",
+            rules=RuleSet(
+                TARGET,
+                (HornClause(TARGET, (RuleLiteral("large_change"),)),),
+            ),
+        ),
+        declared_at=declared_at,
+    )
+    audit = audit_manual_rule(
+        tmp_path,
+        config,
+        declaration,
+        [],
+        as_of=declared_at + timedelta(hours=1),
+    )
+    manual = manual_candidate_from_audit(declaration, audit, config)
+
+    assert promotion_decision(manual, config, "shadow", positive_count=0).allowed
+    without_shadow = promotion_decision(manual, config, "approved")
+    assert not without_shadow.allowed
+    assert any("prospective shadow evidence" in item for item in without_shadow.blocking)
+    assert promotion_decision(
+        manual,
+        config,
+        "approved",
+        prospective_shadow=_passing_shadow_evidence(manual),
+    ).allowed
+    incomplete_per_rule = replace(
+        _passing_shadow_evidence(manual),
+        rule_metrics={},
+    )
+    incomplete = promotion_decision(
+        manual,
+        config,
+        "approved",
+        prospective_shadow=incomplete_per_rule,
+    )
+    assert not incomplete.allowed
+    assert any("per-rule evidence" in item for item in incomplete.blocking)
 
 
 def test_initialize_creates_portable_agent_skills_and_refuses_reinitialization(
@@ -1596,6 +1682,112 @@ def test_explicit_clone_trust_binds_a_reviewed_artifact_locally(tmp_path: Path) 
             reviewer="reviewer",
             note="nothing to deprecate",
         )
+
+
+def test_manual_shadow_can_be_loaded_and_deprecated_end_to_end(tmp_path: Path) -> None:
+    root = tmp_path / "manual-lifecycle"
+    _git_init(root)
+    config = initialize_project(root, "ManualLifecycle").config
+    candidate = _manual_candidate(root, config)
+    save_candidate(candidate_path(root, config, candidate.id), candidate)
+
+    shadowed, decision, _path = promote_candidate(
+        root,
+        config,
+        candidate.id,
+        destination="shadow",
+        reviewer="Test Reviewer",
+        note="Begin prospective manual-rule validation",
+    )
+
+    assert decision.allowed
+    assert load_shadow(root, config) == [shadowed]
+    deprecated, tombstone = deprecate_candidate(
+        root,
+        config,
+        candidate.id,
+        reviewer="Test Reviewer",
+        note="Manual rule was superseded",
+    )
+    assert (
+        load_reviewed_artifact_untrusted(
+            root,
+            config,
+            candidate.id,
+            "deprecated",
+        )
+        == deprecated
+    )
+    assert load_candidate(tombstone) == deprecated
+    assert load_shadow(root, config) == []
+
+
+@pytest.mark.parametrize("status", ("shadow", "approved"))
+@pytest.mark.parametrize(
+    ("forgery", "error"),
+    (
+        ("missing_declaration", "immutable declaration"),
+        ("divergent_rules", "rules diverge"),
+        ("invalid_audit", "post-hoc and non-confirmatory"),
+    ),
+)
+def test_manual_reviewed_artifact_forgery_is_rejected_by_trust_and_active_loaders(
+    tmp_path: Path,
+    status: str,
+    forgery: str,
+    error: str,
+) -> None:
+    root = tmp_path / f"manual-forgery-{status}-{forgery}"
+    _git_init(root)
+    config = initialize_project(root, "ManualForgery").config
+    candidate = _manual_candidate(root, config)
+    review = {
+        "reviewer": "upstream-reviewer",
+        "reviewed_at": "2026-08-31T13:00:00Z",
+        "note": "reviewed upstream",
+        "override": False,
+        "unmet_gates": [],
+    }
+    forged = replace(candidate, status=status, review=review)
+    if forgery == "missing_declaration":
+        metadata = dict(forged.metadata)
+        metadata.pop("manual_declaration")
+        forged = replace(forged, metadata=metadata).with_identity()
+    elif forgery == "divergent_rules":
+        forged = replace(
+            forged,
+            rules=RuleSet(
+                config.target,
+                (HornClause(config.target, (RuleLiteral("touches_test"),)),),
+            ),
+        ).with_identity()
+    else:
+        metadata = dict(forged.metadata)
+        raw_audit = dict(metadata["manual_audit"])
+        raw_audit["confirmatory"] = True
+        metadata["manual_audit"] = raw_audit
+        forged = replace(forged, metadata=metadata).with_identity()
+    artifact_path = (
+        shadow_path(root, config, forged.id)
+        if status == "shadow"
+        else approved_path(root, config, forged.id)
+    )
+    save_candidate(artifact_path, forged)
+
+    with pytest.raises(ModelError, match=error):
+        trust_reviewed_artifact(
+            root,
+            config,
+            forged.id,
+            status=status,
+            reviewer="clone-reviewer",
+            note="inspected in this clone",
+        )
+
+    record_transition_attestation(root, forged)
+    loader = load_shadow if status == "shadow" else load_approved
+    with pytest.raises(ModelError, match=error):
+        loader(root, config)
 
 
 def test_clone_trust_rejects_policy_outside_the_pack_contract(tmp_path: Path) -> None:

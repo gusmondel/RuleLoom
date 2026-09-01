@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from pathlib import Path
@@ -14,13 +16,17 @@ from ruleloom.history import (
     events_path,
     load_change_units,
     load_events,
+    load_history_snapshot,
     save_change_units,
     save_events,
     upsert_change_units,
     upsert_events,
+    upsert_history_batch,
     validate_git_sha,
 )
+from ruleloom.history import storage as history_storage
 from ruleloom.models import JsonValue, ModelError, canonical_json
+from ruleloom.storage import trusted_state_path
 
 SHA_A = "a" * 40
 SHA_B = "b" * 40
@@ -69,6 +75,22 @@ def _unit(
         evidence_quality="rich",
         confirmatory=False,
     )
+
+
+def _batch_pair(suffix: str) -> tuple[HistoricalEvent, ChangeUnit]:
+    change_id = f"change.{suffix}"
+    event = replace(
+        _event(f"event.{suffix}"),
+        change_id=change_id,
+    )
+    unit = replace(
+        _unit(change_id),
+        final_sha=None,
+        finalized_at=None,
+        event_ids=(event.id,),
+        evidence_quality="git_only",
+    )
+    return event, unit
 
 
 def test_historical_event_round_trips_strict_json() -> None:
@@ -218,27 +240,29 @@ def test_event_storage_is_canonical_bounded_and_ordered_by_availability(tmp_path
 
 
 def test_change_unit_storage_is_ordered_and_save_is_immutable(tmp_path: Path) -> None:
-    path = tmp_path / "change-units.jsonl"
-    later = _unit("change.later", prediction_at="2026-01-02T09:00:00Z")
+    event_path = tmp_path / "events.jsonl"
+    unit_path = tmp_path / "change-units.jsonl"
+    later_event, later = _batch_pair("later")
+    earlier_event, earlier_unit = _batch_pair("earlier")
     earlier = replace(
-        _unit("change.earlier", prediction_at="2026-01-01T09:00:00Z"),
-        finalized_at="2026-01-01T10:00:00Z",
+        earlier_unit,
+        prediction_at="2026-01-01T09:00:00Z",
     )
+    save_events(event_path, [later_event, earlier_event])
 
-    save_change_units(path, [later, earlier])
-    save_change_units(path, [earlier, later])
+    save_change_units(unit_path, [later, earlier])
+    save_change_units(unit_path, [earlier, later])
 
-    assert load_change_units(path) == [earlier, later]
+    assert load_change_units(unit_path) == [earlier, later]
     with pytest.raises(ModelError, match="refusing to overwrite immutable change unit log"):
-        save_change_units(path, [earlier])
-    assert load_change_units(path) == [earlier, later]
+        save_change_units(unit_path, [earlier])
+    assert load_change_units(unit_path) == [earlier, later]
 
 
 def test_upserts_are_idempotent_and_reject_conflicting_overwrites(tmp_path: Path) -> None:
     event_path = tmp_path / "events.jsonl"
     unit_path = tmp_path / "change-units.jsonl"
-    event = _event()
-    unit = _unit()
+    event, unit = _batch_pair("upsert")
 
     assert upsert_events(event_path, [event]) == (1, 0)
     assert upsert_events(event_path, [event]) == (0, 1)
@@ -248,9 +272,240 @@ def test_upserts_are_idempotent_and_reject_conflicting_overwrites(tmp_path: Path
     with pytest.raises(ModelError, match="refusing to overwrite immutable historical event"):
         upsert_events(event_path, [replace(event, data={"conclusion": "passed"})])
     with pytest.raises(ModelError, match="refusing to overwrite immutable change unit"):
-        upsert_change_units(unit_path, [replace(unit, confirmatory=True)])
+        upsert_change_units(unit_path, [replace(unit, source_ref="forge://repo/pulls/other")])
     assert load_events(event_path) == [event]
     assert load_change_units(unit_path) == [unit]
+
+
+def test_unit_only_upsert_cannot_create_dangling_history_snapshot(tmp_path: Path) -> None:
+    unit_path = tmp_path / "change-units.jsonl"
+    _event, unit = _batch_pair("dangling")
+
+    with pytest.raises(ModelError, match="references missing historical event"):
+        upsert_change_units(unit_path, [unit])
+
+    assert load_change_units(unit_path) == []
+
+
+def test_history_snapshot_pins_one_builtin_github_repository_identity(
+    tmp_path: Path,
+) -> None:
+    event_path = tmp_path / "events.jsonl"
+    unit_path = tmp_path / "change-units.jsonl"
+
+    def github_pair(suffix: str, repository_key: str) -> tuple[HistoricalEvent, ChangeUnit]:
+        event, unit = _batch_pair(suffix)
+        source_ref = f"github:{repository_key}:pull:7"
+        return (
+            replace(
+                event,
+                provider="github",
+                source_ref=f"{source_ref}:snapshot",
+                data={**event.data, "adapter": "ruleloom-github/1"},
+            ),
+            replace(
+                unit,
+                kind="github_archive_change",
+                provider="github",
+                source_ref=source_ref,
+            ),
+        )
+
+    first = github_pair("github-first", f"github.github.com.repo.{'a' * 20}")
+    second = github_pair("github-second", f"github.github.com.repo.{'b' * 20}")
+    upsert_history_batch(event_path, [first[0]], unit_path, [first[1]])
+
+    with pytest.raises(ModelError, match="multiple built-in GitHub repository identities"):
+        upsert_history_batch(event_path, [second[0]], unit_path, [second[1]])
+
+    assert load_history_snapshot(event_path, unit_path) == ([first[0]], [first[1]])
+
+
+def test_history_snapshot_reader_cannot_interleave_with_batch_commit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_path = tmp_path / "events.jsonl"
+    unit_path = tmp_path / "change-units.jsonl"
+    old_event, old_unit = _batch_pair("old-snapshot")
+    new_event, new_unit = _batch_pair("new-snapshot")
+    upsert_history_batch(event_path, [old_event], unit_path, [old_unit])
+
+    event_read = threading.Event()
+    release_reader = threading.Event()
+    writer_started = threading.Event()
+    original_read = history_storage._read_records
+
+    def pause_after_events(*args: object, **kwargs: object) -> list[object]:
+        records = original_read(*args, **kwargs)  # type: ignore[arg-type]
+        if args[0] == event_path and not event_read.is_set():
+            event_read.set()
+            assert release_reader.wait(timeout=5)
+        return records
+
+    def write_batch() -> None:
+        writer_started.set()
+        upsert_history_batch(event_path, [new_event], unit_path, [new_unit])
+
+    monkeypatch.setattr(history_storage, "_read_records", pause_after_events)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        reader = executor.submit(load_history_snapshot, event_path, unit_path)
+        assert event_read.wait(timeout=5)
+        writer = executor.submit(write_batch)
+        assert writer_started.wait(timeout=5)
+        assert not writer.done()
+        release_reader.set()
+        events, units = reader.result(timeout=5)
+        writer.result(timeout=5)
+
+    assert events == [old_event]
+    assert units == [old_unit]
+    final_events, final_units = load_history_snapshot(event_path, unit_path)
+    assert {item.id for item in final_events} == {old_event.id, new_event.id}
+    assert {item.id for item in final_units} == {old_unit.id, new_unit.id}
+
+
+def test_history_batch_rolls_back_both_logs_when_second_write_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_path = tmp_path / "events.jsonl"
+    unit_path = tmp_path / "change-units.jsonl"
+    old_event, old_unit = _batch_pair("old")
+    new_event, new_unit = _batch_pair("new")
+    save_events(event_path, [old_event])
+    save_change_units(unit_path, [old_unit])
+    original_write = history_storage._atomic_write
+    failed = False
+
+    def fail_unit_once(path: Path, content: str) -> None:
+        nonlocal failed
+        if path == unit_path and not failed:
+            failed = True
+            raise OSError("injected unit write failure")
+        original_write(path, content)
+
+    monkeypatch.setattr(history_storage, "_atomic_write", fail_unit_once)
+
+    with pytest.raises(OSError, match="injected unit write failure"):
+        upsert_history_batch(event_path, [new_event], unit_path, [new_unit])
+
+    assert load_events(event_path) == [old_event]
+    assert load_change_units(unit_path) == [old_unit]
+    assert not list(tmp_path.glob(".ruleloom-history-*"))
+
+
+def test_history_reader_recovers_an_interrupted_batch_before_exposing_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    event_path = tmp_path / "events.jsonl"
+    unit_path = tmp_path / "change-units.jsonl"
+    old_event, old_unit = _batch_pair("old")
+    new_event, new_unit = _batch_pair("new")
+    save_events(event_path, [old_event])
+    save_change_units(unit_path, [old_unit])
+    original_write = history_storage._atomic_write
+    original_recover = history_storage._recover_history_transaction
+    failed = False
+
+    def fail_unit_once(path: Path, content: str) -> None:
+        nonlocal failed
+        if path == unit_path and not failed:
+            failed = True
+            raise OSError("simulated process interruption")
+        original_write(path, content)
+
+    def interrupt_recovery(_directory: Path) -> None:
+        raise RuntimeError("recovery deferred until next process")
+
+    monkeypatch.setattr(history_storage, "_atomic_write", fail_unit_once)
+    monkeypatch.setattr(history_storage, "_recover_history_transaction", interrupt_recovery)
+    with pytest.raises(RuntimeError, match="recovery deferred"):
+        upsert_history_batch(event_path, [new_event], unit_path, [new_unit])
+
+    monkeypatch.setattr(history_storage, "_atomic_write", original_write)
+    monkeypatch.setattr(history_storage, "_recover_history_transaction", original_recover)
+    assert load_events(event_path) == [old_event]
+    assert load_change_units(unit_path) == [old_unit]
+    assert not list(tmp_path.glob(".ruleloom-history-*"))
+
+
+def test_canonical_history_transaction_state_stays_outside_repository_files(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    subprocess.run(
+        ["git", "init", "--quiet", str(tmp_path)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    event_path = events_path(tmp_path)
+    unit_path = change_units_path(tmp_path)
+    original_recover = history_storage._recover_history_transaction
+
+    original_write = history_storage._atomic_write
+    failed = False
+
+    def leave_prepared_transaction(directory: Path) -> None:
+        if failed:
+            raise RuntimeError("simulate process exit before recovery")
+        original_recover(directory)
+
+    def fail_unit_once(path: Path, content: str) -> None:
+        nonlocal failed
+        if path == unit_path and not failed:
+            failed = True
+            raise OSError("simulated unit write failure")
+        original_write(path, content)
+
+    monkeypatch.setattr(history_storage, "_atomic_write", fail_unit_once)
+    monkeypatch.setattr(history_storage, "_recover_history_transaction", leave_prepared_transaction)
+    with pytest.raises(RuntimeError, match="simulate process exit"):
+        event, unit = _batch_pair("private-state")
+        upsert_history_batch(event_path, [event], unit_path, [unit])
+
+    state_directory = trusted_state_path(tmp_path) / "history-transaction"
+    assert (state_directory / ".ruleloom-history-transaction.json").is_file()
+    assert not list((tmp_path / ".ruleloom" / "history").glob(".ruleloom-history-*"))
+
+    monkeypatch.setattr(history_storage, "_atomic_write", original_write)
+    monkeypatch.setattr(history_storage, "_recover_history_transaction", original_recover)
+    assert load_events(event_path) == []
+    assert load_change_units(unit_path) == []
+    assert not (state_directory / ".ruleloom-history-transaction.json").exists()
+
+
+def test_concurrent_history_batches_validate_merged_event_ownership_under_lock(
+    tmp_path: Path,
+) -> None:
+    event_path = tmp_path / "events.jsonl"
+    unit_path = tmp_path / "change-units.jsonl"
+    shared = replace(_event("event.shared"), change_id=None)
+
+    def import_owner(suffix: str) -> str:
+        unit = replace(
+            _unit(f"change.{suffix}"),
+            final_sha=None,
+            finalized_at=None,
+            event_ids=(shared.id,),
+            evidence_quality="git_only",
+        )
+        try:
+            upsert_history_batch(event_path, [shared], unit_path, [unit])
+        except ModelError as exc:
+            return str(exc)
+        return "inserted"
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        results = list(executor.map(import_owner, ("first", "second")))
+
+    assert results.count("inserted") == 1
+    errors = [result for result in results if result != "inserted"]
+    assert len(errors) == 1
+    assert "attached to multiple change units" in errors[0]
+    assert len(load_change_units(unit_path)) == 1
 
 
 def test_concurrent_upserts_do_not_lose_records(tmp_path: Path) -> None:

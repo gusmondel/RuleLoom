@@ -128,7 +128,7 @@ OS user.
 }
 ```
 
-Version 0.5.0 defaults to configuration schema v2 and the language-neutral
+Version 0.6.0 defaults to configuration schema v2 and the language-neutral
 `generic_changes@1` pack. It also ships schema-v3 `configured_paths@1` and
 `flutter_testing@2`. The frozen `flutter_testing@1` implementation exists
 only to read structurally and reproduce the hashes of historical configuration
@@ -248,12 +248,12 @@ Predicate-like fields start with a lowercase letter and contain lowercase ASCII
 letters, numbers, and underscores. `init` derives `repository_id` from
 `remote.origin.url`, or from root commits when no origin exists; initialization
 therefore requires an origin or at least one commit. The storage lock uses POSIX
-`fcntl`: version 0.5.0 supports macOS and Linux, not Windows.
+`fcntl`: version 0.6.0 supports macOS and Linux, not Windows.
 
 The built-in search also enforces finite operational bounds:
 `max_body` 1–4, `max_rules` 1–10, `max_predicates` 1–32,
 `bootstrap_runs` 0–100, and Popper timeout 1–3600 seconds, plus a combined
-hypothesis/work budget. For `engine="popper"`, version 0.5.0 requires
+hypothesis/work budget. For `engine="popper"`, version 0.6.0 requires
 `max_rules=1`, `bootstrap_runs=0`, and the Horn-specific support/precision/cost
 settings at their defaults. Popper is an offline adapter to an explicitly
 configured, already provisioned checkout; RuleLoom does not install it.
@@ -336,7 +336,7 @@ Each non-empty line in `.ruleloom/observations.jsonl` is one object:
 
 | Field | Type | Contract |
 |---|---|---|
-| `schema_version` | integer | Must be artifact schema `1` in version 0.5.0. |
+| `schema_version` | integer | Must be artifact schema `1` in version 0.6.0. |
 | `id` | string | Unique within the dataset; lowercase letters/numbers plus `.`, `_`, or `-`. |
 | `observed_at` | string | Decision-time timestamp with timezone; used for chronological splitting. |
 | `protocol_hash` | string | Lowercase SHA-256 of the configured evidence protocol; evidence with a different hash must not be pooled. |
@@ -388,7 +388,7 @@ then ID.
 
 First-parent order establishes ordering, not a valid decision point. A merge or
 squash may already contain validation added because of CI or review. Version
-0.5.0 therefore distinguishes raw `git_commit` evidence from grouped
+0.6.0 therefore distinguishes raw `git_commit` evidence from grouped
 `historical_change` observations. The latter bind one stable `change_id` to an
 exact `base_sha`, `prediction_sha`, and prediction time. Only a `rich` unit with
 a genuinely persisted point-in-time snapshot can be confirmatory. `git_only`
@@ -401,6 +401,52 @@ and `final_only` cases remain useful for exploration but cannot support approval
 Historical records use their own artifact schema v1. They are independent of a
 programming language and provider: adapters normalize forge, review, CI, revert,
 and incident data before the evidence pack re-extracts facts from Git.
+
+`ruleloom history import-github --repository OWNER/NAME` is a bounded adapter
+over the authenticated `gh api --hostname github.com` transport. By default the
+requested repository must equal the public-GitHub `OWNER/NAME` parsed from an
+unambiguous HTTPS, SSH, or SCP-style `remote.origin.url`. A reviewed mirror or
+import can use `--allow-unverified-repository`; the report and manifest hash
+record the resulting `repository_binding`. GitHub Enterprise hosts are not
+supported by this adapter version.
+
+`since` filters PR creation times and the repository-commit scan. `until` is an
+inclusive as-of cutoff for PR creation/finalization and retained review, check,
+and revert events; a PR finalized after it is skipped. It
+defaults to collection time and does not reconstruct a historical provider
+snapshot. It filters one collection and cannot remove records already imported
+into the append-only ledger; an earlier as-of evaluation therefore needs a
+clean experiment/log. The adapter requests closed PRs only, groups their
+currently available commit lineage, and records the reconstructed prediction
+event with `point_in_time: false`. An unexpectedly non-closed or force-pushed PR
+that cannot be normalized safely is skipped. Every resulting
+unit has `kind=github_archive_change`, `evidence_quality=git_only`, and
+`confirmatory=false`: archived state cannot prove the exact patch visible at PR
+opening. Pagination bounds and skipped/truncated counts remain part of the
+adapter report; persistence separately enforces the canonical history-log
+limits. Collection also has global request and top-level provider-record
+budgets (20,000 and 250,000 by default). Exhausting either aborts without
+persistence. A successful report exposes the global limits/use, policy, a
+compact `manifest`, and `manifest_hash`. The emitted pre-hash manifest binds all
+per-endpoint/global limits, warnings and counts, plus content hashes for the
+exact normalized event and unit sets. Preserve the exact command, report, and
+canonical logs: the compact manifest deliberately avoids duplicating every
+normalized record in stdout. The
+normalizer does not retain free-form titles, bodies, review text,
+reviewer names, or check names. User and check identities are repository-scoped
+and pseudonymized; stable PR and event numbers remain for provenance. Review
+submissions are stored with a state-neutral `decision=unspecified`;
+provider-side dismissal therefore cannot mutate the prior record. Check events
+are versioned by PR plus normalized check content, so an updated conclusion or
+completion time appends a distinct immutable event. The paired history-log
+validator also pins the first built-in GitHub numeric repository identity used
+for each RuleLoom `repository_id`; a different provider repository requires a
+new experiment.
+
+Provider collection does not fetch Git objects. Materialization needs each
+unit's `base_sha` and `prediction_sha` in the local object database and reports
+unavailable units through `skipped`, `skipped_preview`, and
+`skipped_manifest_hash`; those omissions belong in coverage reporting.
 
 `.ruleloom/history/events.jsonl` stores immutable `HistoricalEvent` objects:
 
@@ -442,10 +488,16 @@ available no later than `prediction_at`; a snapshot reconstructed or exposed
 only afterward remains non-confirmatory even when its SHAs are exact.
 
 The JSONL stores are canonical, size-bounded, lock-protected, and immutable by
-ID. Each history log and imported JSONL is limited to 64 MiB, each persisted
-canonical record or imported input line to 1 MiB, and each file to 250,000
-records. Imports use the same shared limits as persistence, so an exported valid
-store remains importable. Conflicting ID reuse fails before overwrite.
+ID. An import that adds events and change units is committed as one recoverable
+two-log batch: readers take the same transaction lock and roll back an
+interrupted prepared batch before exposing either file. The bounded recovery
+journal and stages live in Git-private RuleLoom state rather than in
+repository-controlled `.ruleloom/history`; a successful transaction removes its
+journal and stages, leaving the canonical logs as the durable data. Each history
+log and imported JSONL is limited to 64 MiB, each persisted canonical record or
+imported input line to 1 MiB, and each file to 250,000 records. Imports use the
+same shared limits as persistence, so an exported valid store remains importable.
+Conflicting ID reuse fails before overwrite.
 
 Git bootstrap additionally caps traversal at 100,000 commits and retains the
 most recent prefix whose canonical event and change-unit logs both fit. Its
@@ -482,9 +534,14 @@ whose target and operational `protocol.outcome_definition` were fixed before
 labels were inspected; both are covered by the evidence protocol hash.
 
 Strong review/CI/link evidence and explicit complete maturation records are
-enabled by default. Test changes alone, fix keywords, and SZZ links are weak and
-require explicit opt-in. Absence, malformed events, and conflicting independent
-votes produce `unknown`; they never produce an implicit negative. Weak-dependent
+enabled by default. Test changes alone, fix keywords, SZZ links, and a GitHub
+revert associated only through an exact Git revert trailer are weak and require
+explicit opt-in. The GitHub adapter also records a failed check on the merge
+result as `attribution=unattributed_merge_result` and
+`evidence_grade=weak_heuristic`; it is an opt-in weak positive vote for
+`change_attributable_ci_failure`, never strong attribution. Absence, malformed
+events, and conflicting independent votes
+produce `unknown`; they never produce an implicit negative. Weak-dependent
 labels and non-rich units are non-confirmatory, and approval rejects a candidate
 trained from any such historical case.
 
@@ -492,6 +549,28 @@ A strong CI sequence requires strictly ordered failure, code-change, and success
 times, the same provider, and the same provider-scoped stable `check_id` for the
 failure and success. Adapters must namespace that identity where provider names
 are not globally unique.
+
+The GitHub archive adapter ignores every timeline label name during outcome
+derivation. A timeline application record can reference the provider's mutable
+Label object, whose current name may differ from its name when the historical
+event occurred. Consequently, even an apparently structured name cannot prove
+the original point-in-time assertion; `since`/`until`, actor separation, and
+syntax checks cannot restore that lost state.
+
+A label-backed strong outcome requires an external webhook, exporter, or
+append-only adjudication ledger that captured the application point-in-time.
+That trusted source must preserve the original timestamp, repository/change
+identity, authorized independent actor, target, value, maturity/completeness,
+and correction provenance. Its adapter may emit an immutable normalized
+`change_finalized` event with explicit `target`, `value`, and
+`evidence_complete`; RuleLoom then applies the ordinary chronology, conflict,
+and atomic-target rules during `history import` and materialization. RuleLoom
+v0.6.0 ships neither this capturer nor an automatic GitHub label exporter.
+
+An archive label name by itself therefore contributes no vote—not even weak
+evidence—and absence of such a name cannot produce a negative. The existing
+unattributed merge-result check and heuristic Git revert votes remain separate
+weak opt-ins; neither becomes confirmatory.
 
 ### Labels
 
@@ -529,7 +608,7 @@ only when `available_at` is strictly later than that unit's earliest
 `predicted_at` within the policy set.
 
 The same independent change must not appear on both sides of a retrospective
-split through multiple snapshots. Version 0.5.0 materializes one observation per
+split through multiple snapshots. Version 0.6.0 materializes one observation per
 `ChangeUnit`, and `learn` rejects duplicate mature `change_id` values. It also
 rejects mixing `git_commit` and `historical_change` cohorts. A raw commit cohort
 still needs manual independence auditing; grouped history is the preferred
@@ -547,7 +626,7 @@ Each `fact_evidence` entry contains:
 | `confidence` | number or absent | Optional value from 0 through 1, mainly for non-deterministic facts. |
 
 `agent`, `human`, and `imported` are reserved wire-format values for future
-extractors and migration tooling. In version 0.5.0, current built-in-pack
+extractors and migration tooling. In version 0.6.0, current built-in-pack
 observations are accepted for validation, learning, and prediction only when
 every fact has `kind: "deterministic"` and names the exact configured extractor.
 A record using a reserved non-deterministic kind may be read structurally, but
@@ -580,7 +659,7 @@ missing diff is extraction failure or ineligibility, never logical falsehood.
 
 ## Rule representation
 
-Version 0.5.0 is propositionalized ILP over one change at a time. Each fact is a
+Version 0.6.0 is propositionalized ILP over one change at a time. Each fact is a
 Boolean unary predicate of the same observation variable `A`; there are no
 multiple entity variables, relations between files/types/people, relational
 joins, recursion, predicate invention, or arbitrary Prolog programs. A rule set
@@ -594,8 +673,8 @@ conjunction of literals:
     {
       "target": "needs_extra_validation",
       "body": [
-        {"predicate": "mutates_state", "negated": false},
-        {"predicate": "adds_widget_test", "negated": true}
+        {"predicate": "touches_ci", "negated": false},
+        {"predicate": "touches_test", "negated": true}
       ]
     }
   ]
@@ -605,7 +684,7 @@ conjunction of literals:
 Equivalent Prolog rendering:
 
 ```prolog
-needs_extra_validation(A) :- mutates_state(A), not_adds_widget_test(A).
+needs_extra_validation(A) :- touches_ci(A), not_touches_test(A).
 ```
 
 A clause matches only when every literal matches. A rule set predicts positive
@@ -613,6 +692,37 @@ when any clause matches. An empty rule set always abstains/predicts false.
 
 The schema disallows an empty clause, duplicate literals, or both positive and
 negated forms of the same predicate in one body.
+
+### Explicit manual-rule manifest
+
+`ruleloom rules import MANIFEST.json` accepts an explicit schema-v1 object with
+exactly these top-level fields:
+
+| Field | Contract |
+|---|---|
+| `schema_version` | Integer `1`. |
+| `policy_id` | Stable safe identifier for the human assertion. |
+| `revision` | Integer greater than or equal to one. |
+| `claim_kind` | Exactly `risk_trigger`; prescriptive actions and causal claims are outside this contract. |
+| `summary` | Bounded, single-line human description. |
+| `rules` | Non-empty bounded `RuleSet` whose target equals the experiment target and whose predicates belong to the frozen pack. |
+| `sources` | Optional array of repository-relative source references with `path` and either both or neither of `start_line`/`end_line`. |
+
+Source paths cannot escape the repository or point into `.git`, `.ruleloom`, or
+generated RuleLoom agent paths. At declaration, RuleLoom records SHA-256 hashes
+for each complete source document and selected excerpt, plus bounded size/line
+metadata. It later reports `unchanged`, `changed`, or `unavailable`. It never
+parses, executes, or treats the source prose as instructions. A referenced
+`AGENTS.md` or `CLAUDE.md` span is provenance for a human translation, not
+machine input to rule discovery.
+
+The manifest is bound to the exact repository, config, evidence protocol, pack,
+pack version, extractor, and configured-pack hash. Import evaluates its Horn
+clauses over the current observations and creates a content-addressed
+`engine=manual` candidate. That audit is always
+`retrospective_post_hoc_exploratory` and `confirmatory=false`; unknown or
+not-yet-available labels remain censored. Match coverage describes where a rule
+would have fired. It does not establish relevance, correctness, or causality.
 
 ## Metrics
 
@@ -651,18 +761,15 @@ Candidate {
   id: string
   created_at: timezone-aware timestamp
   status: candidate | shadow | approved | rejected | deprecated
-  engine: string
+  engine: horn | popper | manual
   engine_version: string
   dataset_hash: string
   config_hash: string
   rules: RuleSet
-  metrics: {train: Metrics, test: Metrics}
-  baselines: {
-    never_alert: Metrics,
-    always_alert: Metrics,
-    train_majority: Metrics,
-    best_single_literal: Metrics
-  }
+  metrics: {train: Metrics, test: Metrics} | {historical: Metrics}
+  baselines:
+    learned: {never_alert, always_alert, train_majority, best_single_literal}
+    manual: {never_alert, always_alert}
   stability: number in [0, 1]
   train_ids: string[]
   test_ids: string[]
@@ -679,6 +786,14 @@ dynamic configured predicates. Current metadata records readiness, the selected
 single literal, rule cards with support/counterexamples, and an evaluation object whose method is
 `temporal_holdout`, whose `test_start` is explicit, and whose
 `label_availability_enforced` flag is true.
+
+A manual candidate instead stores its immutable declaration and full post-hoc
+audit under metadata, uses `historical` metrics, and has no train/test split.
+Those fields cannot satisfy learned retrospective gates. After human review it
+may enter shadow with no retrospective positives, but approval still requires
+the exact prior shadow manifest and all non-overridable prospective prediction,
+maturity, class-balance, elapsed-time, aggregate, and per-clause gates. Source
+drift or inability to reproduce the declaration blocks its first transition.
 
 Candidate metadata binds the exact pack name/version, extractor,
 `evidence_protocol_hash`, and, for a configurable pack, `pack_config_hash`.
@@ -878,7 +993,7 @@ eligible for prospective confusion metrics. `excluded_preexisting_outcome`
 prevents a retrospectively known answer from masquerading as a prediction. Use
 `report --policy-set <hash>` for the unwrapped single-policy report. The report
 describes aggregate prospective association, never a causal estimate; causal
-impact needs a randomized or pre-specified staged advisory rollout. Version 0.5.0
+impact needs a randomized or pre-specified staged advisory rollout. Version 0.6.0
 does not emit confidence intervals or per-clause prospective tables in this
 report. Promotion separately evaluates the registered Wilson lower-bound and
 per-clause gates described above.

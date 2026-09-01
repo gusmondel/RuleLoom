@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import hashlib
+import re
 import subprocess
 import threading
 import time
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -49,6 +51,9 @@ _MAX_CONTENT_PATCH_BATCHES = 128
 _MAX_CONTENT_PATCH_SECONDS = 45.0
 _MAX_COMMIT_SUBJECT_BYTES = 4096
 _MAX_BACKFILL_SKIP_PREVIEW = 128
+_MAX_OBJECT_PREFLIGHT_IDS = 250_000
+_OBJECT_PREFLIGHT_BATCH = 10_000
+_FULL_OBJECT_ID_RE = re.compile(r"^(?:[0-9a-f]{40}|[0-9a-f]{64})$")
 
 
 class GitFactsError(RuntimeError):
@@ -107,6 +112,8 @@ def _run_git_capped(
     timeout_seconds: float = _GIT_TIMEOUT_SECONDS,
 ) -> tuple[bytes, bytes, int]:
     """Run Git with bounded wall time and incremental output caps."""
+    if input_bytes is not None and len(input_bytes) > 1024 * 1024:
+        raise GitFactsError("Git stdin exceeds 1048576 bytes")
     command = ["git", "-C", str(repo), *arguments]
     try:
         process = subprocess.Popen(
@@ -117,19 +124,6 @@ def _run_git_capped(
         )
     except FileNotFoundError as exc:
         raise GitFactsError("Git is not installed or is not available on PATH") from exc
-    if input_bytes is not None:
-        if len(input_bytes) > 1024 * 1024:
-            process.kill()
-            process.wait()
-            raise GitFactsError("Git stdin exceeds 1048576 bytes")
-        assert process.stdin is not None
-        try:
-            process.stdin.write(input_bytes)
-        except BrokenPipeError as exc:
-            process.wait()
-            raise GitFactsError(f"git {' '.join(arguments)} closed stdin early") from exc
-        finally:
-            process.stdin.close()
     assert process.stdout is not None
     assert process.stderr is not None
     buffers = {"stdout": bytearray(), "stderr": bytearray()}
@@ -148,7 +142,18 @@ def _run_git_capped(
                 return
             buffer.extend(chunk)
 
-    threads = (
+    def feed(stream: BinaryIO, content: bytes) -> None:
+        try:
+            stream.write(content)
+            stream.flush()
+        except (OSError, ValueError):
+            violation_message.append(f"git {' '.join(arguments)} closed stdin early")
+            violation.set()
+        finally:
+            with suppress(OSError):
+                stream.close()
+
+    threads: list[threading.Thread] = [
         threading.Thread(
             target=drain,
             args=("stdout", process.stdout, _MAX_GIT_OUTPUT_BYTES),
@@ -159,33 +164,49 @@ def _run_git_capped(
             args=("stderr", process.stderr, _MAX_GIT_STDERR_BYTES),
             daemon=True,
         ),
-    )
+    ]
     for thread in threads:
         thread.start()
+    if input_bytes is not None:
+        assert process.stdin is not None
+        writer = threading.Thread(
+            target=feed,
+            args=(process.stdin, input_bytes),
+            daemon=True,
+        )
+        threads.append(writer)
+        writer.start()
     deadline = time.monotonic() + timeout_seconds
+    failure: str | None = None
     try:
         while process.poll() is None:
             if violation.is_set():
+                failure = violation_message[0]
+            elif time.monotonic() >= deadline:
+                failure = f"git {' '.join(arguments)} exceeded {timeout_seconds:g} seconds"
+            if failure is not None:
                 process.kill()
                 process.wait()
-                raise GitFactsError(violation_message[0])
-            if time.monotonic() >= deadline:
-                process.kill()
-                process.wait()
-                raise GitFactsError(
-                    f"git {' '.join(arguments)} exceeded {timeout_seconds:g} seconds"
-                )
+                break
             time.sleep(0.01)
         returncode = process.wait()
         for thread in threads:
             thread.join(timeout=1)
         if any(thread.is_alive() for thread in threads):
-            process.kill()
-            process.wait()
-            raise GitFactsError(f"git {' '.join(arguments)} output readers did not terminate")
-        if violation.is_set():
+            if process.poll() is None:
+                process.kill()
+                process.wait()
+            raise GitFactsError(f"git {' '.join(arguments)} I/O workers did not terminate")
+        if failure is not None:
+            raise GitFactsError(failure)
+        if violation.is_set() and violation_message:
             raise GitFactsError(violation_message[0])
     finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+        for thread in threads:
+            thread.join(timeout=1)
         process.stdout.close()
         process.stderr.close()
     return bytes(buffers["stdout"]), bytes(buffers["stderr"]), returncode
@@ -226,6 +247,68 @@ def _git_bytes(repo: Path, *arguments: str) -> bytes:
     return stdout
 
 
+def repository_origin_url(repo: Path) -> str | None:
+    """Return the configured origin URL without persisting or displaying it."""
+
+    resolved = repo.resolve()
+    if not resolved.is_dir():
+        raise GitFactsError(f"repository directory does not exist: {resolved}")
+    top_level = Path(_git(resolved, "rev-parse", "--show-toplevel").strip()).resolve()
+    try:
+        remote = _git(top_level, "config", "--get", "remote.origin.url").strip()
+    except GitFactsError:
+        return None
+    if not remote:
+        return None
+    if len(remote.encode("utf-8")) > 8192 or any(character in remote for character in "\x00\r\n"):
+        raise GitFactsError("remote.origin.url is invalid or exceeds 8192 bytes")
+    return remote
+
+
+def missing_commit_objects(repo: Path, object_ids: list[str] | tuple[str, ...]) -> tuple[str, ...]:
+    """Return full object IDs that are absent locally or are not commit objects."""
+
+    unique = tuple(sorted(set(object_ids)))
+    if len(unique) > _MAX_OBJECT_PREFLIGHT_IDS:
+        raise GitFactsError(
+            f"Git object preflight exceeds {_MAX_OBJECT_PREFLIGHT_IDS} unique object IDs"
+        )
+    if any(_FULL_OBJECT_ID_RE.fullmatch(identifier) is None for identifier in unique):
+        raise GitFactsError("Git object preflight requires lowercase full SHA-1/SHA-256 IDs")
+    if not unique:
+        return ()
+    resolved = repo.resolve()
+    top_level = Path(_git(resolved, "rev-parse", "--show-toplevel").strip()).resolve()
+    deadline = time.monotonic() + _GIT_TIMEOUT_SECONDS
+    lines: list[str] = []
+    for offset in range(0, len(unique), _OBJECT_PREFLIGHT_BATCH):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise GitFactsError(f"Git object preflight exceeded {_GIT_TIMEOUT_SECONDS:g} seconds")
+        batch = unique[offset : offset + _OBJECT_PREFLIGHT_BATCH]
+        stdout, stderr, returncode = _run_git_capped(
+            top_level,
+            ("cat-file", "--batch-check=%(objectname) %(objecttype)"),
+            input_bytes=("\n".join(batch) + "\n").encode(),
+            timeout_seconds=remaining,
+        )
+        if returncode != 0:
+            detail = stderr.decode(errors="replace").strip() or "unknown Git error"
+            raise GitFactsError(f"Git object preflight failed: {detail}")
+        try:
+            lines.extend(stdout.decode("utf-8").splitlines())
+        except UnicodeDecodeError as exc:
+            raise GitFactsError("Git object preflight returned non-UTF-8 output") from exc
+    if len(lines) != len(unique):
+        raise GitFactsError("Git object preflight returned an incomplete response")
+    missing: list[str] = []
+    for requested, line in zip(unique, lines, strict=True):
+        fields = line.split()
+        if fields != [requested, "commit"]:
+            missing.append(requested)
+    return tuple(missing)
+
+
 def repository_identity(repo: Path) -> str:
     """Derive a non-secret, stable identifier without persisting remote URLs."""
     resolved = repo.resolve()
@@ -233,10 +316,7 @@ def repository_identity(repo: Path) -> str:
         raise GitFactsError(f"repository directory does not exist: {resolved}")
     top_level = Path(_git(resolved, "rev-parse", "--show-toplevel").strip()).resolve()
     anchor: str
-    try:
-        remote = _git(top_level, "config", "--get", "remote.origin.url").strip()
-    except GitFactsError:
-        remote = ""
+    remote = repository_origin_url(top_level) or ""
     if remote:
         anchor = f"remote\x00{remote}"
     else:

@@ -9,7 +9,7 @@ chronological holdout, and requires human review before any rule can reach a
 coding agent.
 
 > [!WARNING]
-> RuleLoom v0.5.0 is alpha research software. Start in blinded shadow mode. Do
+> RuleLoom v0.6.0 is alpha research software. Start in blinded shadow mode. Do
 > not use it as a merge gate, security control, or autonomous policy publisher.
 
 The core is language- and provider-neutral. Programming-language knowledge
@@ -70,8 +70,12 @@ RuleLoom does:
 
 - collect language-neutral Git topology and deterministic change facts;
 - import provider-neutral historical events and logical `ChangeUnit` records;
+- collect a bounded GitHub PR/review/check/revert archive through the authenticated
+  `gh` CLI;
 - derive conservative atomic outcomes from later review, CI, revert, and
   incident evidence;
+- freeze explicit, hand-authored Horn risk rules and audit their historical
+  coverage before a prospective shadow pilot;
 - keep unknown outcomes unknown instead of silently treating absence as a
   negative;
 - learn non-recursive unary Horn rules and compare them with simple baselines;
@@ -86,7 +90,9 @@ RuleLoom does not:
 - replace tests, CI, code review, or human judgment;
 - turn Git-only history into confirmatory evidence;
 - infer a negative outcome merely because no failure was recorded;
-- invent new predicates in v0.5.0;
+- interpret `AGENTS.md`, `CLAUDE.md`, issue text, review prose, or ordinary
+  GitHub labels as rules or outcomes;
+- invent new predicates in v0.6.0;
 - implement full relational ILP with joins, recursion, entity variables, or
   unrestricted predicate invention;
 - automatically fetch data from every forge or project-management provider.
@@ -105,6 +111,7 @@ flowchart LR
     O --> I
     I --> T[Chronological evaluation + baselines]
     T --> C[Immutable candidate]
+    M[Reviewed manual Horn manifest] --> C
     C --> R{Human review}
     R -->|accepted for observation| SH[Blinded shadow]
     SH --> PG{Prospective gates}
@@ -139,7 +146,9 @@ Requirements:
 
 - Python 3.11 or newer;
 - Git;
-- macOS or Linux. v0.5.0 uses POSIX `fcntl` locking and does not support
+- the authenticated GitHub CLI (`gh`) only when using
+  `history import-github`;
+- macOS or Linux. v0.6.0 uses POSIX `fcntl` locking and does not support
   Windows.
 
 From a checkout:
@@ -156,11 +165,11 @@ pipx install .
 python -m pip install .
 ```
 
-Verify the installation inside the target repository:
+Verify that the executable is installed. `doctor` additionally requires an
+initialized RuleLoom project, so run it after step 1 below:
 
 ```bash
 ruleloom --version
-ruleloom doctor
 ```
 
 The built-in Horn engine has no runtime Python dependencies. The optional
@@ -174,6 +183,18 @@ or installs those dependencies while learning; see
 Run these commands from the repository whose evidence you want to study. It
 must have either `remote.origin.url` or at least one commit so RuleLoom can
 derive a stable repository identity.
+
+At any point after initialization, run:
+
+```bash
+ruleloom diagnose
+```
+
+It summarizes the current evidence stage, positive-count and class-readiness
+gaps, vocabulary diagnostics, and the next safe commands. It does not evaluate
+the temporal split, holdout metrics, or prospective promotion gates. It is
+read-only: it does not collect data, reinterpret labels, or relax a promotion
+gate. Use `--json` in scripts.
 
 ### 1. Initialize a language-neutral experiment
 
@@ -264,12 +285,90 @@ An LLM may inspect outcome-blind repository structure, architecture documents,
 and this audit to propose candidate concepts. It cannot activate them: a human
 must review the semantics, deterministic extraction must verify them, and the
 new vocabulary must be frozen before outcomes are opened. RuleLoom does not
-perform automatic predicate invention in v0.5.0.
+perform automatic predicate invention in v0.6.0.
 
-### 4. Import point-in-time events when available
+### 4. Import provider evidence when available
 
-Export review, CI, change-snapshot, revert, and incident data from any provider
-into the normalized JSONL contract, then import it:
+For a public GitHub repository, authenticate the official CLI and collect a
+bounded archive:
+
+```bash
+gh auth status --hostname github.com
+ruleloom history import-github --repository OWNER/NAME
+```
+
+The CLI verifies `OWNER/NAME` against an unambiguous public-GitHub HTTPS, SSH,
+or SCP-style `remote.origin.url`. A reviewed mirror or checkout whose origin
+cannot establish that equality requires the explicit
+`--allow-unverified-repository` override;
+the report records `repository_binding` and the manifest hash binds that choice.
+The adapter does not support a GitHub Enterprise host in v0.6.0.
+
+`--since` filters PRs by `created_at` and also bounds the repository-commit scan.
+`--until` is an inclusive as-of cutoff for PR creation and finalization and for
+review, check, and revert events; a PR finalized after that
+cutoff is skipped rather than assembled from future state. When omitted,
+`--until` defaults to the collection time; it does not reconstruct a historical
+provider snapshot. It filters only the current collection and never rewinds
+records already present in the append-only ledger; use a clean experiment/log
+when evaluating an earlier cutoff. Use those options and the `--max-*` options
+to bound the request. In addition to per-endpoint
+pagination, the default global budgets are 20,000 API requests and 250,000
+top-level provider records. Reaching either global budget fails closed before
+persistence. Preserve the exact command, JSON report, and resulting canonical
+history logs: the report exposes configured global limits, actual usage,
+`repository_binding`, a compact `manifest`, and `manifest_hash`. The emitted
+manifest binds every per-endpoint/global limit, actual budget use, warning and
+count plus content hashes for the exact normalized event and unit sets; verify
+it with the canonical logs instead of duplicating those records in stdout. The
+adapter requests closed PRs only and skips any unexpectedly non-closed or
+force-pushed PR it cannot reconstruct safely. It normalizes reviews and checks
+without reading their prose, and records exact Git revert trailers only as weak
+heuristic links. Review records are deliberately state-neutral so a later
+dismissal cannot rewrite a prior submission; check records are versioned by PR
+and normalized check content so a provider update appends a new event instead
+of mutating an old one. User and check identities are repository-scoped and
+pseudonymized; stable PR and event numbers remain for provenance. Titles,
+bodies, reviewer names, review text, and check names are not persisted.
+
+The first built-in GitHub numeric repository identity recorded for one RuleLoom
+`repository_id` is pinned by the paired history-log validator. Importing records
+from a different provider repository under that same identity fails closed;
+start a new experiment instead.
+
+This is an **archive bootstrap**, not a reconstruction of the patch that was
+visible when each PR opened. Every GitHub archive `ChangeUnit` is therefore
+`git_only`, exploratory, and non-confirmatory. Reviews have an unspecified
+category and checks remain unattributed unless stronger point-in-time evidence is
+available. The adapter never treats an ordinary review, CI status, or absence
+of an event as a strong label. A failed check on the recorded merge result and
+an exact Git revert trailer are only weak positive votes for their respective
+atomic targets when `--include-weak` is explicitly enabled.
+
+The GitHub adapter collects provider metadata; it does not fetch missing Git
+objects into the local checkout. Before materialization, make the recorded
+`base_sha` and `prediction_sha` objects available locally—for example by using a
+sufficiently complete observer clone or an explicitly reviewed fetch policy.
+`history materialize` reports unavailable units under `skipped` and
+`skipped_preview`; inspect those fields before interpreting coverage.
+
+Archived GitHub timeline label names are ignored as outcome evidence. GitHub
+timeline responses expose the label object as it exists when queried; a later
+rename can therefore make an ordinary historical application appear to have had
+a different name at the original timestamp. Syntax, actor checks, and an
+`--until` cutoff cannot repair that temporal ambiguity.
+
+A label-backed assertion may be strong only when a separate webhook, exporter,
+or append-only adjudication ledger captured the label application point-in-time
+and can emit a normalized immutable outcome event with its original timestamp,
+target, value, evidence completeness, and independent provenance. Import that
+event through `ruleloom history import`; retain and audit the external source.
+RuleLoom v0.6.0 does not ship this point-in-time label capturer. The archive
+adapter itself produces no strong outcome from label names and cannot upgrade
+its exploratory `git_only` units.
+
+For another provider, export review, CI, change-snapshot, revert, and incident
+data into the normalized JSONL contract, then import it:
 
 ```bash
 ruleloom history import --events /absolute/path/to/events.jsonl
@@ -284,11 +383,16 @@ ruleloom history import \
   --units /absolute/path/to/change-units.jsonl
 ```
 
-The core does not call a provider API in v0.5.0; the exporter is an adapter at
-the boundary. Event imports are append-only. A later outcome event may safely
+Provider adapters stay at the evidence boundary. Event imports are append-only.
+A later outcome event may safely
 advance a materialized label from `unknown` to mature, but cannot rewrite a
 mature label or the predictor snapshot. See the
 [minimal JSONL examples](#normalized-history-jsonl).
+
+Events and change units are committed as one recoverable batch. If a process is
+interrupted between the two canonical logs, the next reader rolls the prepared
+batch back before exposing either file; the bounded recovery state is kept in
+Git-private RuleLoom storage rather than in repository-controlled history data.
 
 Import the structural snapshot/finalization history for each change before its
 unit is assembled. If an exporter streams those records in stages, use
@@ -304,6 +408,7 @@ ruleloom history materialize
 ruleloom history status
 ruleloom validate
 ruleloom readiness
+ruleloom diagnose
 ```
 
 `materialize` replays `base_sha..prediction_sha` through the experiment's frozen
@@ -329,10 +434,11 @@ The four historical targets are deliberately separate:
 Weak heuristics are excluded by default. `--include-weak` is an explicit
 exploratory opt-in and makes dependent cases non-confirmatory.
 
-### 6. Learn and inspect a candidate
+### 6. Learn a candidate—or seed one explicit existing rule
 
-Continue only after `readiness` reports both mature classes and enough temporal
-train/holdout evidence for the configured gates:
+Continue only after `readiness` reports both mature classes. The `learn` command
+then constructs the chronological split and enforces the configured minimum
+train and holdout sizes:
 
 ```bash
 ruleloom learn --engine horn
@@ -349,6 +455,59 @@ observed excluded constant and alias. Declared predicates that never occur are
 reported by the separate outcome-blind audit. The later chronological holdout
 evaluates that frozen selection—even if aliases diverge there—and never chooses
 predicates, thresholds, or rules.
+
+If the repository already has a reviewed engineering assertion, translate it
+explicitly into a strict JSON manifest instead of asking RuleLoom to interpret
+prose. For example, save this as `ci-without-tests.ruleloom.json`:
+
+```json
+{
+  "schema_version": 1,
+  "policy_id": "ci_without_tests",
+  "revision": 1,
+  "claim_kind": "risk_trigger",
+  "summary": "CI changes without tests may require additional validation.",
+  "rules": {
+    "target": "needs_extra_validation",
+    "clauses": [
+      {
+        "target": "needs_extra_validation",
+        "body": [
+          {"predicate": "touches_ci", "negated": false},
+          {"predicate": "touches_test", "negated": true}
+        ]
+      }
+    ]
+  },
+  "sources": []
+}
+```
+
+Then import it:
+
+```bash
+ruleloom rules import ci-without-tests.ruleloom.json
+ruleloom candidate show <candidate-id>
+```
+
+The example uses the default experiment target. A manifest may optionally cite
+an existing assertion with a repository-relative source span, for example
+`{"path":"AGENTS.md","start_line":10,"end_line":12}` inside `sources`.
+RuleLoom only hashes and drift-checks those bytes. It never parses or executes
+`AGENTS.md`, `CLAUDE.md`, or any referenced free-form text. The rule target and
+predicates must already belong to the frozen experiment. The manifest contract
+accepts only `claim_kind: risk_trigger`; because RuleLoom deliberately does not
+interpret the summary's prose, a human reviewer must reject prescriptive or
+causal wording.
+
+The resulting coverage and historical outcome metrics are post-hoc diagnostics.
+Coverage can reveal that a rule is dormant, saturated, or widely triggered;
+source hashes separately reveal whether its cited text drifted. Neither
+establishes predictive validity or policy quality. A
+reviewed manual candidate may enter shadow without retrospective positives, but
+historical manual-rule metrics never satisfy approval. Approval requires the
+same later, mature, attributable prospective evidence and per-rule gates as any
+other shadow policy.
 
 ### 7. Run a blinded shadow pilot
 
@@ -460,7 +619,8 @@ flowchart TD
 Strong evidence includes an independent validation-related change request, an
 attributable CI fail–code-change–same-check-pass sequence, an explicitly linked
 revert/incident, or an explicit matured outcome with complete evidence. Test
-changes alone, fix keywords, and SZZ links are weak. Missing, immature, or
+changes alone, fix keywords, SZZ links, an unattributed failed merge-result
+check, and a heuristic Git revert-trailer link are weak. Missing, immature, or
 conflicting evidence produces `unknown`, never an inferred negative.
 
 The CI sequence must be strictly ordered. Its failure and success events must
@@ -535,8 +695,9 @@ or holdout errors.
 Adapters have two independent roles:
 
 1. **Evidence adapters** normalize a provider's change, review, CI, revert, and
-   incident records into historical-event JSONL. v0.5.0 ships the contract and
-   importer, not hosted provider integrations.
+   incident records into historical-event JSONL. The built-in GitHub archive
+   adapter uses the authenticated `gh` CLI; other systems can export the public
+   normalized contract.
 2. **Agent adapters** render only approved policies into
    `.agents/skills/ruleloom/SKILL.md` for Codex and
    `.claude/skills/ruleloom/SKILL.md` for Claude Code.
@@ -551,7 +712,9 @@ derived artifacts and should be reviewed like source code.
 | `ruleloom init` | Initialize one frozen experiment and local data layout |
 | `ruleloom packs list` | Inspect registered evidence packs and predicates |
 | `ruleloom predicates audit` | Audit frozen predicate coverage and drift without outcomes |
+| `ruleloom diagnose` | Explain the evidence bottleneck, positive/class readiness gaps, and next safe actions without mutation |
 | `ruleloom history bootstrap-git` | Ingest bounded Git topology as exploratory history |
+| `ruleloom history import-github` | Collect a bounded, exploratory GitHub archive through `gh` |
 | `ruleloom history import` | Import normalized events and/or change units |
 | `ruleloom history materialize` | Reconstruct prediction-time facts and conservative labels |
 | `ruleloom history status` | Summarize grades, confirmatory units, and labels |
@@ -559,6 +722,7 @@ derived artifacts and should be reviewed like source code.
 | `ruleloom label` / `import-labels` | Attach outcomes to non-derived observations; historical changes use events |
 | `ruleloom validate` | Validate schemas, identity, provenance, and temporal invariants |
 | `ruleloom readiness` | Report sample stage, classes, unknowns, and evidence coverage |
+| `ruleloom rules import` | Freeze an explicit manual Horn manifest and audit its historical coverage |
 | `ruleloom learn` | Learn and chronologically evaluate a candidate |
 | `ruleloom candidate list/show` | Inspect immutable candidate artifacts |
 | `ruleloom promote` | Record a reviewed transition to shadow or approved |
@@ -567,7 +731,7 @@ derived artifacts and should be reviewed like source code.
 | `ruleloom sync-agents` | Render approved policies for selected coding agents |
 | `ruleloom deprecate` | Tombstone an active policy with review provenance |
 | `ruleloom trust` | Attest a reviewed artifact in the current checkout/worktree |
-| `ruleloom doctor` | Check Git/Python and optional learner prerequisites |
+| `ruleloom doctor` | Check the initialized project, Git/Python, and optional learner prerequisites |
 
 Use `ruleloom <command> --help` for complete options. Most commands discover the
 initialized root from the current directory; `--root /path/to/repository`

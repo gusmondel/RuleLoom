@@ -701,7 +701,7 @@ class Candidate:
             raise ModelError("candidate stability must be between 0 and 1")
         validate_subject(self.id)
         validate_timestamp(self.created_at)
-        if self.engine not in {"horn", "popper"}:
+        if self.engine not in {"horn", "manual", "popper"}:
             raise ModelError(f"unsupported candidate engine: {self.engine!r}")
         if not self.engine_version:
             raise ModelError("candidate engine_version cannot be empty")

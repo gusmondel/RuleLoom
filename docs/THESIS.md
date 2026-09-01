@@ -52,7 +52,7 @@ Software repositories offer structured, repeated decisions. Some signals are
 language-neutral—change size, file distribution, tests, documentation, CI, and
 dependency manifests—while specialized packs can add facts about syntax and
 framework behavior such as state mutation, asynchronous code, or navigation.
-RuleLoom 0.5.0 encodes each change as Boolean unary predicates and represents
+RuleLoom 0.6.0 encodes each change as Boolean unary predicates and represents
 conjunctions of those properties as rules rather than opaque scores. It does not
 learn relations among multiple entities.
 
@@ -90,10 +90,13 @@ mechanism for repository-change outcomes and, after prospective validation, for
 coding guidance. AutoSpec makes that link less speculative for agent safety,
 but it remains unvalidated for this product target.
 
-Cold start does not mean waiting for a year of future labels. Version 0.5.0 can
-ingest the complete reachable Git graph immediately and combine it with
-authorized, normalized forge/review/CI/revert/incident events already retained
-by the repository workflow. That accelerates instrumentation, not certainty:
+Cold start does not mean waiting for a year of future labels. Version 0.6.0 can
+ingest a bounded recent prefix of the reachable Git graph immediately and
+combine it with authorized, normalized forge/review/CI/revert/incident events
+already retained by the repository workflow. A bounded built-in GitHub adapter
+can group closed PR archive records through `gh`, but its reconstructed snapshots
+are explicitly `git_only` and non-confirmatory. That accelerates instrumentation,
+not certainty:
 Git-only and final-state cases are exploratory; only a point-in-time change with
 strictly later, independent strong evidence can support confirmation. No fixed
 calendar window is assumed—readiness, class balance, chronology, baselines, and
@@ -118,6 +121,17 @@ ones recur in observed outcomes. A vector memory can retrieve similar episodes,
 but similarity does not explain which conditions jointly matter. A black-box
 classifier can predict risk, but its behavior is harder to review and convert
 into a precise agent instruction.
+
+An explicit manual Horn manifest is nevertheless a useful second entry point:
+it translates one reviewed existing assertion into the same inspectable rule
+and prospective lifecycle without pretending that RuleLoom discovered it. Its
+historical coverage and association are post-hoc diagnostics, not validation.
+AutoSpec's usual expert seed and the ILP literature's treatment of background
+knowledge as a substantive design choice support this as an auditable seed
+hypothesis—not as a validated policy. It neither creates nor matures outcomes,
+so it does not solve the label cold start. The rule can earn trust only from
+later blinded shadow evidence. RuleLoom hashes optional source spans for
+provenance; it does not interpret agent instructions or other repository prose.
 
 This bounded ILP fragment is attractive when:
 
@@ -209,7 +223,7 @@ yet support third-party pack plugins, so broader extensibility remains unproven.
 - Collection does not alter application code.
 - The default evidence path is deterministic and the selected pack must attach
   provenance to every emitted fact. Although the artifact schema reserves
-  `agent`, `human`, and `imported` provenance kinds, version 0.5.0 accepts only
+  `agent`, `human`, and `imported` provenance kinds, version 0.6.0 accepts only
   exact deterministic built-in-pack provenance for validation, learning, and
   prediction; non-deterministic facts are future work.
 - Each experiment selects exactly one pack name/version. Pack identity,
@@ -222,19 +236,30 @@ yet support third-party pack plugins, so broader extensibility remains unproven.
 - A configured vocabulary is frozen outcome-blind with its design revision,
   roles, rationale, attempt log, and hash. Any outcome-informed revision needs a
   new experiment and untouched future confirmation window.
+- Manual rules enter only through a strict reviewed Horn manifest. Referenced
+  source prose is hash/drift provenance, never executable or interpreted input;
+  historical manual-rule audits are always non-confirmatory and approval is
+  prospective-only.
 - Large changes retain exact aggregate counts and a full change-manifest hash;
   sampled path and per-file metadata remain bounded and disclose truncation.
 - Unknown is distinct from negative.
 - Every mature label has evidence and an explicit `available_at`; a nominal
   training label unavailable when the holdout begins is excluded.
+- GitHub archive timeline label names never become outcome evidence. Their
+  mutable current names do not prove what a label was called at the historical
+  application time. Strong label-backed outcomes require an external
+  point-in-time webhook/export/immutable ledger and normalized event import;
+  v0.6.0 does not ship that capturer.
 - A predictor snapshot must precede its outcome-generating event. A final diff
   containing validation added because of review is not a valid review-time
   predictor, regardless of chronological ordering.
 - Training never uses observations newer than the holdout.
-- Version 0.5.0 historical materialization emits one observation per stable
+- Version 0.6.0 historical materialization emits one observation per stable
   `ChangeUnit`; `learn` rejects duplicate mature `change_id` values and mixed
   unit cohorts. `git_only`/`final_only` and weak-dependent cases are exploratory,
-  and approval requires rich point-in-time evidence.
+  and they cannot support approval of a learned historical candidate. A manual
+  declaration never claims that support and relies exclusively on prospective
+  shadow gates for approval.
 - Rule selection is compared with four simple baselines on the same later set.
 - A candidate is immutable and content-addressed by its inputs.
 - Candidate, shadow, and approved are distinct reviewed states; learning,
@@ -298,7 +323,7 @@ true after a representative pilot:
 Failure is an acceptable result. The pilot is designed to distinguish a useful
 repository-learning loop from a polished demonstration.
 
-## Scope of version 0.5.0
+## Scope of version 0.6.0
 
 Included:
 
@@ -318,15 +343,22 @@ Included:
 - provider-neutral historical events, immutable logical `ChangeUnit` records,
   full bounded Git-graph bootstrap, point-in-time materialization, and evidence
   grades `rich`, `git_only`, and `final_only`;
+- a bounded GitHub archive adapter through `gh`, with pseudonymized identities,
+  explicit skip/truncation reporting, ignored archive timeline label names, and
+  always-non-confirmatory `git_only` units;
 - four separate review/CI/revert/incident outcomes, strong-only derivation by
   default, explicit weak-vote opt-in, provenance, and `unknown` on absence or
   conflict;
 - grouped retrospective learning with duplicate-change rejection and a hard
   approval block for non-confirmatory historical evidence;
+- strict manual Horn manifests with source hashing, post-hoc coverage/audit, and
+  prospective-only approval evidence;
+- a read-only human diagnosis of the evidence bottleneck and positive/class
+  readiness gaps, without claiming to evaluate holdout or prospective gates;
 - a pack-agnostic ILP, evaluation, reporting, and policy lifecycle;
 - bounded Horn clauses with optional closed-world negation;
 - optional, externally provisioned Popper/MDL integration for noisy labels,
-  restricted in version 0.5.0 to one non-recursive rule and no bootstrap reruns;
+  restricted in version 0.6.0 to one non-recursive rule and no bootstrap reruns;
 - chronological holdout, baselines, confusion metrics, and bootstrap stability;
 - label-availability filtering at the holdout boundary;
 - candidate, shadow, approval, deprecation, local-trust, and agent-sync
@@ -349,8 +381,14 @@ Not included:
   predictively across repositories;
 - built-in language-specific extraction beyond Flutter/Dart;
 - loading third-party evidence packs through an external plugin API;
-- built-in network collectors for any hosted forge, CI, or incident provider;
-  those systems must currently export the normalized JSONL contract;
+- built-in collectors for hosted forge, CI, or incident systems beyond the
+  bounded GitHub archive adapter; those systems must export the normalized
+  JSONL contract;
+- automatic interpretation of `AGENTS.md`, `CLAUDE.md`, review prose, issue
+  text, or ordinary provider labels as rules or outcomes;
+- automatic point-in-time webhook or immutable ledger capture for label-backed
+  GitHub outcomes;
+- a confirmatory PR-opening snapshot reconstructed from the GitHub archive;
 - combining multiple packs within one experiment.
 
 ## Evidence boundary

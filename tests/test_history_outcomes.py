@@ -212,6 +212,36 @@ def test_ci_failure_requires_attribution_code_change_and_same_check_success() ->
     assert result.votes[0].event_ids == (failure.id, changed.id, success.id)
 
 
+def test_unattributed_merge_failure_is_weak_and_requires_opt_in() -> None:
+    failure = _event(
+        "ci.merge.failure",
+        "ci_run",
+        "2026-01-03T11:00:00+00:00",
+        {
+            "check_id": "portable-test-suite",
+            "conclusion": "failure",
+            "attributable_to_change": False,
+            "attribution": "unattributed_merge_result",
+            "evidence_grade": "weak_heuristic",
+        },
+    )
+    change = _change(failure.id)
+
+    conservative = derive_outcome(change, [failure], CHANGE_ATTRIBUTABLE_CI_FAILURE)
+    opted_in = derive_outcome(
+        change,
+        [failure],
+        CHANGE_ATTRIBUTABLE_CI_FAILURE,
+        include_weak=True,
+    )
+
+    assert conservative.value is LabelValue.UNKNOWN
+    assert conservative.votes[0].strength == "weak"
+    assert opted_in.value is LabelValue.POSITIVE
+    assert opted_in.evidence is not None
+    assert opted_in.evidence.confidence == 0.4
+
+
 @pytest.mark.parametrize(
     ("events", "expected"),
     [
@@ -366,6 +396,57 @@ def test_explicit_post_merge_revert_hotfix_and_defect_are_separate_targets() -> 
     assert {vote.event_ids[0] for vote in revert_result.votes} == {revert.id, hotfix.id}
     assert defect_result.value is LabelValue.POSITIVE
     assert [vote.event_ids[0] for vote in defect_result.votes] == [defect.id]
+
+
+def test_heuristic_revert_is_weak_and_requires_explicit_opt_in() -> None:
+    revert = _event(
+        "revert.heuristic",
+        "revert",
+        "2026-01-03T10:00:00+00:00",
+        {
+            "linked_change_id": "github.pr.42",
+            "link_kind": "heuristic",
+            "evidence_grade": "weak_heuristic",
+            "heuristic_id": "git_revert_trailer@1",
+        },
+    )
+    change = _change(revert.id)
+
+    conservative = derive_outcome(change, [revert], POST_MERGE_REVERT_OR_HOTFIX)
+    opted_in = derive_outcome(
+        change,
+        [revert],
+        POST_MERGE_REVERT_OR_HOTFIX,
+        include_weak=True,
+    )
+
+    assert conservative.value is LabelValue.UNKNOWN
+    assert conservative.votes[0].strength == "weak"
+    assert opted_in.value is LabelValue.POSITIVE
+    assert opted_in.evidence is not None
+    assert opted_in.evidence.confidence == 0.6
+
+
+def test_heuristic_revert_without_weak_evidence_grade_abstains() -> None:
+    revert = _event(
+        "revert.ungraded",
+        "revert",
+        "2026-01-03T10:00:00+00:00",
+        {
+            "linked_change_id": "github.pr.42",
+            "link_kind": "heuristic",
+        },
+    )
+
+    result = derive_outcome(
+        _change(revert.id),
+        [revert],
+        POST_MERGE_REVERT_OR_HOTFIX,
+        include_weak=True,
+    )
+
+    assert result.value is LabelValue.UNKNOWN
+    assert result.votes == ()
 
 
 @pytest.mark.parametrize("link_kind", ["fix_keyword", "szz"])

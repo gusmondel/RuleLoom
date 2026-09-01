@@ -28,7 +28,7 @@
     "id": {"type": "string", "pattern": "^cand-[0-9a-f]{16}$"},
     "created_at": {"type": "string", "format": "date-time"},
     "status": {"enum": ["candidate", "shadow", "approved", "rejected", "deprecated"]},
-    "engine": {"enum": ["horn", "popper"]},
+    "engine": {"enum": ["horn", "manual", "popper"]},
     "engine_version": {"type": "string", "minLength": 1},
     "dataset_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
     "config_hash": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
@@ -36,16 +36,15 @@
     "metrics": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["train", "test"],
       "properties": {
         "train": {"$ref": "#/$defs/metrics"},
-        "test": {"$ref": "#/$defs/metrics"}
+        "test": {"$ref": "#/$defs/metrics"},
+        "historical": {"$ref": "#/$defs/metrics"}
       }
     },
     "baselines": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["never_alert", "always_alert", "train_majority", "best_single_literal"],
       "properties": {
         "never_alert": {"$ref": "#/$defs/metrics"},
         "always_alert": {"$ref": "#/$defs/metrics"},
@@ -68,6 +67,25 @@
     "metadata": {"type": "object"},
     "review": {"type": "object"}
   },
+  "allOf": [
+    {
+      "if": {"properties": {"engine": {"const": "manual"}}, "required": ["engine"]},
+      "then": {
+        "properties": {
+          "metrics": {"required": ["historical"]},
+          "baselines": {"required": ["never_alert", "always_alert"]}
+        }
+      },
+      "else": {
+        "properties": {
+          "metrics": {"required": ["train", "test"]},
+          "baselines": {
+            "required": ["never_alert", "always_alert", "train_majority", "best_single_literal"]
+          }
+        }
+      }
+    }
+  ],
   "$defs": {
     "predicate": {"type": "string", "pattern": "^[a-z][a-z0-9_]*$"},
     "subject": {"type": "string", "pattern": "^[a-z0-9][a-z0-9_.-]*$"},

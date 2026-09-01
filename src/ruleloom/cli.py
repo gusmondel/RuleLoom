@@ -8,7 +8,6 @@ import hashlib
 import json
 import shutil
 import sys
-from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -24,9 +23,17 @@ from ruleloom.gitfacts import (
     backfill_commits_detailed,
     collect_snapshot,
     collect_worktree,
+    missing_commit_objects,
     repository_identity,
+    repository_origin_url,
 )
 from ruleloom.history.git import GitHistoryError, collect_git_history
+from ruleloom.history.github import (
+    GhApiClient,
+    GitHubHistoryError,
+    collect_github_history,
+    github_repository_from_origin,
+)
 from ruleloom.history.importing import import_change_units, import_events
 from ruleloom.history.materialize import materialize_history
 from ruleloom.history.models import ChangeUnit, HistoricalEvent
@@ -34,17 +41,10 @@ from ruleloom.history.outcomes import ATOMIC_OUTCOME_TARGETS
 from ruleloom.history.storage import (
     change_units_path,
     events_path,
-    load_change_units,
-    load_events,
-    upsert_change_units,
-    upsert_events,
+    load_history_snapshot,
+    upsert_history_batch,
 )
-from ruleloom.history.units import (
-    assemble_change_units,
-    validate_change_unit_event_links,
-    validate_change_unit_evidence,
-    validate_unique_event_ownership,
-)
+from ruleloom.history.units import assemble_change_units
 from ruleloom.learners.popper import PopperError
 from ruleloom.lifecycle import (
     deprecate_candidate,
@@ -56,6 +56,12 @@ from ruleloom.lifecycle import (
     trust_reviewed_artifact,
     utc_now,
 )
+from ruleloom.manual_rules import (
+    audit_manual_rule,
+    declare_manual_rule,
+    load_manual_rule_manifest,
+    manual_candidate_from_audit,
+)
 from ruleloom.models import (
     JsonObject,
     LabelEvidence,
@@ -66,6 +72,7 @@ from ruleloom.models import (
     parse_timestamp,
     validate_subject,
 )
+from ruleloom.onboarding import diagnose_onboarding
 from ruleloom.packs import (
     ConfiguredPathsConfig,
     PathPredicateConfig,
@@ -87,6 +94,7 @@ from ruleloom.storage import (
     load_shadow,
     load_trusted_predictions,
     predictions_path,
+    save_candidate,
 )
 
 
@@ -317,22 +325,6 @@ def _ensure_history_repository(records: Sequence[_HistoricalRecord], repository_
         )
 
 
-def _preflight_immutable_history(
-    existing: Sequence[HistoricalEvent] | Sequence[ChangeUnit],
-    incoming: Sequence[HistoricalEvent] | Sequence[ChangeUnit],
-    *,
-    kind: str,
-) -> None:
-    persisted = {item.id: item for item in existing}
-    staged: dict[str, object] = {}
-    for item in incoming:
-        identifier = item.id
-        previous = staged.get(identifier, persisted.get(identifier))
-        if previous is not None and previous != item:
-            raise ModelError(f"conflicting immutable {kind} id {identifier!r}")
-        staged[identifier] = item
-
-
 def _cmd_history_bootstrap_git(args: argparse.Namespace) -> int:
     root, config = _project(args)
     _ensure_repository_boundary(root, config)
@@ -346,8 +338,14 @@ def _cmd_history_bootstrap_git(args: argparse.Namespace) -> int:
         since=args.since,
         repository_id=config.protocol.repository_id,
     )
-    events_inserted, events_unchanged = upsert_events(events_path(root), report.events)
-    units_inserted, units_unchanged = upsert_change_units(change_units_path(root), report.units)
+    event_counts, unit_counts = upsert_history_batch(
+        events_path(root),
+        report.events,
+        change_units_path(root),
+        report.units,
+    )
+    events_inserted, events_unchanged = event_counts
+    units_inserted, units_unchanged = unit_counts
     _json(
         {
             **report.to_dict(),
@@ -376,8 +374,9 @@ def _cmd_history_import(args: argparse.Namespace) -> int:
     _ensure_history_repository(incoming_events, config.protocol.repository_id)
     _ensure_history_repository(imported_units, config.protocol.repository_id)
 
-    existing_events = load_events(events_path(root))
-    existing_units = load_change_units(change_units_path(root))
+    existing_events, _existing_units = load_history_snapshot(
+        events_path(root), change_units_path(root)
+    )
     combined_events = {item.id: item for item in existing_events}
     for item in incoming_events:
         previous = combined_events.get(item.id)
@@ -390,40 +389,118 @@ def _cmd_history_import(args: argparse.Namespace) -> int:
         else ()
     )
     incoming_units = (*imported_units, *assembled)
-    _ensure_history_repository(incoming_units, config.protocol.repository_id)
-    _preflight_immutable_history(existing_events, incoming_events, kind="historical event")
-    _preflight_immutable_history(existing_units, incoming_units, kind="change unit")
-    combined_event_values = tuple(combined_events.values())
-    combined_events_by_change: dict[tuple[str, str], list[HistoricalEvent]] = defaultdict(list)
-    for event in combined_event_values:
-        if event.change_id is not None:
-            combined_events_by_change[(event.repository_id, event.change_id)].append(event)
-    combined_units = {item.id: item for item in existing_units}
-    combined_units.update({item.id: item for item in incoming_units})
-    validate_unique_event_ownership(tuple(combined_units.values()))
-    for unit in combined_units.values():
-        validate_change_unit_event_links(unit, combined_events)
-        linked = {
-            event.id: event
-            for event in combined_events_by_change.get((unit.repository_id, unit.id), ())
-        }
-        for event_id in unit.event_ids:
-            attached_event = combined_events[event_id]
-            if attached_event.change_id is None:
-                linked[attached_event.id] = attached_event
-        validate_change_unit_evidence(unit, tuple(linked.values()))
-
-    event_counts = upsert_events(events_path(root), incoming_events)
-    unit_counts = upsert_change_units(change_units_path(root), incoming_units)
+    counts = _persist_history_import(root, config, incoming_events, incoming_units)
     _json(
         {
             "events_imported": len(incoming_events),
-            "events_inserted": event_counts[0],
-            "events_unchanged": event_counts[1],
+            "events_inserted": counts["events_inserted"],
+            "events_unchanged": counts["events_unchanged"],
             "units_imported": len(imported_units),
             "units_assembled": len(assembled),
-            "units_inserted": unit_counts[0],
-            "units_unchanged": unit_counts[1],
+            "units_inserted": counts["units_inserted"],
+            "units_unchanged": counts["units_unchanged"],
+        }
+    )
+    return 0
+
+
+def _persist_history_import(
+    root: Path,
+    config: RuleLoomConfig,
+    incoming_events: Sequence[HistoricalEvent],
+    incoming_units: Sequence[ChangeUnit],
+) -> dict[str, int]:
+    """Validate one immutable history batch completely before writing either log."""
+
+    _ensure_history_repository(incoming_units, config.protocol.repository_id)
+    _ensure_history_repository(incoming_events, config.protocol.repository_id)
+
+    event_counts, unit_counts = upsert_history_batch(
+        events_path(root),
+        incoming_events,
+        change_units_path(root),
+        incoming_units,
+    )
+    return {
+        "events_inserted": event_counts[0],
+        "events_unchanged": event_counts[1],
+        "units_inserted": unit_counts[0],
+        "units_unchanged": unit_counts[1],
+    }
+
+
+def _cmd_history_import_github(args: argparse.Namespace) -> int:
+    root, config = _project(args)
+    _ensure_repository_boundary(root, config)
+    try:
+        origin = repository_origin_url(root)
+    except GitFactsError as exc:
+        raise ModelError(f"cannot inspect remote.origin.url: {exc}") from exc
+    origin_repository = github_repository_from_origin(origin)
+    repository_matches = (
+        origin_repository is not None and origin_repository.casefold() == args.repository.casefold()
+    )
+    if not repository_matches and not args.allow_unverified_repository:
+        raise ModelError(
+            "--repository is not verifiably equal to this checkout's public-GitHub "
+            "remote.origin.url; correct the repository/origin or explicitly pass "
+            "--allow-unverified-repository for a reviewed mirror/import"
+        )
+    repository_binding = "verified_origin" if repository_matches else "explicit_unverified_override"
+    report = collect_github_history(
+        GhApiClient(),
+        args.repository,
+        config.protocol.repository_id,
+        since=args.since,
+        until=args.until,
+        max_pull_requests=args.max_pull_requests,
+        max_commits_per_pull=args.max_commits_per_pull,
+        max_reviews_per_pull=args.max_reviews_per_pull,
+        max_checks_per_commit=args.max_checks_per_commit,
+        max_repository_commits=args.max_repository_commits,
+        max_api_requests=args.max_api_requests,
+        max_provider_records=args.max_provider_records,
+        repository_binding=repository_binding,
+    )
+    required_objects = tuple(
+        sorted(
+            {
+                object_id
+                for unit in report.units
+                for object_id in (unit.base_sha, unit.prediction_sha)
+            }
+        )
+    )
+    try:
+        missing_objects = missing_commit_objects(root, required_objects)
+    except GitFactsError as exc:
+        raise ModelError(f"cannot preflight local Git objects: {exc}") from exc
+    missing_set = set(missing_objects)
+    affected_units = sum(
+        unit.base_sha in missing_set or unit.prediction_sha in missing_set for unit in report.units
+    )
+    local_git_preflight: JsonObject = {
+        "required_commit_objects": len(required_objects),
+        "available_commit_objects": len(required_objects) - len(missing_objects),
+        "missing_commit_objects": len(missing_objects),
+        "affected_change_units": affected_units,
+        "missing_preview": list(missing_objects[:20]),
+        "preview_truncated": len(missing_objects) > 20,
+    }
+    counts = _persist_history_import(root, config, report.events, report.units)
+    _json(
+        {
+            **report.to_dict(),
+            **counts,
+            "local_git_preflight": local_git_preflight,
+            "note": (
+                "Archived GitHub PRs are grouped exploratory units, not exact opening "
+                "snapshots. Reviews and checks remain unattributed unless structured "
+                "evidence says otherwise. Missing local Git objects must be fetched "
+                "explicitly before their units can be materialized. Cutoffs filter this "
+                "collection and never delete evidence already present in the append-only "
+                "ledger."
+            ),
         }
     )
     return 0
@@ -432,8 +509,7 @@ def _cmd_history_import(args: argparse.Namespace) -> int:
 def _cmd_history_materialize(args: argparse.Namespace) -> int:
     root, config = _project(args)
     _ensure_repository_boundary(root, config)
-    events = load_events(events_path(root))
-    units = load_change_units(change_units_path(root))
+    events, units = load_history_snapshot(events_path(root), change_units_path(root))
     if not units:
         raise ModelError("no historical change units are available; collect or import them first")
     report = materialize_history(
@@ -457,13 +533,17 @@ def _cmd_history_materialize(args: argparse.Namespace) -> int:
 def _cmd_history_status(args: argparse.Namespace) -> int:
     root, config = _project(args)
     validate_project(root, config)
-    events = load_events(events_path(root))
-    units = load_change_units(change_units_path(root))
+    events, units = load_history_snapshot(events_path(root), change_units_path(root))
     observations = load_observations(dataset_path(root, config))
     historical = [item for item in observations if item.source.get("kind") == "historical_change"]
     qualities: dict[str, int] = {}
     for unit in units:
         qualities[unit.evidence_quality] = qualities.get(unit.evidence_quality, 0) + 1
+    event_grades: dict[str, int] = {}
+    for event in events:
+        grade = event.data.get("evidence_grade")
+        if isinstance(grade, str):
+            event_grades[grade] = event_grades.get(grade, 0) + 1
     labels = {item.value: 0 for item in LabelValue}
     for observation in historical:
         labels[observation.labels.get(config.target, LabelValue.UNKNOWN).value] += 1
@@ -472,12 +552,53 @@ def _cmd_history_status(args: argparse.Namespace) -> int:
             "events": len(events),
             "change_units": len(units),
             "evidence_quality": qualities,
+            "event_evidence_grade": event_grades,
             "confirmatory_units": sum(item.confirmatory for item in units),
             "historical_observations": len(historical),
             "labels": labels,
             "language_neutral_core": True,
         }
     )
+    return 0
+
+
+def _cmd_diagnose(args: argparse.Namespace) -> int:
+    """Explain the next safe step without mutating evidence or relaxing gates."""
+
+    root, config = _project(args)
+    validate_project(root, config)
+    events, units = load_history_snapshot(events_path(root), change_units_path(root))
+    observations = load_observations(dataset_path(root, config))
+    status = readiness(observations, config.target, as_of=datetime.now(UTC))
+    qualities: dict[str, int] = {}
+    for unit in units:
+        qualities[unit.evidence_quality] = qualities.get(unit.evidence_quality, 0) + 1
+    configured = (
+        tuple(item.predicate for item in config.pack_config.path_predicates)
+        if config.pack_config is not None
+        else ()
+    )
+    predicate_report = audit_predicates(
+        observations,
+        config.resolved_pack.predicates,
+        configured_predicates=configured,
+    )
+    diagnosis = diagnose_onboarding(
+        status,
+        history_status={
+            "events": len(events),
+            "change_units": len(units),
+            "confirmatory_units": sum(item.confirmatory for item in units),
+            "evidence_quality": qualities,
+        },
+        predicate_audit=predicate_report,
+        min_positive_for_shadow=config.promotion.min_positive_for_shadow,
+        min_positive_for_approval=config.promotion.min_positive_for_approval,
+    )
+    if args.json:
+        _json(diagnosis.to_dict())
+    else:
+        print(diagnosis.render_text(), end="")
     return 0
 
 
@@ -635,6 +756,53 @@ def _cmd_learn(args: argparse.Namespace) -> int:
         )
         print(f"Manifest: {path}")
         for warning in candidate.warnings:
+            print(f"Warning: {warning}")
+    return 0
+
+
+def _cmd_rules_import(args: argparse.Namespace) -> int:
+    root, config = _project(args)
+    validate_project(root, config)
+    manifest = load_manual_rule_manifest(Path(args.manifest))
+    instant = datetime.now(UTC)
+    declaration = declare_manual_rule(root, config, manifest, declared_at=instant)
+    observations = load_observations(dataset_path(root, config))
+    validate_observations(observations, config, as_of=instant)
+    audit = audit_manual_rule(
+        root,
+        config,
+        declaration,
+        observations,
+        as_of=instant,
+    )
+    candidate = manual_candidate_from_audit(declaration, audit, config)
+    path = candidate_path(root, config, candidate.id)
+    save_candidate(path, candidate)
+    if args.json:
+        _json(
+            {
+                "candidate": candidate.to_dict(),
+                "declaration": declaration.to_dict(),
+                "audit": audit.to_dict(),
+                "manifest_path": str(path),
+            }
+        )
+    else:
+        print(f"Manual candidate: {candidate.id}")
+        print(
+            f"Historical coverage: {audit.matched_observations}/{audit.observations} "
+            f"({audit.match_rate:.1%})"
+        )
+        print(
+            f"Mature outcomes: {audit.mature_labels} "
+            f"({audit.positive} positive, {audit.negative} negative)"
+        )
+        print(f"Manifest: {path}")
+        print(
+            "Historical metrics are post-hoc diagnostics. After human review, this rule may "
+            "enter shadow; approval requires prospective evidence."
+        )
+        for warning in audit.warnings:
             print(f"Warning: {warning}")
     return 0
 
@@ -1030,6 +1198,12 @@ def _cmd_doctor(args: argparse.Namespace) -> int:
     checks: dict[str, Any] = {
         "python": {"ok": sys.version_info >= (3, 11), "version": sys.version.split()[0]},
         "git": {"ok": shutil.which("git") is not None, "path": shutil.which("git")},
+        "github_optional": {
+            "ok": shutil.which("gh") is not None,
+            "path": shutil.which("gh"),
+            "required": False,
+            "required_for": "history import-github only",
+        },
     }
     try:
         root, loaded_config = _project(args)
@@ -1277,6 +1451,48 @@ def build_parser() -> argparse.ArgumentParser:
     )
     history_import.set_defaults(handler=_cmd_history_import)
 
+    github_import = history_commands.add_parser(
+        "import-github",
+        help="collect bounded PR, review, check, and revert archive evidence via gh",
+    )
+    github_import.add_argument(
+        "--repository",
+        required=True,
+        metavar="OWNER/NAME",
+        help=(
+            "GitHub repository to import; normalized records are bound to this initialized "
+            "checkout's verified RuleLoom repository identity"
+        ),
+    )
+    github_import.add_argument("--since", help="optional aware ISO-8601 PR lower bound")
+    github_import.add_argument("--until", help="optional aware ISO-8601 upper bound")
+    github_import.add_argument(
+        "--allow-unverified-repository",
+        action="store_true",
+        help=(
+            "allow an explicitly reviewed repository whose OWNER/NAME cannot be verified "
+            "against public-GitHub remote.origin.url; recorded in the manifest"
+        ),
+    )
+    github_import.add_argument("--max-pull-requests", type=int, default=1000)
+    github_import.add_argument("--max-commits-per-pull", type=int, default=1000)
+    github_import.add_argument("--max-reviews-per-pull", type=int, default=1000)
+    github_import.add_argument("--max-checks-per-commit", type=int, default=1000)
+    github_import.add_argument("--max-repository-commits", type=int, default=10000)
+    github_import.add_argument(
+        "--max-api-requests",
+        type=int,
+        default=20000,
+        help="global request budget; exhaustion aborts without persisting any records",
+    )
+    github_import.add_argument(
+        "--max-provider-records",
+        type=int,
+        default=250000,
+        help="global top-level provider-record budget; exhaustion aborts without persistence",
+    )
+    github_import.set_defaults(handler=_cmd_history_import_github)
+
     materialize = history_commands.add_parser(
         "materialize", help="extract prediction-time facts and conservative outcome labels"
     )
@@ -1318,6 +1534,14 @@ def build_parser() -> argparse.ArgumentParser:
     import_labels.add_argument("file")
     import_labels.set_defaults(handler=_cmd_import_labels)
 
+    diagnose = subparsers.add_parser(
+        "diagnose",
+        help="explain evidence readiness and the next safe onboarding actions",
+    )
+    _add_root(diagnose)
+    diagnose.add_argument("--json", action="store_true")
+    diagnose.set_defaults(handler=_cmd_diagnose)
+
     readiness = subparsers.add_parser("readiness", help="measure data readiness")
     _add_root(readiness)
     readiness.set_defaults(handler=_cmd_readiness)
@@ -1325,6 +1549,20 @@ def build_parser() -> argparse.ArgumentParser:
     validate = subparsers.add_parser("validate", help="validate config, schema, and time order")
     _add_root(validate)
     validate.set_defaults(handler=_cmd_validate)
+
+    rules = subparsers.add_parser(
+        "rules",
+        help="declare and audit explicit hand-authored Horn rules",
+    )
+    _add_root(rules)
+    rule_commands = rules.add_subparsers(dest="rules_command", required=True)
+    rules_import = rule_commands.add_parser(
+        "import",
+        help="freeze a JSON rule manifest and audit its historical coverage",
+    )
+    rules_import.add_argument("manifest")
+    rules_import.add_argument("--json", action="store_true")
+    rules_import.set_defaults(handler=_cmd_rules_import)
 
     learn = subparsers.add_parser("learn", help="learn and temporally evaluate a candidate")
     _add_root(learn)
@@ -1419,7 +1657,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     try:
         return int(args.handler(args))
-    except (ModelError, GitFactsError, GitHistoryError, PopperError) as exc:
+    except (
+        ModelError,
+        GitFactsError,
+        GitHistoryError,
+        GitHubHistoryError,
+        PopperError,
+    ) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
     except ValueError as exc:

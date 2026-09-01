@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from importlib.resources import files
 from pathlib import Path
 
@@ -205,6 +206,26 @@ def test_public_schemas_accept_every_persisted_model_shape() -> None:
     _validate("prediction", prediction.to_dict())
     _validate("historical-event", _historical_event().to_dict())
     _validate("change-unit", _change_unit().to_dict())
+
+
+def test_candidate_schema_accepts_manual_audit_metrics_without_learned_split() -> None:
+    learned = _candidate()
+    manual = replace(
+        learned,
+        engine="manual",
+        engine_version="ruleloom-manual-audit/0.1",
+        metrics={"historical": Metrics.from_counts(1, 0, 1, 0)},
+        baselines={
+            "never_alert": Metrics.from_counts(0, 0, 1, 1),
+            "always_alert": Metrics.from_counts(1, 1, 0, 0),
+        },
+        stability=0.0,
+        train_ids=(),
+        test_ids=(),
+        metadata={**learned.metadata, "candidate_origin": "manual_declaration"},
+    ).with_identity()
+
+    _validate("candidate", manual.to_dict())
 
 
 @pytest.mark.parametrize(

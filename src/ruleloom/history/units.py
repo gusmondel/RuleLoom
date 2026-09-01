@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 from collections import defaultdict
 from collections.abc import Mapping, Sequence
 
@@ -16,6 +17,14 @@ from ruleloom.models import JsonValue, ModelError, parse_timestamp
 _PREDICTION_EVENTS = frozenset({"change_opened", "change_snapshot"})
 _FINAL_EVENTS = frozenset({"change_finalized", "change_merged", "change_closed"})
 _VERIFIABLE_FINAL_EVENTS = _FINAL_EVENTS | {"git_merge"}
+_BUILTIN_GITHUB_ADAPTER = "ruleloom-github/1"
+_BUILTIN_GITHUB_UNIT_SOURCE_RE = re.compile(
+    r"^github:(github\.github\.com\.repo\.[0-9a-f]{20}):pull:[0-9]+(?:$|:)"
+)
+_BUILTIN_GITHUB_EVENT_SOURCE_RE = re.compile(
+    r"^github:(github\.github\.com\.repo\.[0-9a-f]{20}):"
+    r"(?:pull:[0-9]+|commit:[0-9a-f]{40}|commit:[0-9a-f]{64})(?:$|:)"
+)
 
 
 def _string(data: dict[str, JsonValue], key: str) -> str | None:
@@ -141,6 +150,55 @@ def validate_unique_event_ownership(units: Sequence[ChangeUnit]) -> None:
                     f"historical event {event_id!r} is attached to multiple change units: "
                     f"{previous!r}, {unit.id!r}"
                 )
+
+
+def validate_history_snapshot(
+    events: Sequence[HistoricalEvent],
+    units: Sequence[ChangeUnit],
+) -> None:
+    """Validate all cross-log ownership, links, and evidence as one snapshot."""
+
+    events_by_id = {event.id: event for event in events}
+    if len(events_by_id) != len(events):
+        raise ModelError("historical events must have unique ids")
+    validate_unique_event_ownership(units)
+    github_keys_by_repository: dict[str, set[str]] = defaultdict(set)
+    for unit in units:
+        if unit.kind != "github_archive_change":
+            continue
+        match = _BUILTIN_GITHUB_UNIT_SOURCE_RE.match(unit.source_ref)
+        if unit.provider != "github" or match is None:
+            raise ModelError(
+                f"built-in GitHub change unit {unit.id!r} has invalid provider provenance"
+            )
+        github_keys_by_repository[unit.repository_id].add(match.group(1))
+    for event in events:
+        if event.data.get("adapter") != _BUILTIN_GITHUB_ADAPTER:
+            continue
+        match = _BUILTIN_GITHUB_EVENT_SOURCE_RE.match(event.source_ref)
+        if event.provider != "github" or match is None:
+            raise ModelError(f"built-in GitHub event {event.id!r} has invalid provider provenance")
+        github_keys_by_repository[event.repository_id].add(match.group(1))
+    for repository_id, keys in github_keys_by_repository.items():
+        if len(keys) > 1:
+            raise ModelError(
+                f"repository {repository_id!r} contains multiple built-in GitHub "
+                "repository identities; start a new experiment for a different provider repo"
+            )
+    events_by_change: dict[tuple[str, str], list[HistoricalEvent]] = defaultdict(list)
+    for event in events:
+        if event.change_id is not None:
+            events_by_change[(event.repository_id, event.change_id)].append(event)
+    for unit in units:
+        validate_change_unit_event_links(unit, events_by_id)
+        linked = {
+            event.id: event for event in events_by_change.get((unit.repository_id, unit.id), ())
+        }
+        for event_id in unit.event_ids:
+            attached_event = events_by_id[event_id]
+            if attached_event.change_id is None:
+                linked[attached_event.id] = attached_event
+        validate_change_unit_evidence(unit, tuple(linked.values()))
 
 
 def assemble_change_units(events: Sequence[HistoricalEvent]) -> tuple[ChangeUnit, ...]:

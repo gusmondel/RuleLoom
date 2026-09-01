@@ -10,6 +10,7 @@ import pytest
 
 from ruleloom import cli
 from ruleloom.config import RuleLoomConfig
+from ruleloom.history.github import GitHubHistoryError, GitHubHistoryReport
 from ruleloom.history.models import ChangeUnit, HistoricalEvent
 from ruleloom.history.storage import change_units_path, events_path, load_change_units, load_events
 from ruleloom.models import LabelValue
@@ -233,6 +234,241 @@ def test_history_cli_bootstraps_imports_materializes_and_reports(
     )
     blocked = capsys.readouterr()
     assert "labels are derived from immutable events" in blocked.err
+
+
+def test_history_cli_imports_first_class_github_archive_without_assembling_duplicates(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "github-repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "History Test")
+    _git(repo, "config", "user.email", "history@example.invalid")
+    _git(repo, "remote", "add", "origin", "git@github.com:acme/widgets.git")
+    base = _commit(repo, "base.txt", "2025-01-01T00:00:00Z")
+    head = _commit(repo, "head.txt", "2025-01-02T00:00:00Z")
+    assert cli.main(["init", str(repo)]) == 0
+    capsys.readouterr()
+    config = RuleLoomConfig.load(repo)
+    provider_key = f"github.github.com.repo.{'a' * 20}"
+    change_id = "change.github.repo.test.pull.1"
+    snapshot = HistoricalEvent(
+        id="event.github.repo.test.snapshot.1",
+        repository_id=config.protocol.repository_id,
+        kind="change_snapshot",
+        occurred_at="2025-01-02T00:00:00Z",
+        available_at="2025-01-02T00:00:00Z",
+        provider="github",
+        source_ref=f"github:{provider_key}:pull:1:archive-snapshot",
+        change_id=change_id,
+        independent_group=change_id,
+        data={"base_sha": base, "head_sha": head, "point_in_time": False},
+    )
+    final = HistoricalEvent(
+        id="event.github.repo.test.final.1",
+        repository_id=config.protocol.repository_id,
+        kind="change_merged",
+        occurred_at="2025-01-03T00:00:00Z",
+        available_at="2025-01-03T00:00:00Z",
+        provider="github",
+        source_ref=f"github:{provider_key}:pull:1:final",
+        change_id=change_id,
+        independent_group=change_id,
+        data={"base_sha": base, "head_sha": head, "final_sha": head},
+    )
+    unit = ChangeUnit(
+        id=change_id,
+        repository_id=config.protocol.repository_id,
+        kind="github_archive_change",
+        base_sha=base,
+        prediction_sha=head,
+        prediction_at=snapshot.occurred_at,
+        final_sha=head,
+        finalized_at=final.occurred_at,
+        commits=(head,),
+        event_ids=(snapshot.id, final.id),
+        provider="github",
+        source_ref=f"github:{provider_key}:pull:1",
+        evidence_quality="git_only",
+        confirmatory=False,
+    )
+    report = GitHubHistoryReport(
+        events=(snapshot, final),
+        units=(unit,),
+        pull_requests_examined=1,
+        pull_requests_normalized=1,
+        pull_requests_skipped=0,
+        warnings=(),
+        truncated=False,
+        provider_repository_key=provider_key,
+        collected_at="2025-01-04T00:00:00Z",
+        since=None,
+        until="2025-01-04T00:00:00Z",
+        repository_id=config.protocol.repository_id,
+        repository_binding="verified_origin",
+        api_requests_used=12,
+        provider_records_used=16,
+        max_api_requests=13,
+        max_provider_records=17,
+    )
+    received_kwargs: dict[str, object] = {}
+
+    def collect(*_args: object, **kwargs: object) -> GitHubHistoryReport:
+        received_kwargs.update(kwargs)
+        return report
+
+    monkeypatch.setattr(cli, "GhApiClient", lambda: object())
+    monkeypatch.setattr(cli, "collect_github_history", collect)
+
+    imported = _run(
+        [
+            "history",
+            "--root",
+            str(repo),
+            "import-github",
+            "--repository",
+            "acme/widgets",
+            "--max-api-requests",
+            "13",
+            "--max-provider-records",
+            "17",
+        ],
+        capsys,
+    )
+
+    assert imported["events_inserted"] == 2
+    assert imported["units_inserted"] == 1
+    assert imported["evidence_grade"] == "exploratory_git_only"
+    assert imported["collection_budget"] == {
+        "policy": "fail_closed",
+        "api_requests": {"used": 12, "maximum": 13},
+        "provider_records": {"used": 16, "maximum": 17},
+    }
+    assert imported["collection_limits"] == {
+        "pull_requests": 1_000,
+        "commits_per_pull": 1_000,
+        "reviews_per_pull": 1_000,
+        "checks_per_commit": 1_000,
+        "repository_commits": 10_000,
+        "api_requests": 13,
+        "provider_records": 17,
+    }
+    assert imported["local_git_preflight"] == {
+        "required_commit_objects": 2,
+        "available_commit_objects": 2,
+        "missing_commit_objects": 0,
+        "affected_change_units": 0,
+        "missing_preview": [],
+        "preview_truncated": False,
+    }
+    assert received_kwargs["max_api_requests"] == 13
+    assert received_kwargs["max_provider_records"] == 17
+    assert received_kwargs["repository_binding"] == "verified_origin"
+    assert load_events(events_path(repo)) == [snapshot, final]
+    assert load_change_units(change_units_path(repo)) == [unit]
+
+
+def test_history_cli_budget_exhaustion_never_reaches_persistence(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "budget-repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "History Test")
+    _git(repo, "config", "user.email", "history@example.invalid")
+    _git(repo, "remote", "add", "origin", "https://github.com/acme/widgets.git")
+    _commit(repo, "base.txt", "2025-01-01T00:00:00Z")
+    assert cli.main(["init", str(repo)]) == 0
+    capsys.readouterr()
+
+    def exhaust(*_args: object, **kwargs: object) -> GitHubHistoryReport:
+        assert kwargs["max_api_requests"] == 1
+        assert kwargs["max_provider_records"] == 2
+        raise GitHubHistoryError(
+            "global GitHub API request budget exhausted; collection aborted without persistence"
+        )
+
+    persistence_called = False
+
+    def persist(*_args: object, **_kwargs: object) -> dict[str, int]:
+        nonlocal persistence_called
+        persistence_called = True
+        return {}
+
+    monkeypatch.setattr(cli, "GhApiClient", lambda: object())
+    monkeypatch.setattr(cli, "collect_github_history", exhaust)
+    monkeypatch.setattr(cli, "_persist_history_import", persist)
+
+    assert (
+        cli.main(
+            [
+                "history",
+                "--root",
+                str(repo),
+                "import-github",
+                "--repository",
+                "acme/widgets",
+                "--max-api-requests",
+                "1",
+                "--max-provider-records",
+                "2",
+            ]
+        )
+        == 2
+    )
+    captured = capsys.readouterr()
+    assert "aborted without persistence" in captured.err
+    assert persistence_called is False
+    assert load_events(events_path(repo)) == []
+    assert load_change_units(change_units_path(repo)) == []
+
+
+def test_history_cli_rejects_cross_repository_import_unless_explicitly_overridden(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo = tmp_path / "binding-repo"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "History Test")
+    _git(repo, "config", "user.email", "history@example.invalid")
+    _git(repo, "remote", "add", "origin", "https://github.com/acme/actual.git")
+    _commit(repo, "base.txt", "2025-01-01T00:00:00Z")
+    assert cli.main(["init", str(repo)]) == 0
+    capsys.readouterr()
+
+    called = False
+
+    def stop_after_binding(*_args: object, **kwargs: object) -> GitHubHistoryReport:
+        nonlocal called
+        called = True
+        assert kwargs["repository_binding"] == "explicit_unverified_override"
+        raise GitHubHistoryError("stop after verified override")
+
+    monkeypatch.setattr(cli, "GhApiClient", lambda: object())
+    monkeypatch.setattr(cli, "collect_github_history", stop_after_binding)
+    base_args = [
+        "history",
+        "--root",
+        str(repo),
+        "import-github",
+        "--repository",
+        "acme/other",
+    ]
+    assert cli.main(base_args) == 2
+    rejected = capsys.readouterr()
+    assert "not verifiably equal" in rejected.err
+    assert called is False
+
+    assert cli.main([*base_args, "--allow-unverified-repository"]) == 2
+    overridden = capsys.readouterr()
+    assert "stop after verified override" in overridden.err
+    assert called is True
 
 
 def test_history_import_rejects_foreign_repository_without_partial_write(
