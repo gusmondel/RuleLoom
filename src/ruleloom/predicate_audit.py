@@ -17,8 +17,10 @@ from ruleloom.models import (
 )
 
 _PATH_PREFIX = "path:"
+_MISSING_MARKER = ";missing:"
 _MAX_PATH_EXAMPLES = 8
 _MIN_RELATION_SUPPORT = 2
+_WARMUP_WARNING_FRACTION = 0.2
 
 
 def _threshold(value: float, name: str) -> float:
@@ -71,13 +73,83 @@ def _rate(count: int, total: int) -> float | None:
 
 def _path_examples(observations: Sequence[Observation], predicate: str) -> list[str]:
     examples = {
-        evidence[len(_PATH_PREFIX) :]
+        evidence[len(_PATH_PREFIX) :].split(";", 1)[0]
         for item in observations
         if (fact_evidence := item.fact_evidence.get(predicate)) is not None
         for evidence in fact_evidence.evidence
         if evidence.startswith(_PATH_PREFIX) and len(evidence) > len(_PATH_PREFIX)
     }
-    return sorted(examples)[:_MAX_PATH_EXAMPLES]
+    return sorted(example for example in examples if example)[:_MAX_PATH_EXAMPLES]
+
+
+def _partner_examples(observations: Sequence[Observation], predicate: str) -> list[JsonValue]:
+    """Surface which usual partner was missing, aggregated across observations."""
+    counts: dict[tuple[str, str], int] = {}
+    for item in observations:
+        fact_evidence = item.fact_evidence.get(predicate)
+        if fact_evidence is None:
+            continue
+        for evidence in fact_evidence.evidence:
+            if not evidence.startswith(_PATH_PREFIX) or _MISSING_MARKER not in evidence:
+                continue
+            path, remainder = evidence[len(_PATH_PREFIX) :].split(_MISSING_MARKER, 1)
+            partner = remainder.split(";", 1)[0]
+            if path and partner:
+                counts[(path, partner)] = counts.get((path, partner), 0) + 1
+    ordered = sorted(counts.items(), key=lambda pair: (-pair[1], pair[0]))
+    return [
+        {"path": path, "missing_partner": partner, "observations": count}
+        for (path, partner), count in ordered[:_MAX_PATH_EXAMPLES]
+    ]
+
+
+def _history_windows(ordered: Sequence[Observation]) -> tuple[JsonObject, list[str]]:
+    """Compare the time-window feature horizons with the observed history span."""
+    if not ordered:
+        return {"status": "unavailable"}, []
+    instants = [parse_timestamp(item.observed_at) for item in ordered]
+    earliest = min(instants)
+    span_days = (max(instants) - earliest).total_seconds() / 86_400
+    windows: dict[str, int] = {}
+    for item in ordered:
+        context = item.metadata.get("historical_context")
+        if not isinstance(context, dict):
+            continue
+        for key, predicate in (
+            ("hotspot_window_days", "touches_recent_change_hotspot"),
+            ("dormant_days", "touches_dormant_area"),
+        ):
+            value = context.get(key)
+            if isinstance(value, int) and not isinstance(value, bool) and value > 0:
+                windows.setdefault(predicate, value)
+    if not windows:
+        return {"status": "not_applicable", "observed_span_days": span_days}, []
+    rows: dict[str, JsonValue] = {}
+    warnings: list[str] = []
+    for predicate, window_days in sorted(windows.items()):
+        warmup = sum(
+            (instant - earliest).total_seconds() / 86_400 < window_days for instant in instants
+        )
+        warmup_fraction = warmup / len(instants)
+        exceeds = span_days < window_days
+        rows[predicate] = {
+            "window_days": window_days,
+            "left_censored_warmup_observations": warmup,
+            "left_censored_warmup_fraction": warmup_fraction,
+            "window_exceeds_observed_history": exceeds,
+        }
+        if exceeds:
+            warnings.append(
+                f"{predicate}: its {window_days}-day window exceeds the observed history span "
+                f"of {span_days:.1f} days, so it cannot fire and is structurally constant here"
+            )
+        elif warmup_fraction >= _WARMUP_WARNING_FRACTION:
+            warnings.append(
+                f"{predicate}: {warmup_fraction:.0%} of observations fall inside the first "
+                f"{window_days} days of history where prior-window facts are left-censored; "
+                "early/late prevalence drift can be an artifact of warm-up"
+            )
+    return {"status": "available", "observed_span_days": span_days, "predicates": rows}, warnings
 
 
 def _matched_path_count(observations: Sequence[Observation], predicate: str) -> int | None:
@@ -197,7 +269,12 @@ def audit_predicates(
         }
         if predicate in configured:
             row["matched_path_count"] = _matched_path_count(ordered, predicate)
-            row["path_examples"] = cast(JsonValue, _path_examples(ordered, predicate))
+        path_examples = _path_examples(ordered, predicate)
+        if predicate in configured or path_examples:
+            row["path_examples"] = cast(JsonValue, path_examples)
+        partner_examples = _partner_examples(ordered, predicate)
+        if partner_examples:
+            row["partner_examples"] = partner_examples
         predicate_rows.append(row)
 
     relations: list[JsonValue] = []
@@ -242,6 +319,8 @@ def audit_predicates(
         else frozenset()
     )
     configured_uncovered = total - len(configured_covered)
+    history_windows, window_warnings = _history_windows(ordered)
+    warnings.extend(window_warnings)
     return {
         "schema_version": 1,
         "outcome_blind": True,
@@ -252,6 +331,7 @@ def audit_predicates(
             "early_observations": len(early),
             "late_observations": len(late),
         },
+        "history_windows": history_windows,
         "thresholds": {
             "rare": rare,
             "saturated": saturated,

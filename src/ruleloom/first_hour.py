@@ -415,6 +415,21 @@ def _collect_diffs(
     return diffs, topology, repository_id, tuple(warnings)
 
 
+def collect_commit_diffs(
+    root: Path,
+    *,
+    ref: str = "HEAD",
+    limits: RepositoryAuditLimits | None = None,
+) -> tuple[tuple[_CommitDiff, ...], JsonObject, str, tuple[str, ...]]:
+    """Public, read-only access to bounded per-commit path churn for other auditors.
+
+    Returns the commit diffs (oldest first), the topology summary, the repository
+    identity, and collection warnings. It never reads outcomes or file contents.
+    """
+
+    return _collect_diffs(root, ref=ref, limits=limits or RepositoryAuditLimits())
+
+
 def _nearest_rank(values: list[int], probability: float) -> int | None:
     if not values:
         return None
@@ -902,4 +917,5 @@ __all__ = [
     "RepositoryAuditLimits",
     "audit_repository",
     "build_first_hour_report",
+    "collect_commit_diffs",
 ]

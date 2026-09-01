@@ -23,8 +23,10 @@ from ruleloom.packs import (
     ConfiguredPathsConfig,
     EvidencePack,
     PackOptions,
+    accepts_empty_pack_config,
     get_pack,
     latest_pack_version,
+    pack_is_configurable,
 )
 
 CONFIG_PATH = Path(".ruleloom/config.json")
@@ -1077,6 +1079,14 @@ class RuleLoomConfig:
             raise ModelError("schema-v2 configs cannot define pack_config")
         if self.schema_version < 3 and self.pack == "configured_paths":
             raise ModelError("configured_paths requires config schema_version 3")
+        if self.schema_version < 5 and self.pack == "generic_changes" and self.pack_version >= 3:
+            raise ModelError("generic_changes version 3 requires config schema_version 5")
+        if (
+            self.schema_version >= 3
+            and self.pack_config is None
+            and accepts_empty_pack_config(self.pack, self.pack_version)
+        ):
+            object.__setattr__(self, "pack_config", ConfiguredPathsConfig())
         if self.schema_version < 4 and self.signal_probe != SignalProbeConfig():
             raise ModelError("signal_probe requires config schema_version 4")
         if self.schema_version < 5 and self.outcomes != OutcomesConfig():
@@ -1387,11 +1397,12 @@ class RuleLoomConfig:
             )
         default_pack = "flutter_testing" if raw_version == 1 else "generic_changes"
         raw_pack = _string(value.get("pack", default_pack), "pack")
-        if raw_version >= 3 and raw_pack != "configured_paths" and raw_pack_config:
-            raise ModelError(f"evidence pack {raw_pack!r} does not accept pack_config fields")
         raw_pack_version = value.get("pack_version", 1)
         if isinstance(raw_pack_version, bool) or not isinstance(raw_pack_version, int):
             raise ModelError("pack_version must be an integer")
+        configurable = raw_version >= 3 and pack_is_configurable(raw_pack, raw_pack_version)
+        if raw_version >= 3 and not configurable and raw_pack_config:
+            raise ModelError(f"evidence pack {raw_pack!r} does not accept pack_config fields")
         return cls(
             schema_version=raw_version,
             project=_string(value.get("project"), "project"),
@@ -1415,9 +1426,7 @@ class RuleLoomConfig:
                 EvidenceConfig.from_dict(raw_evidence) if raw_version >= 2 else EvidenceConfig()
             ),
             pack_config=(
-                ConfiguredPathsConfig.from_dict(raw_pack_config)
-                if raw_version >= 3 and raw_pack == "configured_paths"
-                else None
+                ConfiguredPathsConfig.from_dict(raw_pack_config) if configurable else None
             ),
             learner=LearnerConfig.from_dict(
                 raw_learner,
@@ -1479,14 +1488,15 @@ def default_config(
         if pack is not None
         else ("flutter_testing" if schema_version == 1 else "generic_changes")
     )
-    selected_version = (
-        1
-        if pack_version is None
-        and (schema_version == 1 or (schema_version < 4 and selected_pack == "generic_changes"))
-        else latest_pack_version(selected_pack)
-        if pack_version is None
-        else pack_version
-    )
+    if pack_version is not None:
+        selected_version = pack_version
+    elif schema_version == 1 or (schema_version < 4 and selected_pack == "generic_changes"):
+        selected_version = 1
+    elif schema_version == 4 and selected_pack == "generic_changes":
+        # Schema v4 experiments keep generic_changes@2 so their hashes stay reproducible.
+        selected_version = 2
+    else:
+        selected_version = latest_pack_version(selected_pack)
     return RuleLoomConfig(
         schema_version=schema_version,
         project=project,

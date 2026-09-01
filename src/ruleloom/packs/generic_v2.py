@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+from dataclasses import dataclass
 
 from ruleloom.history_features import HISTORY_FEATURE_PREDICATES
 from ruleloom.packs.base import (
@@ -45,11 +46,25 @@ def _normalized_entropy(churn: list[int]) -> float:
     return entropy / math.log2(len(nonzero))
 
 
-def extract_generic_change_facts_v2(
+@dataclass(frozen=True, slots=True)
+class ChangeShape:
+    """Scale measurements and the frozen band boundaries derived from pack options."""
+
+    churn: int
+    file_count: int
+    aggregate: bool
+    tiny_boundary: int
+    large_boundary: int
+    extreme_boundary: int
+    many_boundary: int
+    wide_boundary: int
+
+
+def generic_change_shape_reasons(
     evidence: DiffEvidence,
     options: PackOptions,
-) -> PackExtraction:
-    """Add ordinal size and diffusion bands without inspecting a programming language."""
+) -> tuple[dict[str, set[str]], ChangeShape]:
+    """Return the exact v2 band/diffusion reasons plus the measurements behind them."""
 
     visible = tuple(change for change in evidence.changes if not is_internal_path(change.path))
     aggregate = evidence.aggregate_additions is not None
@@ -107,4 +122,24 @@ def extract_generic_change_facts_v2(
         else:
             record("change_diffusion_low", f"normalized_entropy:{diffusion:.6f}<0.5")
 
+    shape = ChangeShape(
+        churn=churn,
+        file_count=file_count,
+        aggregate=aggregate,
+        tiny_boundary=tiny_boundary,
+        large_boundary=options.large_change_churn,
+        extreme_boundary=extreme_boundary,
+        many_boundary=options.multi_file_count,
+        wide_boundary=wide_boundary,
+    )
+    return reasons, shape
+
+
+def extract_generic_change_facts_v2(
+    evidence: DiffEvidence,
+    options: PackOptions,
+) -> PackExtraction:
+    """Add ordinal size and diffusion bands without inspecting a programming language."""
+
+    reasons, _shape = generic_change_shape_reasons(evidence, options)
     return finalize_extraction(evidence, reasons, extractor=EXTRACTOR, options=options)

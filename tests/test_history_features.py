@@ -303,7 +303,7 @@ def test_codeowners_content_reader_and_snapshot_decoder_fail_closed(
     monkeypatch.setattr(
         history_features,
         "_codeowners_blob_index",
-        lambda _root, _bases: (
+        lambda _root, _bases, *_locations: (
             {(base, "CODEOWNERS"): object_id},
             {(base, ".github/CODEOWNERS"): "codeowners_not_found"},
         ),

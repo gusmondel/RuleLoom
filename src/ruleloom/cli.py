@@ -13,11 +13,12 @@ from collections.abc import Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Protocol, cast
 
 from ruleloom import __version__
 from ruleloom.agents import sync_agents
 from ruleloom.config import CONFIG_PATH, RuleLoomConfig, discover_root
+from ruleloom.discovery import DiscoveryLimits, propose_vocabulary
 from ruleloom.first_hour import (
     FirstHourAuditError,
     RepositoryAuditLimits,
@@ -87,6 +88,7 @@ from ruleloom.packs import (
     PathPredicateConfig,
     available_packs,
     latest_pack_version,
+    pack_is_configurable,
 )
 from ruleloom.predicate_audit import audit_predicates
 from ruleloom.project import initialize_project, validate_observations, validate_project
@@ -112,6 +114,7 @@ from ruleloom.storage import (
     load_trusted_predictions,
     predictions_path,
     project_path,
+    read_json,
     save_candidate,
     save_signal_probe,
     signal_probe_path,
@@ -250,12 +253,36 @@ def _cmd_audit(args: argparse.Namespace) -> int:
 def _init_pack_config(args: argparse.Namespace) -> ConfiguredPathsConfig | None:
     raw_includes: list[str] = args.path_predicate
     raw_excludes: list[str] = args.path_exclude
-    if args.pack != "configured_paths":
-        if raw_includes or raw_excludes:
-            raise ModelError("--path-predicate and --path-exclude require --pack configured_paths")
+    raw_file: str | None = getattr(args, "pack_config", None)
+    requested_version: int | None = args.pack_version
+    configurable = pack_is_configurable(
+        args.pack,
+        requested_version if requested_version is not None else latest_pack_version(args.pack),
+    )
+    if not configurable:
+        if raw_includes or raw_excludes or raw_file:
+            raise ModelError(
+                "--path-predicate, --path-exclude, and --pack-config require a configurable "
+                "pack (configured_paths or generic_changes@3)"
+            )
         return None
+    if raw_file is not None:
+        if raw_includes or raw_excludes:
+            raise ModelError("--pack-config cannot be combined with --path-predicate flags")
+        path = Path(raw_file)
+        if path.is_symlink():
+            raise ModelError(f"pack_config file must not be a symlink: {path}")
+        raw_value = read_json(path)
+        proposal_config = raw_value.get("pack_config") if "pack_config" in raw_value else raw_value
+        if not isinstance(proposal_config, dict):
+            raise ModelError("pack_config file must contain a JSON object")
+        return ConfiguredPathsConfig.from_dict(cast(dict[str, object], proposal_config))
     if not raw_includes:
-        raise ModelError("configured_paths requires at least one --path-predicate PREDICATE=GLOB")
+        if args.pack == "configured_paths":
+            raise ModelError(
+                "configured_paths requires at least one --path-predicate PREDICATE=GLOB"
+            )
+        return None
 
     def split(value: str, option: str) -> tuple[str, str]:
         predicate, separator, pattern = value.partition("=")
@@ -756,11 +783,7 @@ def _cmd_diagnose(args: argparse.Namespace) -> int:
     qualities: dict[str, int] = {}
     for unit in units:
         qualities[unit.evidence_quality] = qualities.get(unit.evidence_quality, 0) + 1
-    configured = (
-        tuple(item.predicate for item in config.pack_config.path_predicates)
-        if config.pack_config is not None
-        else ()
-    )
+    configured = config.pack_config.predicates if config.pack_config is not None else ()
     predicate_report = audit_predicates(
         observations,
         config.resolved_pack.predicates,
@@ -1107,7 +1130,8 @@ def _merge_collected_prior(
     ):
         raise ModelError(
             f"immutable Git snapshot {collected.id} produced different evidence or protocol; "
-            "start a new experiment or check extractor/version provenance"
+            "sealed snapshots are never rewritten. Start a new experiment (run 'ruleloom init' "
+            "in a fresh checkout or a new project root) or check extractor/version provenance"
         )
     source_keys = {
         "kind",
@@ -1147,6 +1171,7 @@ def _persist_collected(
                 collected,
                 extractor=config.resolved_pack.extractor,
                 root=root,
+                pack_version=config.pack_version,
             )
         by_id = {item.id: item for item in existing}
         merged = [_merge_collected_prior(by_id.get(item.id), item) for item in collected]
@@ -1201,7 +1226,9 @@ def _merge_historical_observation(
     ):
         raise ModelError(
             f"immutable historical snapshot {collected.id!r} changed its predictor, "
-            "protocol, or materialization semantics"
+            "protocol, or materialization semantics; sealed snapshots are never rewritten. "
+            "Deepening or re-scoping an already materialized history requires a new "
+            "experiment: run 'ruleloom init' in a fresh checkout or a new project root"
         )
 
     previous_label = prior.labels.get(target, LabelValue.UNKNOWN)
@@ -1253,6 +1280,7 @@ def _persist_historical(
                 collected,
                 extractor=config.resolved_pack.extractor,
                 root=root,
+                pack_version=config.pack_version,
             )
         by_id = {item.id: item for item in existing}
         merged = [
@@ -1512,11 +1540,7 @@ def _cmd_predicates_audit(args: argparse.Namespace) -> int:
     root, config = _project(args)
     observations = load_observations(dataset_path(root, config))
     validate_observations(observations, config, as_of=datetime.now(UTC))
-    configured = (
-        tuple(item.predicate for item in config.pack_config.path_predicates)
-        if config.pack_config is not None
-        else ()
-    )
+    configured = config.pack_config.predicates if config.pack_config is not None else ()
     report = audit_predicates(
         observations,
         config.resolved_pack.predicates,
@@ -1539,6 +1563,64 @@ def _cmd_predicates_audit(args: argparse.Namespace) -> int:
     }
     payload["audit_manifest_hash"] = content_hash(payload)
     _json(payload)
+    return 0
+
+
+def _cmd_predicates_propose(args: argparse.Namespace) -> int:
+    """Propose an outcome-blind instantiated vocabulary and assertion drafts."""
+
+    if args.path == "":
+        raise ModelError("propose path must not be empty")
+    root = Path(args.path if args.path is not None else ".").resolve()
+    if not root.is_dir():
+        raise ModelError(f"propose path is not an existing directory: {root}")
+    until = args.until
+    warnings: list[str] = []
+    if until is None and (root / CONFIG_PATH).is_file():
+        until = RuleLoomConfig.load(root).evaluation.test_start_at
+        if until is not None:
+            warnings.append(f"bounded the scan to commits before the frozen holdout {until}")
+    proposal = propose_vocabulary(
+        root,
+        ref=args.ref,
+        until=until,
+        limits=DiscoveryLimits(
+            max_commits=args.max_commits,
+            max_hotspots=args.max_hotspots,
+            max_owner_areas=args.max_owner_areas,
+            max_pairs=args.max_pairs,
+            min_hotspot_changes=args.min_hotspot_changes,
+            min_pair_support=args.min_pair_support,
+            min_pair_confidence=args.min_pair_confidence,
+        ),
+    )
+    outputs: dict[str, str] = {}
+    for option, destination, payload in (
+        ("--pack-config-output", args.pack_config_output, proposal.pack_config.to_dict()),
+        (
+            "--assertions-output",
+            args.assertions_output,
+            None if proposal.assertion_manifest is None else proposal.assertion_manifest.to_dict(),
+        ),
+    ):
+        if destination is None:
+            continue
+        if payload is None:
+            warnings.append(f"{option} skipped: no assertion draft was produced")
+            continue
+        target = Path(destination)
+        if target.exists() or target.is_symlink():
+            raise ModelError(f"refusing to overwrite existing proposal output: {target}")
+        write_json(target, payload)
+        outputs[option] = str(target)
+    if args.json:
+        _json({**proposal.to_dict(), "outputs": outputs, "cli_warnings": warnings})
+    else:
+        print(proposal.render_text(), end="")
+        for option, destination in outputs.items():
+            print(f"Wrote {option}: {destination}")
+        for warning in warnings:
+            print(f"Note: {warning}")
     return 0
 
 
@@ -1676,6 +1758,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="explicit built-in pack version (default: latest registered version)",
     )
     init.add_argument(
+        "--pack-config",
+        help=(
+            "JSON file with a reviewed pack_config (for example the output of "
+            "'ruleloom predicates propose'); accepted by configured_paths and generic_changes@3"
+        ),
+    )
+    init.add_argument(
         "--agents",
         choices=["none", "all", "codex", "claude"],
         default="none",
@@ -1711,6 +1800,39 @@ def build_parser() -> argparse.ArgumentParser:
     predicate_audit.add_argument("--drift-threshold", type=float, default=0.20)
     predicate_audit.add_argument("--overlap-threshold", type=float, default=0.90)
     predicate_audit.set_defaults(handler=_cmd_predicates_audit)
+    predicate_propose = predicate_commands.add_parser(
+        "propose",
+        help=(
+            "draft instantiated hotspot, owner-area, and missing-partner predicates plus "
+            "co-change assertion drafts from Git structure only"
+        ),
+    )
+    predicate_propose.add_argument("path", nargs="?", default=".")
+    predicate_propose.add_argument("--ref", default="HEAD")
+    predicate_propose.add_argument(
+        "--until",
+        help=(
+            "aware ISO-8601 boundary; commits at or after it are excluded (defaults to the "
+            "initialized project's frozen evaluation.test_start_at when present)"
+        ),
+    )
+    predicate_propose.add_argument("--max-commits", type=int, default=2000)
+    predicate_propose.add_argument("--max-hotspots", type=int, default=8)
+    predicate_propose.add_argument("--max-owner-areas", type=int, default=6)
+    predicate_propose.add_argument("--max-pairs", type=int, default=12)
+    predicate_propose.add_argument("--min-hotspot-changes", type=int, default=3)
+    predicate_propose.add_argument("--min-pair-support", type=int, default=5)
+    predicate_propose.add_argument("--min-pair-confidence", type=float, default=0.7)
+    predicate_propose.add_argument(
+        "--pack-config-output",
+        help="write the proposed generic_changes@3 pack_config JSON here (must not exist)",
+    )
+    predicate_propose.add_argument(
+        "--assertions-output",
+        help="write the drafted assertion manifest JSON here (must not exist)",
+    )
+    predicate_propose.add_argument("--json", action="store_true")
+    predicate_propose.set_defaults(handler=_cmd_predicates_propose)
 
     assertions = subparsers.add_parser(
         "assertions",

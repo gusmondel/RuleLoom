@@ -666,9 +666,11 @@ def test_initialize_creates_portable_agent_skills_and_refuses_reinitialization(
     assert (result.config.schema_version, result.config.pack, result.config.pack_version) == (
         5,
         "generic_changes",
-        2,
+        3,
     )
     assert result.config.learner.search_strategy == "beam"
+    assert result.config.pack_config is not None
+    assert result.config.pack_config.is_empty
     assert result.config.evaluation.test_start_at is not None
     assert result.config.signal_probe.enabled
     assert (root / ".ruleloom/config.json").is_file()

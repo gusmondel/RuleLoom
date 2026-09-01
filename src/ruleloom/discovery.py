@@ -1,0 +1,491 @@
+"""Outcome-blind proposal of instantiated repository concepts and assertion drafts.
+
+The proposer reads Git structure only: changed paths per commit, path co-change,
+and the ``CODEOWNERS`` document at the audited revision. It never reads labels,
+outcomes, review prose, or file contents. Its output is a *draft*: a
+``generic_changes@3`` ``pack_config`` plus an assertion manifest that a human
+reviews before freezing a new experiment. When a project is initialized, the
+draft is bounded to commits before the frozen holdout boundary so the future
+confirmation window stays untouched.
+
+Why this exists: coarse Booleans such as ``missing_usual_cochange_partner`` or
+``crosses_codeowners_boundary`` collapse whole families of repository facts into
+one bit. A learner cannot exceed the base rate of an equivalence class it cannot
+split. Instantiating the strongest hotspots, owner areas, and co-change pairs as
+declared predicates gives the same bounded Horn search enough resolution while
+keeping every predicate reviewable, deterministic, and frozen before labels.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import re
+from collections import Counter
+from dataclasses import dataclass
+from itertools import combinations
+from pathlib import Path
+from typing import cast
+
+from ruleloom.first_hour import (
+    FirstHourAuditError,
+    RepositoryAuditLimits,
+    collect_commit_diffs,
+)
+from ruleloom.history_features import (
+    _normalize_codeowners_pattern,
+    _read_codeowners_batch,
+    parse_codeowners_rules,
+)
+from ruleloom.models import (
+    JsonObject,
+    JsonValue,
+    ModelError,
+    RuleLiteral,
+    content_hash,
+    parse_timestamp,
+)
+from ruleloom.packs.configured_paths import (
+    MAX_PREDICATE_LENGTH,
+    MAX_PREDICATES,
+    MISSING_PARTNER_PREFIX,
+    ConfiguredPathsConfig,
+    PartnerPredicateConfig,
+    PathPredicateConfig,
+    _validate_glob,
+    configured_matches,
+)
+from ruleloom.repository_assertions import (
+    RepositoryAssertion,
+    RepositoryAssertionManifest,
+    RepositoryAssertionSourceRef,
+)
+
+DISCOVERY_ENGINE_VERSION = "ruleloom-discovery/0.1"
+HOTSPOT_PREFIX = "touches_hotspot_"
+OWNER_AREA_PREFIX = "touches_owner_area_"
+PAIR_ENDPOINT_PREFIX = "touches_path_"
+_SLUG_CHARS = re.compile(r"[^a-z0-9]+")
+_MAX_SLUG_CHARS = 24
+_MAX_OWNER_GLOBS = 32
+_MAX_COMMITS = 10_000
+_MAX_PROPOSALS = 64
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveryLimits:
+    """Explicit, bounded selection thresholds for one proposal run."""
+
+    max_commits: int = 2_000
+    max_hotspots: int = 8
+    max_owner_areas: int = 6
+    max_pairs: int = 12
+    min_hotspot_changes: int = 3
+    min_pair_support: int = 5
+    min_pair_confidence: float = 0.7
+    max_cochange_paths_per_commit: int = 200
+
+    def __post_init__(self) -> None:
+        for name, value, maximum in (
+            ("max_commits", self.max_commits, _MAX_COMMITS),
+            ("max_hotspots", self.max_hotspots, _MAX_PROPOSALS),
+            ("max_owner_areas", self.max_owner_areas, _MAX_PROPOSALS),
+            ("max_pairs", self.max_pairs, _MAX_PROPOSALS),
+            ("min_hotspot_changes", self.min_hotspot_changes, _MAX_COMMITS),
+            ("min_pair_support", self.min_pair_support, _MAX_COMMITS),
+            ("max_cochange_paths_per_commit", self.max_cochange_paths_per_commit, 500),
+        ):
+            if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+                raise ModelError(f"{name} must be an integer between 1 and {maximum}")
+        if (
+            isinstance(self.min_pair_confidence, bool)
+            or not isinstance(self.min_pair_confidence, int | float)
+            or not 0 < self.min_pair_confidence <= 1
+        ):
+            raise ModelError("min_pair_confidence must be between 0 (exclusive) and 1")
+        if self.max_hotspots + self.max_owner_areas > MAX_PREDICATES:
+            raise ModelError(
+                f"max_hotspots plus max_owner_areas cannot exceed {MAX_PREDICATES} path predicates"
+            )
+
+    def to_dict(self) -> JsonObject:
+        return {
+            "max_commits": self.max_commits,
+            "max_hotspots": self.max_hotspots,
+            "max_owner_areas": self.max_owner_areas,
+            "max_pairs": self.max_pairs,
+            "min_hotspot_changes": self.min_hotspot_changes,
+            "min_pair_support": self.min_pair_support,
+            "min_pair_confidence": self.min_pair_confidence,
+            "max_cochange_paths_per_commit": self.max_cochange_paths_per_commit,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class DiscoveryProposal:
+    """A reviewable, outcome-blind vocabulary and assertion draft."""
+
+    repository_id: str
+    ref: str
+    resolved_ref: str
+    until: str | None
+    commit_count: int
+    excluded_after_until: int
+    limits: DiscoveryLimits
+    pack_config: ConfiguredPathsConfig
+    assertion_manifest: RepositoryAssertionManifest | None
+    hotspots: tuple[JsonValue, ...]
+    owner_areas: tuple[JsonValue, ...]
+    pairs: tuple[JsonValue, ...]
+    warnings: tuple[str, ...]
+    engine_version: str = DISCOVERY_ENGINE_VERSION
+
+    @property
+    def limitations(self) -> tuple[str, ...]:
+        return (
+            "Proposals describe Git structure only; they are not predictive or causal claims.",
+            "Every predicate must be reviewed by a human and frozen before outcomes are opened.",
+            "Co-change confidence is a historical rate, not a dependency or a rule.",
+            "Owner areas hash owner sets and store globs only; identities are not persisted.",
+        )
+
+    def payload(self) -> JsonObject:
+        return {
+            "engine_version": self.engine_version,
+            "outcome_blind": True,
+            "draft": True,
+            "repository_id": self.repository_id,
+            "ref": self.ref,
+            "resolved_ref": self.resolved_ref,
+            "until": self.until,
+            "commit_count": self.commit_count,
+            "excluded_after_until": self.excluded_after_until,
+            "limits": self.limits.to_dict(),
+            "pack": {"name": "generic_changes", "version": 3},
+            "pack_config": self.pack_config.to_dict(),
+            "assertion_manifest": (
+                None if self.assertion_manifest is None else self.assertion_manifest.to_dict()
+            ),
+            "hotspots": list(self.hotspots),
+            "owner_areas": list(self.owner_areas),
+            "pairs": list(self.pairs),
+            "warnings": list(self.warnings),
+            "limitations": list(self.limitations),
+        }
+
+    @property
+    def manifest_hash(self) -> str:
+        return content_hash(self.payload())
+
+    def to_dict(self) -> JsonObject:
+        return {**self.payload(), "manifest_hash": self.manifest_hash}
+
+    def render_text(self) -> str:
+        lines = [
+            "RuleLoom vocabulary proposal (outcome-blind draft)",
+            "",
+            f"Repository: {self.repository_id}",
+            f"Resolved ref: {self.resolved_ref}",
+            (
+                f"Commits scanned: {self.commit_count}"
+                + (
+                    f" (before {self.until}; {self.excluded_after_until} later commits excluded)"
+                    if self.until is not None
+                    else " (no holdout boundary; bound the scan with --until before freezing)"
+                )
+            ),
+            "",
+            f"Hotspot predicates ({len(self.hotspots)})",
+        ]
+        for row_value in self.hotspots:
+            row = cast(JsonObject, row_value)
+            lines.append(f"- {row['predicate']}: {row['path']} ({row['change_count']} changes)")
+        if not self.hotspots:
+            lines.append("- None met the change-count floor.")
+        lines.extend(("", f"Owner-area predicates ({len(self.owner_areas)})"))
+        for row_value in self.owner_areas:
+            row = cast(JsonObject, row_value)
+            lines.append(
+                f"- {row['predicate']}: {row['glob_count']} globs, "
+                f"{row['commit_count']} commits touched"
+            )
+        if not self.owner_areas:
+            lines.append("- No supported CODEOWNERS rules at this revision.")
+        lines.extend(("", f"Missing-partner predicates ({len(self.pairs)})"))
+        for row_value in self.pairs:
+            row = cast(JsonObject, row_value)
+            lines.append(
+                f"- {row['predicate']}: {row['path']} changed without {row['partner']} "
+                f"(support {row['support']}, confidence {row['confidence']:.2f})"
+            )
+        if not self.pairs:
+            lines.append("- No pair met the support and confidence floors.")
+        assertion_count = (
+            0 if self.assertion_manifest is None else len(self.assertion_manifest.assertions)
+        )
+        lines.extend(
+            (
+                "",
+                f"Assertion drafts: {assertion_count}",
+                "",
+                "Warnings",
+                *(f"- {item}" for item in self.warnings),
+                *(("- None.",) if not self.warnings else ()),
+                "",
+                "Limits of interpretation",
+                *(f"- {item}" for item in self.limitations),
+                "",
+                f"Manifest: {self.manifest_hash}",
+            )
+        )
+        return "\n".join(lines) + "\n"
+
+
+def _slug(path: str) -> str:
+    name = path.rsplit("/", 1)[-1].lower()
+    slug = _SLUG_CHARS.sub("_", name).strip("_")
+    if not slug:
+        slug = "path"
+    return slug[:_MAX_SLUG_CHARS].rstrip("_") or "path"
+
+
+def _digest(*parts: str) -> str:
+    return hashlib.sha256("\x00".join(parts).encode("utf-8")).hexdigest()
+
+
+def _predicate_name(prefix: str, slug: str, digest: str) -> str:
+    name = f"{prefix}{slug}_{digest[:6]}"
+    if len(name) > MAX_PREDICATE_LENGTH:
+        overflow = len(name) - MAX_PREDICATE_LENGTH
+        trimmed = slug[: max(1, len(slug) - overflow)].rstrip("_") or "p"
+        name = f"{prefix}{trimmed}_{digest[:6]}"
+    return name
+
+
+def _literal_glob(path: str) -> str | None:
+    try:
+        return _validate_glob(path, "proposed path")
+    except ModelError:
+        return None
+
+
+def propose_vocabulary(
+    root: Path,
+    *,
+    ref: str = "HEAD",
+    until: str | None = None,
+    limits: DiscoveryLimits | None = None,
+) -> DiscoveryProposal:
+    """Propose instantiated predicates and assertion drafts from Git structure only."""
+
+    selected = limits or DiscoveryLimits()
+    boundary = parse_timestamp(until) if until is not None else None
+    try:
+        diffs, topology, repository_id, history_warnings = collect_commit_diffs(
+            root,
+            ref=ref,
+            limits=RepositoryAuditLimits(
+                max_commits=selected.max_commits,
+                max_cochange_paths_per_commit=selected.max_cochange_paths_per_commit,
+            ),
+        )
+    except FirstHourAuditError as exc:
+        raise ModelError(str(exc)) from exc
+    warnings = list(history_warnings)
+    if boundary is not None:
+        eligible = tuple(item for item in diffs if parse_timestamp(item.committed_at) < boundary)
+    else:
+        eligible = tuple(diffs)
+        warnings.append(
+            "no holdout boundary supplied; proposals used every scanned commit, so freeze "
+            "the vocabulary before any outcome is opened"
+        )
+    excluded_after_until = len(diffs) - len(eligible)
+    resolved_ref = str(topology.get("resolved_ref"))
+
+    touches: Counter[str] = Counter()
+    pairs: Counter[tuple[str, str]] = Counter()
+    commit_paths: list[tuple[str, ...]] = []
+    skipped_large = 0
+    for diff in eligible:
+        paths = tuple(sorted({item.path for item in diff.changes}))
+        commit_paths.append(paths)
+        if len(paths) > selected.max_cochange_paths_per_commit:
+            skipped_large += 1
+            continue
+        touches.update(paths)
+        pairs.update(combinations(paths, 2))
+    if skipped_large:
+        warnings.append(
+            f"co-change excluded {skipped_large} commit(s) above the per-commit path budget"
+        )
+
+    path_predicates: dict[str, PathPredicateConfig] = {}
+    predicate_by_path: dict[str, str] = {}
+    hotspot_rows: list[JsonValue] = []
+    for path, count in sorted(touches.items(), key=lambda item: (-item[1], item[0])):
+        if len(hotspot_rows) >= selected.max_hotspots or count < selected.min_hotspot_changes:
+            break
+        glob = _literal_glob(path)
+        if glob is None:
+            continue
+        predicate = _predicate_name(HOTSPOT_PREFIX, _slug(path), _digest("hotspot", path))
+        if predicate in path_predicates:
+            continue
+        path_predicates[predicate] = PathPredicateConfig(predicate=predicate, include_paths=(glob,))
+        predicate_by_path[path] = predicate
+        hotspot_rows.append({"predicate": predicate, "path": path, "change_count": count})
+
+    owner_rows: list[JsonValue] = []
+    snapshots = _read_codeowners_batch(root, {resolved_ref})
+    content, location_or_reason = snapshots.get(resolved_ref, (None, "base_commit_unavailable"))
+    if content is None:
+        warnings.append(f"CODEOWNERS unavailable at {resolved_ref}: {location_or_reason}")
+    else:
+        try:
+            rules, unsupported = parse_codeowners_rules(content)
+        except ValueError as exc:
+            rules, unsupported = [], 0
+            warnings.append(f"CODEOWNERS skipped: {exc}")
+        if unsupported:
+            warnings.append(f"CODEOWNERS contained {unsupported} unsupported rule(s)")
+        globs_by_owner: dict[tuple[str, ...], list[str]] = {}
+        # Re-read raw patterns so the frozen config stores declared globs, never handles.
+        for line in content.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            fields = stripped.split()
+            if len(fields) < 2:
+                continue
+            raw_owners = fields[1:]
+            if "#" in raw_owners:
+                raw_owners = raw_owners[: raw_owners.index("#")]
+            if not raw_owners:
+                continue
+            owner_key = tuple(sorted(set(raw_owners)))
+            normalized = _normalize_codeowners_pattern(fields[0])
+            if normalized is None or _literal_glob(normalized) is None:
+                continue
+            globs_by_owner.setdefault(owner_key, []).append(normalized)
+        del rules
+        area_candidates: list[tuple[int, str, tuple[str, ...]]] = []
+        for owner_key, raw_globs in globs_by_owner.items():
+            globs = tuple(sorted(dict.fromkeys(raw_globs)))[:_MAX_OWNER_GLOBS]
+            digest = _digest("owner-area", repository_id, *owner_key)
+            predicate = f"{OWNER_AREA_PREFIX}{digest[:10]}"
+            compiled = PathPredicateConfig(predicate=predicate, include_paths=globs)
+            area_config = ConfiguredPathsConfig(path_predicates=(compiled,))
+            commit_count = 0
+            for paths in commit_paths:
+                if any(configured_matches(paths, area_config).matched):
+                    commit_count += 1
+            area_candidates.append((commit_count, predicate, globs))
+        area_candidates.sort(key=lambda item: (-item[0], item[1]))
+        for commit_count, predicate, globs in area_candidates[: selected.max_owner_areas]:
+            if commit_count == 0:
+                continue
+            path_predicates[predicate] = PathPredicateConfig(
+                predicate=predicate, include_paths=globs
+            )
+            owner_rows.append(
+                {"predicate": predicate, "glob_count": len(globs), "commit_count": commit_count}
+            )
+
+    pair_rows: list[JsonValue] = []
+    partner_predicates: dict[str, PartnerPredicateConfig] = {}
+    directional: list[tuple[float, int, str, str]] = []
+    for (left, right), count in pairs.items():
+        if count < selected.min_pair_support:
+            continue
+        for source, target in ((left, right), (right, left)):
+            confidence = count / touches[source] if touches[source] else 0.0
+            if confidence >= selected.min_pair_confidence:
+                directional.append((confidence, count, source, target))
+    directional.sort(key=lambda item: (-item[0], -item[1], item[2], item[3]))
+    assertions: list[RepositoryAssertion] = []
+    for confidence, count, source, target in directional:
+        if len(pair_rows) >= selected.max_pairs:
+            break
+        source_glob = _literal_glob(source)
+        target_glob = _literal_glob(target)
+        if source_glob is None or target_glob is None:
+            continue
+        digest = _digest("pair", source, target)
+        predicate = _predicate_name(MISSING_PARTNER_PREFIX, _slug(source), digest)
+        if predicate in partner_predicates:
+            continue
+        partner_predicates[predicate] = PartnerPredicateConfig(
+            predicate=predicate, path=source_glob, partner=target_glob
+        )
+        row: JsonObject = {
+            "predicate": predicate,
+            "path": source,
+            "partner": target,
+            "support": count,
+            "confidence": confidence,
+            "assertion_id": None,
+        }
+        endpoints: list[str] = []
+        for path, glob in ((source, source_glob), (target, target_glob)):
+            existing = predicate_by_path.get(path)
+            if existing is None and len(path_predicates) < MAX_PREDICATES:
+                existing = _predicate_name(PAIR_ENDPOINT_PREFIX, _slug(path), _digest("path", path))
+                if existing not in path_predicates:
+                    path_predicates[existing] = PathPredicateConfig(
+                        predicate=existing, include_paths=(glob,)
+                    )
+                predicate_by_path[path] = existing
+            if existing is not None:
+                endpoints.append(existing)
+        if len(endpoints) == 2:
+            assertion_id = f"cochange_{_slug(source)}_{digest[:8]}"
+            assertions.append(
+                RepositoryAssertion(
+                    assertion_id=assertion_id,
+                    revision=1,
+                    summary=(
+                        f"Changes to {source} co-changed with {target} in {confidence:.0%} of "
+                        f"{touches[source]} historical changes (support {count}); review "
+                        "whether the partner must be updated too."
+                    ),
+                    antecedent=(RuleLiteral(endpoints[0]),),
+                    expectation=(RuleLiteral(endpoints[1]),),
+                    sources=(RepositoryAssertionSourceRef(path=source, start_line=1, end_line=1),),
+                )
+            )
+            row["assertion_id"] = assertion_id
+        else:
+            warnings.append(
+                f"{predicate}: endpoint path predicates did not fit the {MAX_PREDICATES}-"
+                "predicate cap, so no assertion draft was emitted"
+            )
+        pair_rows.append(row)
+
+    pack_config = ConfiguredPathsConfig(
+        path_predicates=tuple(path_predicates.values()),
+        partner_predicates=tuple(partner_predicates.values()),
+    )
+    manifest = RepositoryAssertionManifest(assertions=tuple(assertions)) if assertions else None
+    return DiscoveryProposal(
+        repository_id=repository_id,
+        ref=ref,
+        resolved_ref=resolved_ref,
+        until=None if boundary is None else until,
+        commit_count=len(eligible),
+        excluded_after_until=excluded_after_until,
+        limits=selected,
+        pack_config=pack_config,
+        assertion_manifest=manifest,
+        hotspots=tuple(hotspot_rows),
+        owner_areas=tuple(owner_rows),
+        pairs=tuple(pair_rows),
+        warnings=tuple(dict.fromkeys(warnings)),
+    )
+
+
+__all__ = [
+    "DISCOVERY_ENGINE_VERSION",
+    "DiscoveryLimits",
+    "DiscoveryProposal",
+    "propose_vocabulary",
+]

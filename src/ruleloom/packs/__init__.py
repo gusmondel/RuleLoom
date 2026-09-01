@@ -24,6 +24,7 @@ from ruleloom.packs.configured_paths import (
 )
 from ruleloom.packs.configured_paths import (
     ConfiguredPathsConfig,
+    PartnerPredicateConfig,
     PathPredicateConfig,
     extract_configured_path_facts,
 )
@@ -66,6 +67,16 @@ from ruleloom.packs.generic_v2 import (
     VERSION as GENERIC_V2_VERSION,
 )
 from ruleloom.packs.generic_v2 import extract_generic_change_facts_v2
+from ruleloom.packs.generic_v3 import (
+    EXTRACTOR as GENERIC_V3_EXTRACTOR,
+)
+from ruleloom.packs.generic_v3 import (
+    PREDICATES as GENERIC_V3_PREDICATES,
+)
+from ruleloom.packs.generic_v3 import (
+    VERSION as GENERIC_V3_VERSION,
+)
+from ruleloom.packs.generic_v3 import extract_generic_change_facts_v3
 
 _COMMON_PREDICATES = (
     "large_change",
@@ -109,6 +120,19 @@ _PACKS = {
         predicates=tuple(sorted({*_COMMON_PREDICATES, *GENERIC_V2_PREDICATES})),
         content_path=ignores_content,
         extract=extract_generic_change_facts_v2,
+    ),
+    (GENERIC_NAME, GENERIC_V3_VERSION): EvidencePack(
+        name=GENERIC_NAME,
+        version=GENERIC_V3_VERSION,
+        extractor=GENERIC_V3_EXTRACTOR,
+        description=(
+            "Language-neutral shape, cumulative ordinals, generated artifacts, owner-area "
+            "counts, and reviewed instantiated path/partner concepts."
+        ),
+        predicates=tuple(sorted({*_COMMON_PREDICATES, *GENERIC_V3_PREDICATES})),
+        content_path=ignores_content,
+        extract=extract_generic_change_facts_v3,
+        configurable=True,
     ),
     (FLUTTER_NAME, 1): EvidencePack(
         name=FLUTTER_NAME,
@@ -179,25 +203,54 @@ def get_pack(
             f"available packs: {available}"
         ) from exc
     if descriptor.configurable:
+        if pack_config is None and accepts_empty_pack_config(name, selected_version):
+            pack_config = ConfiguredPathsConfig()
         if not isinstance(pack_config, ConfiguredPathsConfig):
             raise ModelError(
                 f"evidence pack {name}@{selected_version} requires a valid pack_config"
             )
-        collisions = set(pack_config.predicates).intersection(_COMMON_PREDICATES)
+        if name == CONFIGURED_PATHS_NAME:
+            if not pack_config.path_predicates:
+                raise ModelError(
+                    "pack_config.path_predicates must contain at least one predicate for "
+                    f"{name}@{selected_version}"
+                )
+            if pack_config.partner_predicates:
+                raise ModelError(
+                    f"{name}@{selected_version} does not support partner_predicates; use "
+                    f"generic_changes@{GENERIC_V3_VERSION}"
+                )
+        collisions = set(pack_config.predicates).intersection(descriptor.predicates)
         if collisions:
             raise ModelError(
-                "configured path predicates collide with built-in predicates: "
+                "configured predicates collide with built-in predicates: "
                 + ", ".join(sorted(collisions))
             )
+        if name == CONFIGURED_PATHS_NAME:
+            extract = partial(extract_configured_path_facts, config=pack_config)
+        else:
+            extract = partial(extract_generic_change_facts_v3, config=pack_config)
         return replace(
             descriptor,
-            predicates=tuple(sorted({*_COMMON_PREDICATES, *pack_config.predicates})),
-            extract=partial(extract_configured_path_facts, config=pack_config),
+            predicates=tuple(sorted({*descriptor.predicates, *pack_config.predicates})),
+            extract=extract,
             configuration_hash=pack_config.hash,
         )
     if pack_config is not None:
         raise ModelError(f"evidence pack {name}@{selected_version} does not accept pack_config")
     return descriptor
+
+
+def pack_is_configurable(name: str, version: int | None = None) -> bool:
+    """Whether a registered pack accepts a ``pack_config`` block."""
+    selected_version = latest_pack_version(name) if version is None else version
+    descriptor = _PACKS.get((name, selected_version))
+    return descriptor is not None and descriptor.configurable
+
+
+def accepts_empty_pack_config(name: str, version: int | None = None) -> bool:
+    """Whether a configurable pack may run with no instantiated predicates at all."""
+    return pack_is_configurable(name, version) and name != CONFIGURED_PATHS_NAME
 
 
 def matches_pack_version(value: object, expected: int) -> bool:
@@ -303,11 +356,14 @@ __all__ = [
     "FileChange",
     "PackExtraction",
     "PackOptions",
+    "PartnerPredicateConfig",
     "PathPredicateConfig",
+    "accepts_empty_pack_config",
     "available_packs",
     "get_pack",
     "latest_pack_version",
     "matches_pack_version",
+    "pack_is_configurable",
     "validate_persisted_extraction",
     "validate_policy_pack_contract",
 ]

@@ -508,7 +508,22 @@
         }
       },
       "else": {
-        "properties": {"pack_config": {"type": "object", "maxProperties": 0}}
+        "if": {
+          "properties": {
+            "pack": {"const": "generic_changes"},
+            "pack_version": {"const": 3}
+          },
+          "required": ["pack", "pack_version"]
+        },
+        "then": {
+          "properties": {
+            "schema_version": {"const": 5},
+            "pack_config": {"$ref": "#/$defs/genericChangesV3Config"}
+          }
+        },
+        "else": {
+          "properties": {"pack_config": {"type": "object", "maxProperties": 0}}
+        }
       }
     }
   ],
@@ -584,6 +599,39 @@
         {"not": {"pattern": "^(?:/|[A-Za-z]:[\\\\/])"}},
         {"not": {"pattern": "(?:^|[\\\\/])\\.\\.(?:[\\\\/]|$)"}}
       ]
+    },
+    "partnerPredicate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["predicate", "path", "partner"],
+      "properties": {
+        "predicate": {
+          "type": "string",
+          "minLength": 17,
+          "maxLength": 64,
+          "pattern": "^missing_partner_[a-z0-9_]+$"
+        },
+        "path": {"$ref": "#/$defs/configuredGlob"},
+        "partner": {"$ref": "#/$defs/configuredGlob"}
+      }
+    },
+    "genericChangesV3Config": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "path_predicates": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/pathPredicate"}
+        },
+        "partner_predicates": {
+          "type": "array",
+          "maxItems": 32,
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/partnerPredicate"}
+        }
+      }
     }
   }
 }

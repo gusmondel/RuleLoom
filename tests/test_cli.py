@@ -302,7 +302,8 @@ def test_cli_defaults_to_generic_pack_and_lists_versioned_packs(
     config = RuleLoomConfig.load(repo)
     assert config.schema_version == 5
     assert config.signal_probe.enabled is True
-    assert (config.pack, config.pack_version) == ("generic_changes", 2)
+    assert (config.pack, config.pack_version) == ("generic_changes", 3)
+    assert config.pack_config is not None and config.pack_config.is_empty
 
     exit_code, stdout, stderr = _run_cli(["packs", "list", "--json"], capsys)
     assert exit_code == 0
@@ -312,9 +313,16 @@ def test_cli_defaults_to_generic_pack_and_lists_versioned_packs(
         ("configured_paths", 1),
         ("generic_changes", 1),
         ("generic_changes", 2),
+        ("generic_changes", 3),
         ("flutter_testing", 1),
         ("flutter_testing", 2),
     }
+    assert (
+        next(item for item in packs if item["name"] == "generic_changes" and item["latest"])[
+            "configurable"
+        ]
+        is True
+    )
     assert (
         next(item for item in packs if item["name"] == "configured_paths")["configurable"] is True
     )
@@ -555,6 +563,8 @@ def test_cli_rejects_configured_path_flags_for_static_packs(
         [
             "init",
             str(repo),
+            "--pack",
+            "flutter_testing",
             "--path-predicate",
             "touches_surface_web=apps/web/**",
         ],
@@ -562,7 +572,7 @@ def test_cli_rejects_configured_path_flags_for_static_packs(
     )
     assert exit_code == 2
     assert stdout == ""
-    assert "require --pack configured_paths" in stderr
+    assert "require a configurable pack" in stderr
 
 
 def test_cli_rejects_an_explicit_empty_init_path(

@@ -98,6 +98,7 @@ def _active_candidate(config: RuleLoomConfig, status: str, *, tag: str) -> Candi
         metadata={
             "pack": config.pack,
             "pack_version": config.pack_version,
+            "pack_config_hash": config.pack_config_hash,
             "repository_id": config.protocol.repository_id,
             "evidence_protocol_hash": config.evidence_protocol_hash,
             "extractors": [descriptor.extractor],
