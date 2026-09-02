@@ -10,6 +10,7 @@ import tempfile
 import urllib.error
 import urllib.parse
 import urllib.request
+import zlib
 from datetime import UTC, timedelta
 from pathlib import Path
 
@@ -61,13 +62,17 @@ def _output_path(value: str) -> Path:
 
 
 def _post(endpoint: str, query: str, *, maximum: int) -> bytes:
-    url = endpoint + "?" + urllib.parse.urlencode({"user": "play"})
+    # The public playground enforces a 60-second limit that includes transfer time;
+    # a compressed transfer keeps the frozen projection inside it. Decompressed bytes
+    # are hashed, so the manifest is identical to an uncompressed export.
+    url = endpoint + "?" + urllib.parse.urlencode({"user": "play", "enable_http_compression": 1})
     request = urllib.request.Request(
         url,
         data=query.encode("utf-8"),
         headers={
             "Content-Type": "text/plain; charset=utf-8",
             "User-Agent": _USER_AGENT,
+            "Accept-Encoding": "gzip",
         },
         method="POST",
     )
@@ -90,6 +95,7 @@ def _post(endpoint: str, query: str, *, maximum: int) -> bytes:
                 or final.password is not None
             ):
                 raise GitHubEventArchiveError("ClickHouse redirected outside the pinned host")
+            compressed = response.headers.get("Content-Encoding") == "gzip"
             chunks: list[bytes] = []
             size = 0
             while True:
@@ -102,7 +108,22 @@ def _post(endpoint: str, query: str, *, maximum: int) -> bytes:
                         f"ClickHouse response exceeds the {maximum}-byte export limit"
                     )
                 chunks.append(chunk)
-            return b"".join(chunks)
+            payload = b"".join(chunks)
+            if not compressed:
+                return payload
+            decompressor = zlib.decompressobj(16 + zlib.MAX_WBITS)
+            try:
+                inflated = decompressor.decompress(payload, maximum + 1)
+                inflated += decompressor.flush()
+            except zlib.error as exc:
+                raise GitHubEventArchiveError(
+                    "ClickHouse returned an invalid compressed response"
+                ) from exc
+            if len(inflated) > maximum or decompressor.unconsumed_tail:
+                raise GitHubEventArchiveError(
+                    f"ClickHouse response exceeds the {maximum}-byte export limit"
+                )
+            return inflated
     except (urllib.error.URLError, TimeoutError, OSError) as exc:
         raise GitHubEventArchiveError(f"cannot query public ClickHouse endpoint: {exc}") from exc
 
