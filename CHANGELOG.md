@@ -32,9 +32,9 @@ always require a new explicit schema, adapter, pack, or experiment version.
   from `CODEOWNERS`, and reviewed instantiated `touches_*` and
   `missing_partner_*` predicates via `pack_config`.
 - `ruleloom predicates propose`: an outcome-blind, deterministic proposer for
-  hotspots, owner areas (globs only, identities hashed), directional co-change
-  pairs, and assertion-manifest drafts, bounded to the frozen holdout when a
-  project exists. `ruleloom init --pack-config` freezes the reviewed draft.
+  hotspots, mid-coverage directories, owner areas (globs only, identities
+  hashed), directional co-change pairs, and assertion-manifest drafts, bounded
+  to the frozen holdout when a project exists. `ruleloom init --pack-config` freezes the reviewed draft.
 - `predicates audit` reports missing partners, path examples for every
   predicate, and time-window span/warm-up warnings.
 - `predicates propose --evidence-path` writes a reviewable co-change evidence

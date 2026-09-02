@@ -1588,6 +1588,7 @@ def _cmd_predicates_propose(args: argparse.Namespace) -> int:
         limits=DiscoveryLimits(
             max_commits=args.max_commits,
             max_hotspots=args.max_hotspots,
+            max_directories=args.max_directories,
             max_owner_areas=args.max_owner_areas,
             max_pairs=args.max_pairs,
             min_hotspot_changes=args.min_hotspot_changes,
@@ -1834,7 +1835,13 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     predicate_propose.add_argument("--max-commits", type=int, default=2000)
-    predicate_propose.add_argument("--max-hotspots", type=int, default=8)
+    predicate_propose.add_argument("--max-hotspots", type=int, default=6)
+    predicate_propose.add_argument(
+        "--max-directories",
+        type=int,
+        default=8,
+        help="directory-level touches_dir_* predicates between the coverage floors",
+    )
     predicate_propose.add_argument("--max-owner-areas", type=int, default=6)
     predicate_propose.add_argument("--max-pairs", type=int, default=12)
     predicate_propose.add_argument("--min-hotspot-changes", type=int, default=3)

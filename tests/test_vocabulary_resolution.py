@@ -369,6 +369,14 @@ def test_proposer_instantiates_hotspots_owner_areas_pairs_and_assertions(
     hotspots = {row["path"]: row["change_count"] for row in proposal.hotspots}  # type: ignore[index]
     assert hotspots["web/locales/en.json"] == 10
     assert hotspots["pkg/registry.go"] == 9
+    directories = {row["directory"]: row for row in proposal.directories}  # type: ignore[index]
+    assert set(directories) >= {"pkg", "web"}
+    assert directories["pkg"]["commit_count"] == 9
+    assert all(0.02 <= row["coverage"] < 0.95 for row in directories.values())  # type: ignore[operator]
+    assert any(
+        item.predicate.startswith("touches_dir_") and item.include_paths == ("pkg/**",)
+        for item in proposal.pack_config.path_predicates
+    )
     assert len(proposal.owner_areas) == 2
     pairs = {(row["path"], row["partner"]): row for row in proposal.pairs}  # type: ignore[index]
     registry = pairs[("pkg/registry.go", "pkg/registry.json")]

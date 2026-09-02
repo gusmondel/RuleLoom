@@ -66,8 +66,10 @@ _MAX_SOURCE_BYTES = 1024 * 1024
 
 DISCOVERY_ENGINE_VERSION = "ruleloom-discovery/0.1"
 HOTSPOT_PREFIX = "touches_hotspot_"
+DIRECTORY_PREFIX = "touches_dir_"
 OWNER_AREA_PREFIX = "touches_owner_area_"
 PAIR_ENDPOINT_PREFIX = "touches_path_"
+_MAX_DIRECTORY_DEPTH = 3
 _SLUG_CHARS = re.compile(r"[^a-z0-9]+")
 _MAX_SLUG_CHARS = 24
 _MAX_OWNER_GLOBS = 32
@@ -80,7 +82,8 @@ class DiscoveryLimits:
     """Explicit, bounded selection thresholds for one proposal run."""
 
     max_commits: int = 2_000
-    max_hotspots: int = 8
+    max_hotspots: int = 6
+    max_directories: int = 8
     max_owner_areas: int = 6
     max_pairs: int = 12
     min_hotspot_changes: int = 3
@@ -90,11 +93,13 @@ class DiscoveryLimits:
     max_pairs_per_source: int = 2
     min_pair_violations: int = 2
     max_owner_area_coverage: float = 0.95
+    min_directory_coverage: float = 0.02
 
     def __post_init__(self) -> None:
         for name, value, maximum in (
             ("max_commits", self.max_commits, _MAX_COMMITS),
             ("max_hotspots", self.max_hotspots, _MAX_PROPOSALS),
+            ("max_directories", self.max_directories, _MAX_PROPOSALS),
             ("max_owner_areas", self.max_owner_areas, _MAX_PROPOSALS),
             ("max_pairs", self.max_pairs, _MAX_PROPOSALS),
             ("min_hotspot_changes", self.min_hotspot_changes, _MAX_COMMITS),
@@ -122,15 +127,23 @@ class DiscoveryLimits:
             or not 0 < self.max_owner_area_coverage <= 1
         ):
             raise ModelError("max_owner_area_coverage must be between 0 (exclusive) and 1")
-        if self.max_hotspots + self.max_owner_areas > MAX_PREDICATES:
+        if (
+            isinstance(self.min_directory_coverage, bool)
+            or not isinstance(self.min_directory_coverage, int | float)
+            or not 0 < self.min_directory_coverage <= 1
+        ):
+            raise ModelError("min_directory_coverage must be between 0 (exclusive) and 1")
+        if self.max_hotspots + self.max_directories + self.max_owner_areas > MAX_PREDICATES:
             raise ModelError(
-                f"max_hotspots plus max_owner_areas cannot exceed {MAX_PREDICATES} path predicates"
+                "max_hotspots plus max_directories plus max_owner_areas cannot exceed "
+                f"{MAX_PREDICATES} path predicates"
             )
 
     def to_dict(self) -> JsonObject:
         return {
             "max_commits": self.max_commits,
             "max_hotspots": self.max_hotspots,
+            "max_directories": self.max_directories,
             "max_owner_areas": self.max_owner_areas,
             "max_pairs": self.max_pairs,
             "min_hotspot_changes": self.min_hotspot_changes,
@@ -140,6 +153,7 @@ class DiscoveryLimits:
             "max_pairs_per_source": self.max_pairs_per_source,
             "min_pair_violations": self.min_pair_violations,
             "max_owner_area_coverage": self.max_owner_area_coverage,
+            "min_directory_coverage": self.min_directory_coverage,
         }
 
 
@@ -160,6 +174,7 @@ class DiscoveryProposal:
     owner_areas: tuple[JsonValue, ...]
     pairs: tuple[JsonValue, ...]
     warnings: tuple[str, ...]
+    directories: tuple[JsonValue, ...] = ()
     evidence_path: str | None = None
     evidence_document: str | None = None
     paths_only: bool = False
@@ -193,6 +208,7 @@ class DiscoveryProposal:
                 None if self.assertion_manifest is None else self.assertion_manifest.to_dict()
             ),
             "hotspots": list(self.hotspots),
+            "directories": list(self.directories),
             "owner_areas": list(self.owner_areas),
             "pairs": list(self.pairs),
             "evidence_path": self.evidence_path,
@@ -234,6 +250,15 @@ class DiscoveryProposal:
             lines.append(f"- {row['predicate']}: {row['path']} ({row['change_count']} changes)")
         if not self.hotspots:
             lines.append("- None met the change-count floor.")
+        lines.extend(("", f"Directory predicates ({len(self.directories)})"))
+        for row_value in self.directories:
+            row = cast(JsonObject, row_value)
+            lines.append(
+                f"- {row['predicate']}: {row['directory']}/ touched by {row['commit_count']} "
+                f"commits ({cast(float, row['coverage']):.0%})"
+            )
+        if not self.directories:
+            lines.append("- No directory sat between the coverage floors.")
         lines.extend(("", f"Owner-area predicates ({len(self.owner_areas)})"))
         for row_value in self.owner_areas:
             row = cast(JsonObject, row_value)
@@ -446,6 +471,54 @@ def propose_vocabulary(
         path_predicates[predicate] = PathPredicateConfig(predicate=predicate, include_paths=(glob,))
         predicate_by_path[path] = predicate
         hotspot_rows.append({"predicate": predicate, "path": path, "change_count": count})
+
+    directory_rows: list[JsonValue] = []
+    directory_touches: Counter[str] = Counter()
+    for paths in commit_paths:
+        prefixes: set[str] = set()
+        for path in paths:
+            parts = path.split("/")
+            for depth in range(1, min(_MAX_DIRECTORY_DEPTH, len(parts) - 1) + 1):
+                prefixes.add("/".join(parts[:depth]))
+        directory_touches.update(prefixes)
+    selected_directories: list[tuple[str, float]] = []
+    for directory, count in sorted(directory_touches.items(), key=lambda item: (-item[1], item[0])):
+        if len(selected_directories) >= selected.max_directories:
+            break
+        coverage = count / len(commit_paths) if commit_paths else 0.0
+        if coverage < selected.min_directory_coverage:
+            break
+        if coverage >= selected.max_owner_area_coverage:
+            continue
+        near_duplicate = any(
+            (
+                other == directory
+                or other.startswith(directory + "/")
+                or directory.startswith(other + "/")
+            )
+            and abs(other_coverage - coverage) < 0.1 * max(coverage, other_coverage)
+            for other, other_coverage in selected_directories
+        )
+        if near_duplicate:
+            continue
+        glob = _literal_glob(directory + "/**")
+        if glob is None:
+            continue
+        predicate = _predicate_name(
+            DIRECTORY_PREFIX, _slug(directory), _digest("directory", directory)
+        )
+        if predicate in path_predicates:
+            continue
+        path_predicates[predicate] = PathPredicateConfig(predicate=predicate, include_paths=(glob,))
+        selected_directories.append((directory, coverage))
+        directory_rows.append(
+            {
+                "predicate": predicate,
+                "directory": directory,
+                "commit_count": count,
+                "coverage": coverage,
+            }
+        )
 
     owner_rows: list[JsonValue] = []
     snapshots = _read_codeowners_batch(root, {resolved_ref})
@@ -703,6 +776,7 @@ def propose_vocabulary(
         pack_config=pack_config,
         assertion_manifest=manifest,
         hotspots=tuple(hotspot_rows),
+        directories=tuple(directory_rows),
         owner_areas=tuple(owner_rows),
         pairs=tuple(pair_rows),
         warnings=tuple(dict.fromkeys(warnings)),

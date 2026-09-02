@@ -473,12 +473,15 @@ ruleloom predicates propose . \
   --evidence-path docs/ruleloom/cochange-evidence.md
 ```
 
-It emits exact-path hotspot predicates, `CODEOWNERS` owner-area predicates
-(globs only; owner identities are hashed and never stored; a catch-all rule
-covering nearly every commit is skipped as uninformative), `missing_partner_*`
-predicates for strong directional co-change pairs that were actually violated
-at least twice, and an assertion manifest that translates each pair into
-`antecedent → expectation` form, including pairs that were never violated. At
+It emits exact-path hotspot predicates, directory-level `touches_dir_*`
+predicates for the most-touched directories whose coverage sits between 2% and
+95% of commits (the resolution level at which a clause can still gather
+support), `CODEOWNERS` owner-area predicates (globs only; owner identities are
+hashed and never stored; a catch-all rule covering nearly every commit is
+skipped as uninformative), `missing_partner_*` predicates for strong
+directional co-change pairs that were actually violated at least twice, and an
+assertion manifest that translates each pair into `antecedent → expectation`
+form, including pairs that were never violated. At
 most two pairs share one antecedent path, so a family of generated files cannot
 fill the draft. `--evidence-path` writes a reviewable Markdown document into
 the checkout that lists every drafted pair with its counts; each assertion cites
