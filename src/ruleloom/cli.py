@@ -1597,6 +1597,7 @@ def _cmd_predicates_propose(args: argparse.Namespace) -> int:
             min_pair_violations=args.min_pair_violations,
         ),
         evidence_path=args.evidence_path,
+        paths_only=args.paths_only,
     )
     outputs: dict[str, str] = {}
     if args.evidence_path is not None:
@@ -1860,6 +1861,14 @@ def build_parser() -> argparse.ArgumentParser:
             "repository-relative Markdown path (for example docs/ruleloom/cochange-evidence.md) "
             "written into the checkout and cited by every assertion draft; without it a draft "
             "cites its antecedent file and oversized antecedents are skipped"
+        ),
+    )
+    predicate_propose.add_argument(
+        "--paths-only",
+        action="store_true",
+        help=(
+            "read changed paths from trees without blobs so a blobless partial clone works; "
+            "churn is unavailable and no lazy fetch is triggered"
         ),
     )
     predicate_propose.add_argument(

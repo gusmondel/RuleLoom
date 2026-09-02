@@ -489,6 +489,9 @@ init --pack-config` in a fresh experiment and declare the assertions with
 `ruleloom assertions declare`. Proposal is deterministic and outcome-blind;
 activation is always a human decision. An LLM may still suggest concepts, but
 they enter through the same reviewed `pack_config`, never through the learner.
+On a blobless partial clone such as a `--filter=blob:none` observer, pass
+`--paths-only`: changed paths are read from trees alone, no lazy blob fetch is
+triggered, and churn is simply unavailable to the proposal.
 
 If an existing convention can already be expressed using the frozen predicate
 vocabulary, encode it explicitly rather than asking RuleLoom to parse prose.

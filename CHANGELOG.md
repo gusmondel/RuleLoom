@@ -41,7 +41,9 @@ always require a new explicit schema, adapter, pack, or experiment version.
   document that drafted assertions cite; `--max-pairs-per-source` and
   `--min-pair-violations` keep one file family from filling the draft and
   reserve `missing_partner_*` predicates for pairs that were actually violated.
-  Catch-all `CODEOWNERS` areas are skipped as uninformative.
+  Catch-all `CODEOWNERS` areas are skipped as uninformative. `--paths-only`
+  reads changed paths from trees so a blobless partial clone can be scanned
+  without any lazy blob fetch.
 
 ### Changed
 

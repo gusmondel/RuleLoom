@@ -265,6 +265,97 @@ def _collect_numstat_batch(
     return tuple(tuple(item) for item in results)
 
 
+def _collect_name_only_batch(
+    root: Path,
+    units: tuple[ChangeUnit, ...],
+    *,
+    max_path_entries: int | None = None,
+) -> tuple[tuple[_PathChange, ...], ...]:
+    """Collect changed paths only, which needs trees but no blobs (partial clones work)."""
+    _validate_batch_path_budget(max_path_entries)
+    payload = "".join(f"{unit.prediction_sha} {unit.base_sha}\n" for unit in units).encode()
+    try:
+        stdout, stderr, returncode = _run_git_capped(
+            root,
+            ("diff-tree", "--stdin", "--always", "-r", "--name-only", "-z", "--no-renames"),
+            input_bytes=payload,
+            allow_lazy_fetch=False,
+        )
+    except GitFactsError as exc:
+        raise FirstHourAuditError(str(exc)) from exc
+    if returncode != 0:
+        detail = stderr.decode("utf-8", errors="replace").strip() or "unknown Git error"
+        raise FirstHourAuditError(f"git diff-tree --stdin --name-only failed: {detail}")
+    results: list[list[_PathChange]] = []
+    current_index = -1
+    parsed_path_entries = 0
+    for token in _nul_records(stdout):
+        next_boundary = (
+            units[current_index + 1].prediction_sha.encode("ascii")
+            if current_index + 1 < len(units)
+            else None
+        )
+        if token == next_boundary:
+            current_index += 1
+            results.append([])
+            continue
+        if current_index < 0:
+            raise FirstHourAuditError("Git returned path evidence before its range boundary")
+        if max_path_entries is not None and parsed_path_entries >= max_path_entries:
+            raise FirstHourAuditError(
+                "repository audit exceeds max_total_path_entries while parsing a Git path batch"
+            )
+        try:
+            path = token.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise FirstHourAuditError(
+                f"Git returned a non-UTF-8 path while auditing commit "
+                f"{units[current_index].prediction_sha}; lossy decoding is refused"
+            ) from exc
+        if not path:
+            raise FirstHourAuditError("Git returned an empty changed path")
+        results[current_index].append(_PathChange(path, 0, 0, False))
+        parsed_path_entries += 1
+    if len(results) != len(units):
+        raise FirstHourAuditError("Git returned an incomplete path batch")
+    return tuple(tuple(item) for item in results)
+
+
+def _collect_name_only_single(
+    root: Path,
+    unit: ChangeUnit,
+    *,
+    max_path_entries: int | None = None,
+) -> tuple[_PathChange, ...]:
+    _validate_batch_path_budget(max_path_entries)
+    try:
+        stdout, stderr, returncode = _run_git_capped(
+            root,
+            ("diff", "--name-only", "-z", "--no-renames", unit.base_sha, unit.prediction_sha, "--"),
+            allow_lazy_fetch=False,
+        )
+    except GitFactsError as exc:
+        raise FirstHourAuditError(str(exc)) from exc
+    if returncode != 0:
+        detail = stderr.decode("utf-8", errors="replace").strip() or "unknown Git error"
+        raise FirstHourAuditError(f"git diff --name-only failed: {detail}")
+    changes: list[_PathChange] = []
+    for parsed_path_entries, record in enumerate(_nul_records(stdout)):
+        if max_path_entries is not None and parsed_path_entries >= max_path_entries:
+            raise FirstHourAuditError(
+                "repository audit exceeds max_total_path_entries while parsing a root diff"
+            )
+        try:
+            path = record.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise FirstHourAuditError(
+                f"Git returned a non-UTF-8 path while auditing commit {unit.prediction_sha}; "
+                "lossy decoding is refused"
+            ) from exc
+        changes.append(_PathChange(path, 0, 0, False))
+    return tuple(changes)
+
+
 def _collect_numstat_single(
     root: Path,
     unit: ChangeUnit,
@@ -314,6 +405,7 @@ def _collect_diffs(
     *,
     ref: str,
     limits: RepositoryAuditLimits,
+    paths_only: bool = False,
 ) -> tuple[
     tuple[_CommitDiff, ...],
     JsonObject,
@@ -369,9 +461,11 @@ def _collect_diffs(
         parsed_path_entries += batch_path_entries
         diffs_by_prediction.update((item.commit, item) for item in prepared)
 
+    collect_batch = _collect_name_only_batch if paths_only else _collect_numstat_batch
+    collect_single = _collect_name_only_single if paths_only else _collect_numstat_single
     for offset in range(0, len(ordinary_units), limits.diff_batch_size):
         batch_units = ordinary_units[offset : offset + limits.diff_batch_size]
-        batch_changes = _collect_numstat_batch(
+        batch_changes = collect_batch(
             root,
             batch_units,
             max_path_entries=limits.max_total_path_entries - parsed_path_entries,
@@ -383,7 +477,7 @@ def _collect_diffs(
             retain_batch(
                 (unit,),
                 (
-                    _collect_numstat_single(
+                    collect_single(
                         root,
                         unit,
                         max_path_entries=(limits.max_total_path_entries - parsed_path_entries),
@@ -403,6 +497,7 @@ def _collect_diffs(
         "truncated": history.truncated,
         "selection": "reachable_commits_date_order",
         "git_history_manifest_hash": history.manifest_hash,
+        "paths_only": paths_only,
     }
     # ChangeUnit does not expose a root marker, but its first commit compares
     # against Git's empty-tree object rather than a parent. Recompute roots from
@@ -420,14 +515,19 @@ def collect_commit_diffs(
     *,
     ref: str = "HEAD",
     limits: RepositoryAuditLimits | None = None,
+    paths_only: bool = False,
 ) -> tuple[tuple[_CommitDiff, ...], JsonObject, str, tuple[str, ...]]:
     """Public, read-only access to bounded per-commit path churn for other auditors.
 
     Returns the commit diffs (oldest first), the topology summary, the repository
     identity, and collection warnings. It never reads outcomes or file contents.
+    ``paths_only`` reads changed paths from trees alone, so a blobless partial
+    clone works and no lazy blob fetch is ever triggered; churn is reported as 0.
     """
 
-    return _collect_diffs(root, ref=ref, limits=limits or RepositoryAuditLimits())
+    return _collect_diffs(
+        root, ref=ref, limits=limits or RepositoryAuditLimits(), paths_only=paths_only
+    )
 
 
 def _nearest_rank(values: list[int], probability: float) -> int | None:

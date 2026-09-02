@@ -162,6 +162,7 @@ class DiscoveryProposal:
     warnings: tuple[str, ...]
     evidence_path: str | None = None
     evidence_document: str | None = None
+    paths_only: bool = False
     engine_version: str = DISCOVERY_ENGINE_VERSION
 
     @property
@@ -185,6 +186,7 @@ class DiscoveryProposal:
             "commit_count": self.commit_count,
             "excluded_after_until": self.excluded_after_until,
             "limits": self.limits.to_dict(),
+            "paths_only": self.paths_only,
             "pack": {"name": "generic_changes", "version": 3},
             "pack_config": self.pack_config.to_dict(),
             "assertion_manifest": (
@@ -368,6 +370,7 @@ def propose_vocabulary(
     until: str | None = None,
     limits: DiscoveryLimits | None = None,
     evidence_path: str | None = None,
+    paths_only: bool = False,
 ) -> DiscoveryProposal:
     """Propose instantiated predicates and assertion drafts from Git structure only.
 
@@ -390,10 +393,16 @@ def propose_vocabulary(
                 max_commits=selected.max_commits,
                 max_cochange_paths_per_commit=selected.max_cochange_paths_per_commit,
             ),
+            paths_only=paths_only,
         )
     except FirstHourAuditError as exc:
         raise ModelError(str(exc)) from exc
     warnings = list(history_warnings)
+    if paths_only:
+        warnings.append(
+            "paths-only scan: changed paths were read from trees without blobs, so churn "
+            "is unavailable; hotspots, owner areas, and pairs use path counts only"
+        )
     if boundary is not None:
         eligible = tuple(item for item in diffs if parse_timestamp(item.committed_at) < boundary)
     else:
@@ -699,6 +708,7 @@ def propose_vocabulary(
         warnings=tuple(dict.fromkeys(warnings)),
         evidence_path=evidence_path if evidence_document is not None else None,
         evidence_document=evidence_document,
+        paths_only=paths_only,
     )
 
 

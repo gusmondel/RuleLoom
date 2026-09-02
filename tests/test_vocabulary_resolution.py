@@ -471,6 +471,50 @@ def test_proposer_drops_drafts_whose_antecedent_exceeds_the_source_limit(tmp_pat
     assert kept and kept[0]["assertion_id"] is not None  # type: ignore[index]
 
 
+def test_paths_only_proposals_work_on_a_blobless_partial_clone(
+    structured_repo: Path, tmp_path: Path
+) -> None:
+    observer = tmp_path / "blobless"
+    subprocess.run(
+        [
+            "git",
+            "clone",
+            "--quiet",
+            "--filter=blob:none",
+            "--no-checkout",
+            f"file://{structured_repo}",
+            str(observer),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    limits = DiscoveryLimits(min_pair_support=5, min_pair_confidence=0.7, min_hotspot_changes=3)
+
+    # A file:// promisor remote can lazily fetch blobs, so only the paths-only mode is
+    # asserted here; against a remote host the numstat scan would fail closed instead.
+    proposal = propose_vocabulary(observer, limits=limits, paths_only=True)
+    full = propose_vocabulary(structured_repo, limits=limits)
+
+    assert proposal.paths_only is True
+    assert proposal.to_dict()["paths_only"] is True
+    assert any("paths-only scan" in warning for warning in proposal.warnings)
+    assert {row["path"] for row in proposal.hotspots} == {row["path"] for row in full.hotspots}  # type: ignore[index]
+    assert proposal.pack_config.partner_predicates == full.pack_config.partner_predicates
+    assert (
+        cli.main(
+            [
+                "predicates",
+                "propose",
+                str(observer),
+                "--paths-only",
+                "--pack-config-output",
+                str(tmp_path / "blobless-pack-config.json"),
+            ]
+        )
+        == 0
+    )
+
+
 def test_cli_proposes_initializes_collects_and_declares_the_reviewed_vocabulary(
     structured_repo: Path,
     tmp_path: Path,
