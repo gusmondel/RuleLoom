@@ -512,49 +512,77 @@ def propose_vocabulary(
 
     pair_rows: list[JsonValue] = []
     partner_predicates: dict[str, PartnerPredicateConfig] = {}
-    directional: list[tuple[float, int, str, str]] = []
+    directional: list[tuple[str, str, int, int, float]] = []
     for (left, right), count in pairs.items():
         if count < selected.min_pair_support:
             continue
         for source, target in ((left, right), (right, left)):
-            confidence = count / touches[source] if touches[source] else 0.0
+            total = touches[source]
+            confidence = count / total if total else 0.0
             if confidence >= selected.min_pair_confidence:
-                directional.append((confidence, count, source, target))
-    directional.sort(key=lambda item: (-item[0], -item[1], item[2], item[3]))
-    assertions: list[RepositoryAssertion] = []
-    evidence_rows: list[tuple[str, str, str, int, int, float]] = []
-    pending_sources: list[tuple[int, str]] = []
-    per_source: Counter[str] = Counter()
-    for confidence, count, source, target in directional:
-        if len(pair_rows) >= selected.max_pairs:
+                directional.append((source, target, count, total, confidence))
+    # Predicates need pairs that were actually violated; assertions prefer the
+    # strictest contracts. Each family is selected separately under the same caps.
+    predicate_candidates = sorted(
+        (item for item in directional if item[3] - item[2] >= selected.min_pair_violations),
+        key=lambda item: (-item[2], -item[4], item[0], item[1]),
+    )
+    assertion_candidates = sorted(
+        directional, key=lambda item: (-item[4], -item[2], item[0], item[1])
+    )
+    rows_by_pair: dict[tuple[str, str], JsonObject] = {}
+
+    def row_for(source: str, target: str, count: int, total: int, confidence: float) -> JsonObject:
+        row = rows_by_pair.get((source, target))
+        if row is None:
+            row = {
+                "predicate": None,
+                "path": source,
+                "partner": target,
+                "support": count,
+                "total": total,
+                "violations": total - count,
+                "confidence": confidence,
+                "assertion_id": None,
+            }
+            rows_by_pair[(source, target)] = row
+            pair_rows.append(row)
+        return row
+
+    predicate_sources: Counter[str] = Counter()
+    for source, target, count, total, confidence in predicate_candidates:
+        if len(partner_predicates) >= selected.max_pairs:
             break
-        if per_source[source] >= selected.max_pairs_per_source:
+        if predicate_sources[source] >= selected.max_pairs_per_source:
             continue
         source_glob = _literal_glob(source)
         target_glob = _literal_glob(target)
         if source_glob is None or target_glob is None:
             continue
         digest = _digest("pair", source, target)
-        violations = touches[source] - count
-        partner_predicate: str | None = None
-        if violations >= selected.min_pair_violations:
-            partner_predicate = _predicate_name(MISSING_PARTNER_PREFIX, _slug(source), digest)
-            if partner_predicate in partner_predicates:
-                continue
-            partner_predicates[partner_predicate] = PartnerPredicateConfig(
-                predicate=partner_predicate, path=source_glob, partner=target_glob
-            )
-        per_source[source] += 1
-        row: JsonObject = {
-            "predicate": partner_predicate,
-            "path": source,
-            "partner": target,
-            "support": count,
-            "total": touches[source],
-            "violations": violations,
-            "confidence": confidence,
-            "assertion_id": None,
-        }
+        partner_predicate = _predicate_name(MISSING_PARTNER_PREFIX, _slug(source), digest)
+        if partner_predicate in partner_predicates:
+            continue
+        partner_predicates[partner_predicate] = PartnerPredicateConfig(
+            predicate=partner_predicate, path=source_glob, partner=target_glob
+        )
+        predicate_sources[source] += 1
+        row_for(source, target, count, total, confidence)["predicate"] = partner_predicate
+
+    assertions: list[RepositoryAssertion] = []
+    evidence_rows: list[tuple[str, str, str, int, int, float]] = []
+    pending_sources: list[tuple[int, str]] = []
+    assertion_sources: Counter[str] = Counter()
+    for source, target, count, total, confidence in assertion_candidates:
+        if len(assertions) >= selected.max_pairs:
+            break
+        if assertion_sources[source] >= selected.max_pairs_per_source:
+            continue
+        source_glob = _literal_glob(source)
+        target_glob = _literal_glob(target)
+        if source_glob is None or target_glob is None:
+            continue
+        digest = _digest("pair", source, target)
         endpoints: list[str] = []
         for path, glob in ((source, source_glob), (target, target_glob)):
             existing = predicate_by_path.get(path)
@@ -567,31 +595,39 @@ def propose_vocabulary(
                 predicate_by_path[path] = existing
             if existing is not None:
                 endpoints.append(existing)
-        if len(endpoints) == 2:
-            assertion_id = f"cochange_{_slug(source)}_{digest[:8]}"
-            assertions.append(
-                RepositoryAssertion(
-                    assertion_id=assertion_id,
-                    revision=1,
-                    summary=(
-                        f"Changes to {source} co-changed with {target} in {confidence:.0%} of "
-                        f"{touches[source]} historical changes (support {count}); review "
-                        "whether the partner must be updated too."
-                    ),
-                    antecedent=(RuleLiteral(endpoints[0]),),
-                    expectation=(RuleLiteral(endpoints[1]),),
-                    sources=(RepositoryAssertionSourceRef(path=source, start_line=1, end_line=1),),
-                )
-            )
-            evidence_rows.append((assertion_id, source, target, count, touches[source], confidence))
-            pending_sources.append((len(assertions) - 1, source))
-            row["assertion_id"] = assertion_id
-        else:
+        row = row_for(source, target, count, total, confidence)
+        if len(endpoints) != 2:
             warnings.append(
                 f"{source} -> {target}: endpoint path predicates did not fit the "
                 f"{MAX_PREDICATES}-predicate cap, so no assertion draft was emitted"
             )
-        pair_rows.append(row)
+            continue
+        assertion_sources[source] += 1
+        assertion_id = f"cochange_{_slug(source)}_{digest[:8]}"
+        assertions.append(
+            RepositoryAssertion(
+                assertion_id=assertion_id,
+                revision=1,
+                summary=(
+                    f"Changes to {source} co-changed with {target} in {confidence:.0%} of "
+                    f"{total} historical changes (support {count}); review whether the "
+                    "partner must be updated too."
+                ),
+                antecedent=(RuleLiteral(endpoints[0]),),
+                expectation=(RuleLiteral(endpoints[1]),),
+                sources=(RepositoryAssertionSourceRef(path=source, start_line=1, end_line=1),),
+            )
+        )
+        evidence_rows.append((assertion_id, source, target, count, total, confidence))
+        pending_sources.append((len(assertions) - 1, source))
+        row["assertion_id"] = assertion_id
+    pair_rows.sort(
+        key=lambda item: (
+            -cast(int, cast(JsonObject, item)["support"]),
+            str(cast(JsonObject, item)["path"]),
+            str(cast(JsonObject, item)["partner"]),
+        )
+    )
 
     evidence_document: str | None = None
     if assertions and evidence_path is not None:
