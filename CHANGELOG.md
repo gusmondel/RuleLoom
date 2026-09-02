@@ -59,6 +59,10 @@ always require a new explicit schema, adapter, pack, or experiment version.
   skips such commits for owner-area counting with a warning and
   `history materialize` skips the unit with reason `matcher_budget_exceeded`
   instead of aborting.
+- Observation and prediction logs may grow to 256 MiB; the 250,000-record and
+  1 MiB-per-line caps are unchanged. An 8,000-commit Grafana cohort produced a
+  70 MiB observation log and hit the previous 64 MiB cap only after a full
+  materialization.
 - `predicates propose --evidence-path` writes a reviewable co-change evidence
   document that drafted assertions cite; `--max-pairs-per-source` and
   `--min-pair-violations` keep one file family from filling the draft and

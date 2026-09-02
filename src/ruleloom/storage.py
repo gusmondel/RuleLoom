@@ -33,7 +33,7 @@ from ruleloom.packs import validate_policy_pack_contract
 from ruleloom.signal_probe import SignalProbeReport
 
 _MAX_JSON_BYTES = 8 * 1024 * 1024
-_MAX_JSONL_BYTES = 64 * 1024 * 1024
+_MAX_JSONL_BYTES = 256 * 1024 * 1024
 _MAX_JSONL_RECORDS = 250_000
 _MAX_PREDICTION_RECORDS = 10_000
 _MAX_JSONL_LINE_BYTES = 1024 * 1024
