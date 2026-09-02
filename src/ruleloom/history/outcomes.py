@@ -25,6 +25,14 @@ may emit the following semantic event taxonomy:
     strong evidence.  ``link_kind=heuristic`` and the Git-native
     ``link_kind=git_trailer`` (a ``This reverts commit`` trailer found by
     ``history bootstrap-git``) are opt-in weak votes.
+``rework``
+    Emitted by ``history scan-rework`` when a later commit deleted lines that
+    an earlier commit added in the same file, matched by normalized line
+    content (``link_kind=git_line_content``).  It is an opt-in weak positive
+    for ``post_merge_rework`` once the registered ``rework_min_lines`` and
+    same-author policy are applied.  A ``git_rework_scan`` event records how
+    far the scan reached and which commits it skipped, so a window negative is
+    only derived where the scan was complete.
 ``git_history_horizon``
     Emitted once per Git bootstrap with the newest committer timestamp of the
     complete reachable prefix.  When an experiment registers
@@ -66,6 +74,7 @@ INDEPENDENT_REVIEW_CHANGES_REQUESTED = "independent_review_changes_requested"
 CHANGE_ATTRIBUTABLE_CI_FAILURE = "change_attributable_ci_failure"
 POST_MERGE_REVERT_OR_HOTFIX = "post_merge_revert_or_hotfix"
 POST_MERGE_DEFECT = "post_merge_defect"
+POST_MERGE_REWORK = "post_merge_rework"
 
 ATOMIC_OUTCOME_TARGETS = (
     VALIDATION_REWORK_REQUIRED,
@@ -73,6 +82,7 @@ ATOMIC_OUTCOME_TARGETS = (
     CHANGE_ATTRIBUTABLE_CI_FAILURE,
     POST_MERGE_REVERT_OR_HOTFIX,
     POST_MERGE_DEFECT,
+    POST_MERGE_REWORK,
 )
 
 VoteValue = Literal["positive", "negative", "abstain"]
@@ -80,7 +90,10 @@ VoteStrength = Literal["strong", "weak"]
 
 GIT_TRAILER_LINK_KIND = "git_trailer"
 GIT_HISTORY_HORIZON_EVENT_KIND = "git_history_horizon"
+GIT_LINE_CONTENT_LINK_KIND = "git_line_content"
+GIT_REWORK_SCAN_EVENT_KIND = "git_rework_scan"
 MAX_GIT_WINDOW_DAYS = 3650
+MAX_REWORK_SKIPPED_SHAS = 10_000
 
 _VOTE_VALUES = frozenset({"positive", "negative", "abstain"})
 _VOTE_STRENGTHS = frozenset({"strong", "weak"})
@@ -147,6 +160,94 @@ def git_window_from_events(
         window_days=window_days,
         horizon_at=selected[0],
         horizon_event_id=selected[1],
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class ReworkWindow:
+    """A registered rework window plus the scan record proving its coverage."""
+
+    window_days: int
+    min_lines: int
+    ignore_same_author: bool
+    scanned_until: str
+    scan_event_id: str
+    skipped_shas: frozenset[str] = frozenset()
+
+    def __post_init__(self) -> None:
+        if (
+            isinstance(self.window_days, bool)
+            or not isinstance(self.window_days, int)
+            or not 1 <= self.window_days <= MAX_GIT_WINDOW_DAYS
+        ):
+            raise ModelError(f"rework window_days must be between 1 and {MAX_GIT_WINDOW_DAYS}")
+        if (
+            isinstance(self.min_lines, bool)
+            or not isinstance(self.min_lines, int)
+            or self.min_lines < 1
+        ):
+            raise ModelError("rework min_lines must be an integer >= 1")
+        if not isinstance(self.ignore_same_author, bool):
+            raise ModelError("rework ignore_same_author must be a boolean")
+        validate_timestamp(self.scanned_until)
+        validate_subject(self.scan_event_id)
+        if len(self.skipped_shas) > MAX_REWORK_SKIPPED_SHAS:
+            raise ModelError("rework scan skipped too many commits to support window negatives")
+
+    def to_dict(self) -> JsonObject:
+        return {
+            "window_days": self.window_days,
+            "min_lines": self.min_lines,
+            "ignore_same_author": self.ignore_same_author,
+            "scanned_until": self.scanned_until,
+            "scan_event_id": self.scan_event_id,
+            "skipped_commits": len(self.skipped_shas),
+            "semantics": "weak_negative_when_no_rework_vote_before_window_close",
+        }
+
+
+def rework_window_from_events(
+    events: Iterable[HistoricalEvent],
+    *,
+    window_days: int | None,
+    min_lines: int,
+    ignore_same_author: bool,
+    repository_id: str,
+) -> ReworkWindow | None:
+    """Resolve the newest persisted rework scan for a registered window."""
+    if window_days is None:
+        return None
+    best: tuple[object, ...] | None = None
+    selected: HistoricalEvent | None = None
+    for event in events:
+        if event.kind != GIT_REWORK_SCAN_EVENT_KIND or event.repository_id != repository_id:
+            continue
+        raw_until = event.data.get("scanned_until")
+        if not isinstance(raw_until, str):
+            continue
+        try:
+            scanned_until = parse_timestamp(raw_until)
+        except ValueError:
+            continue
+        key = (scanned_until, event.id)
+        if best is None or key > best:
+            best = key
+            selected = event
+    if selected is None:
+        return None
+    raw_skipped = selected.data.get("skipped_shas", [])
+    skipped = (
+        frozenset(item for item in raw_skipped if isinstance(item, str))
+        if isinstance(raw_skipped, list)
+        else frozenset()
+    )
+    return ReworkWindow(
+        window_days=window_days,
+        min_lines=min_lines,
+        ignore_same_author=ignore_same_author,
+        scanned_until=cast(str, selected.data["scanned_until"]),
+        scan_event_id=selected.id,
+        skipped_shas=skipped,
     )
 
 
@@ -585,6 +686,76 @@ def _git_window_negative_vote(
     )
 
 
+def _rework_votes(
+    change_unit: ChangeUnit,
+    events: Sequence[HistoricalEvent],
+    *,
+    min_lines: int = 1,
+    ignore_same_author: bool = False,
+) -> tuple[OutcomeVote, ...]:
+    """Weak positive votes from later commits that deleted lines this change added."""
+    votes: list[OutcomeVote] = []
+    for event in _landed_events(change_unit, events):
+        if event.kind != "rework" or not _is_linked(event, change_unit, GIT_LINE_CONTENT_LINK_KIND):
+            continue
+        if event.data.get("evidence_grade") != "weak_heuristic":
+            continue
+        raw_lines = event.data.get("reworked_lines")
+        if isinstance(raw_lines, bool) or not isinstance(raw_lines, int) or raw_lines < min_lines:
+            continue
+        if ignore_same_author and event.data.get("same_author") is True:
+            continue
+        confidence = _event_confidence(event, default=0.5, maximum=0.7)
+        if confidence is None:
+            continue
+        votes.append(
+            OutcomeVote(
+                value="positive",
+                strength="weak",
+                target=POST_MERGE_REWORK,
+                available_at=event.available_at,
+                source_kind=event.kind,
+                event_ids=(event.id,),
+                independent_group=event.independent_group,
+                confidence=confidence,
+                reason=(
+                    f"a later commit deleted {raw_lines} line(s) this change added within the "
+                    "registered window, matched by normalized line content"
+                ),
+            )
+        )
+    return tuple(votes)
+
+
+def _rework_window_negative_vote(
+    change_unit: ChangeUnit,
+    rework_window: ReworkWindow,
+) -> OutcomeVote | None:
+    if not _is_git_landed_unit(change_unit) or change_unit.kind != "git_commit":
+        return None
+    if change_unit.prediction_sha in rework_window.skipped_shas:
+        return None
+    prediction_at = parse_timestamp(change_unit.prediction_at)
+    window_closes_at = prediction_at + timedelta(days=rework_window.window_days)
+    if window_closes_at > parse_timestamp(rework_window.scanned_until):
+        return None
+    available_at = window_closes_at.isoformat().replace("+00:00", "Z")
+    return OutcomeVote(
+        value="negative",
+        strength="weak",
+        target=POST_MERGE_REWORK,
+        available_at=available_at,
+        source_kind=GIT_REWORK_SCAN_EVENT_KIND,
+        event_ids=(rework_window.scan_event_id,),
+        independent_group=f"git_rework_window.{change_unit.id}",
+        confidence=0.5,
+        reason=(
+            f"no later commit deleted at least {rework_window.min_lines} line(s) this change "
+            f"added within {rework_window.window_days} days of scanned history"
+        ),
+    )
+
+
 def _revert_or_hotfix_votes(
     change_unit: ChangeUnit,
     events: Sequence[HistoricalEvent],
@@ -691,6 +862,7 @@ _LABELING_FUNCTIONS: dict[str, _LabelingFunction] = {
     CHANGE_ATTRIBUTABLE_CI_FAILURE: _ci_failure_votes,
     POST_MERGE_REVERT_OR_HOTFIX: _revert_or_hotfix_votes,
     POST_MERGE_DEFECT: _post_merge_defect_votes,
+    POST_MERGE_REWORK: _rework_votes,
 }
 
 
@@ -702,7 +874,9 @@ def _label_evidence_kind(votes: Sequence[OutcomeVote]) -> str:
         "incident": "incident",
         "change_snapshot": "imported",
         "change_finalized": "imported",
+        "rework": "incident",
         GIT_HISTORY_HORIZON_EVENT_KIND: "imported",
+        GIT_REWORK_SCAN_EVENT_KIND: "imported",
     }
     kinds = {mappings.get(vote.source_kind, "imported") for vote in votes}
     return kinds.pop() if len(kinds) == 1 else "imported"
@@ -788,21 +962,34 @@ def derive_outcome(
     *,
     include_weak: bool = False,
     git_window: GitWindow | None = None,
+    rework_window: ReworkWindow | None = None,
 ) -> OutcomeDerivation:
     """Derive one atomic outcome from events attached to a change unit.
 
     ``git_window`` adds the opt-in weak negative for Git-landed units whose
     registered revert window closed before the persisted history horizon and
-    that attracted no revert vote of any strength.
+    that attracted no revert vote of any strength. ``rework_window`` does the
+    same for ``post_merge_rework`` against the persisted rework scan, and also
+    supplies the registered minimum line count and same-author policy for the
+    positive votes.
     """
     try:
         labeling_function = _LABELING_FUNCTIONS[target]
     except KeyError as exc:
         raise ModelError(f"unsupported historical outcome target: {target!r}") from exc
     scoped = _scoped_events(change_unit, events)
-    votes = _explicit_outcome_votes(change_unit, target, scoped) + labeling_function(
-        change_unit, scoped
-    )
+    if target == POST_MERGE_REWORK:
+        derived = _rework_votes(
+            change_unit,
+            scoped,
+            min_lines=1 if rework_window is None else rework_window.min_lines,
+            ignore_same_author=(
+                False if rework_window is None else rework_window.ignore_same_author
+            ),
+        )
+    else:
+        derived = labeling_function(change_unit, scoped)
+    votes = _explicit_outcome_votes(change_unit, target, scoped) + derived
     if (
         target == POST_MERGE_REVERT_OR_HOTFIX
         and git_window is not None
@@ -811,6 +998,14 @@ def derive_outcome(
         window_vote = _git_window_negative_vote(change_unit, git_window)
         if window_vote is not None:
             votes = (*votes, window_vote)
+    if (
+        target == POST_MERGE_REWORK
+        and rework_window is not None
+        and not any(vote.value == "positive" for vote in votes)
+    ):
+        rework_vote = _rework_window_negative_vote(change_unit, rework_window)
+        if rework_vote is not None:
+            votes = (*votes, rework_vote)
     return aggregate_votes(target, votes, include_weak=include_weak)
 
 
@@ -821,6 +1016,7 @@ def derive_outcomes(
     targets: Iterable[str] = ATOMIC_OUTCOME_TARGETS,
     include_weak: bool = False,
     git_window: GitWindow | None = None,
+    rework_window: ReworkWindow | None = None,
 ) -> dict[str, OutcomeDerivation]:
     """Derive multiple atomic targets without exhausting a one-shot event stream."""
     materialized_events = tuple(events)
@@ -834,6 +1030,7 @@ def derive_outcomes(
             target,
             include_weak=include_weak,
             git_window=git_window,
+            rework_window=rework_window,
         )
         for target in requested_targets
     }

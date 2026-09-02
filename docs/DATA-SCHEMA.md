@@ -418,7 +418,11 @@ true only when a visible path matches `path` and no visible path matches
 search controls equal the Horn 0.5 defaults reproduces Horn 0.5 candidates.
 
 `outcomes.git_window_days` (`null` or 1–3650) registers the revert window used
-by the Git-native weak negative described under labels. `max_predicates` may
+by the Git-native weak negative described under labels.
+`outcomes.rework_window_days` (`null` or 1–3650), `rework_min_lines` (default
+3), and `rework_ignore_same_author` (default `true`) register the
+`post_merge_rework` outcome; the last two are serialized only when a rework
+window is registered, so configurations without one keep their hashes. `max_predicates` may
 reach 256 only with `search_strategy: beam`; the exhaustive strategy keeps the
 32-predicate cap and the combined hypothesis budget now also counts
 `permutation_runs`.
@@ -632,13 +636,20 @@ and sufficient event evidence are present.
 
 Supported semantic event kinds are `change_opened`, `change_snapshot`,
 `change_merged`, `change_closed`, `change_finalized`, `review`, `ci_run`,
-`revert`, and `incident`. Git ingestion additionally emits `git_commit` and
+`revert`, and `incident`. Git ingestion excludes the grafted
+boundary commits of a shallow clone (reported as `shallow_boundary_commits`),
+since Git presents their whole tree as the diff. It additionally emits `git_commit` and
 `git_merge` metadata events, weak `revert` events with `link_kind: git_trailer`
 for exact `This reverts commit <sha>` trailers (`event.git_revert.<reverting
 sha>.<reverted sha>`, linked to the reverted change), and one
 `git_history_horizon` event per bootstrap whose `data.horizon_at` is the newest
 committer timestamp of the retained prefix (`change_id: null`; identity derived
-from repository, resolved ref, and horizon). A point-in-time snapshot carries `base_sha`,
+from repository, resolved ref, and horizon). `history scan-rework` emits weak
+`rework` events with `link_kind: git_line_content`
+(`event.git_rework.<later sha>.<earlier sha>`, linked to the earlier change,
+carrying `reworked_lines`, bounded `files`, `same_author`, and `days_after`) and
+one `git_rework_scan` event whose `data.scanned_until` and `skipped_shas`
+bound the window negative. A point-in-time snapshot carries `base_sha`,
 `head_sha`/`prediction_sha`, and `point_in_time: true`. A structural final event
 carries `final_sha`/`merge_sha`/`head_sha`; an explicit matured
 `change_finalized` outcome instead carries `target`, `value`, and
@@ -694,13 +705,14 @@ is assembled. Streaming exporters should import early structural events with
 `--no-assemble`, then assemble once; the current schema does not mutate an open
 unit into finalized or upgrade `final_only` into `rich`.
 
-Five outcome targets remain separate:
+Six outcome targets remain separate:
 
 - `validation_rework_required`;
 - `independent_review_changes_requested`;
 - `change_attributable_ci_failure`;
-- `post_merge_revert_or_hotfix`; and
-- `post_merge_defect`.
+- `post_merge_revert_or_hotfix`;
+- `post_merge_defect`; and
+- `post_merge_rework`.
 
 The selected atomic outcome is registered through the frozen config `target`
 (the legacy `needs_extra_validation` target maps only to
@@ -770,6 +782,15 @@ It requires `--include-weak`, records `historical_git_window` in the
 observation, is recomputed by `ruleloom validate`, and never makes a unit
 confirmatory. Hotfixes without a revert and reverts unreachable from the
 bootstrapped ref remain invisible to it.
+
+`post_merge_rework` follows the same pattern with denser evidence. A
+`git_commit` unit receives a weak positive from each `rework` event whose
+`reworked_lines` reaches the registered `rework_min_lines` and whose author
+policy passes, and a weak negative when `prediction_at + rework_window_days`
+lies at or before the newest persisted `git_rework_scan` horizon, no rework
+vote exists, and the commit is not among the scan's skipped commits. The
+observation records `historical_rework_window`. Rework is a structural
+"did not stick" proxy matched by line content, never a defect label.
 
 The materialization report additionally derives the outcome before Git-object
 filtering and records `retention_by_outcome` for positive, negative, and unknown

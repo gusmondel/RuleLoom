@@ -91,11 +91,15 @@ def _require_fields(value: dict[str, object], required: set[str], name: str) -> 
 SEARCH_STRATEGIES = ("exhaustive", "beam")
 PREDICATE_RANKINGS = ("rate_gap", "logistic_weight")
 PRECISION_ESTIMATES = ("point", "wilson_lower")
+BEAM_RANKINGS = ("laplace", "wracc")
+UTILITY_COST_BASES = ("absolute", "prior_odds")
 _MAX_EXHAUSTIVE_PREDICATES = 32
 _MAX_BEAM_PREDICATES = 256
 _LEGACY_SEARCH_CONTROLS: dict[str, object] = {
     "search_strategy": "exhaustive",
     "beam_width": 20,
+    "beam_ranking": "laplace",
+    "utility_cost_basis": "absolute",
     "predicate_ranking": "rate_gap",
     "precision_estimate": "point",
     "require_temporal_consistency": False,
@@ -125,6 +129,8 @@ class LearnerConfig:
     near_miss_limit: int = 10
     search_strategy: str = "exhaustive"
     beam_width: int = 20
+    beam_ranking: str = "laplace"
+    utility_cost_basis: str = "absolute"
     predicate_ranking: str = "rate_gap"
     precision_estimate: str = "point"
     require_temporal_consistency: bool = False
@@ -168,6 +174,12 @@ class LearnerConfig:
         if self.precision_estimate not in PRECISION_ESTIMATES:
             raise ModelError(
                 "learner.precision_estimate must be one of: " + ", ".join(PRECISION_ESTIMATES)
+            )
+        if self.beam_ranking not in BEAM_RANKINGS:
+            raise ModelError("learner.beam_ranking must be one of: " + ", ".join(BEAM_RANKINGS))
+        if self.utility_cost_basis not in UTILITY_COST_BASES:
+            raise ModelError(
+                "learner.utility_cost_basis must be one of: " + ", ".join(UTILITY_COST_BASES)
             )
         if not isinstance(self.require_temporal_consistency, bool):
             raise ModelError("learner.require_temporal_consistency must be a boolean")
@@ -247,6 +259,8 @@ class LearnerConfig:
         return {
             "search_strategy": self.search_strategy,
             "beam_width": self.beam_width,
+            "beam_ranking": self.beam_ranking,
+            "utility_cost_basis": self.utility_cost_basis,
             "predicate_ranking": self.predicate_ranking,
             "precision_estimate": self.precision_estimate,
             "require_temporal_consistency": self.require_temporal_consistency,
@@ -307,6 +321,8 @@ class LearnerConfig:
                 {
                     "search_strategy": self.search_strategy,
                     "beam_width": self.beam_width,
+                    "beam_ranking": self.beam_ranking,
+                    "utility_cost_basis": self.utility_cost_basis,
                     "predicate_ranking": self.predicate_ranking,
                     "precision_estimate": self.precision_estimate,
                     "require_temporal_consistency": self.require_temporal_consistency,
@@ -400,6 +416,10 @@ class LearnerConfig:
                 value.get("search_strategy", "exhaustive"), "learner.search_strategy"
             ),
             beam_width=_integer(value.get("beam_width", 20), "learner.beam_width", minimum=1),
+            beam_ranking=_string(value.get("beam_ranking", "laplace"), "learner.beam_ranking"),
+            utility_cost_basis=_string(
+                value.get("utility_cost_basis", "absolute"), "learner.utility_cost_basis"
+            ),
             predicate_ranking=_string(
                 value.get("predicate_ranking", "rate_gap"), "learner.predicate_ranking"
             ),
@@ -988,32 +1008,93 @@ class EvidenceConfig:
 MAX_GIT_WINDOW_DAYS = 3650
 
 
+MAX_REWORK_MIN_LINES = 10_000
+
+
 @dataclass(frozen=True, slots=True)
 class OutcomesConfig:
-    """Registered, label-blind outcome-window settings bound into the evidence protocol."""
+    """Registered, label-blind outcome-window settings bound into the evidence protocol.
+
+    ``git_window_days`` registers the revert window for
+    ``post_merge_revert_or_hotfix``; ``rework_window_days``, ``rework_min_lines``,
+    and ``rework_ignore_same_author`` register the line-content rework outcome
+    ``post_merge_rework``. All are frozen before labels are inspected.
+    """
 
     git_window_days: int | None = None
+    rework_window_days: int | None = None
+    rework_min_lines: int = 3
+    rework_ignore_same_author: bool = True
 
     def __post_init__(self) -> None:
-        if self.git_window_days is not None and (
-            isinstance(self.git_window_days, bool)
-            or not isinstance(self.git_window_days, int)
-            or not 1 <= self.git_window_days <= MAX_GIT_WINDOW_DAYS
+        for name, value in (
+            ("git_window_days", self.git_window_days),
+            ("rework_window_days", self.rework_window_days),
+        ):
+            if value is not None and (
+                isinstance(value, bool)
+                or not isinstance(value, int)
+                or not 1 <= value <= MAX_GIT_WINDOW_DAYS
+            ):
+                raise ModelError(
+                    f"outcomes.{name} must be null or between 1 and {MAX_GIT_WINDOW_DAYS}"
+                )
+        if (
+            isinstance(self.rework_min_lines, bool)
+            or not isinstance(self.rework_min_lines, int)
+            or not 1 <= self.rework_min_lines <= MAX_REWORK_MIN_LINES
         ):
             raise ModelError(
-                f"outcomes.git_window_days must be null or between 1 and {MAX_GIT_WINDOW_DAYS}"
+                f"outcomes.rework_min_lines must be between 1 and {MAX_REWORK_MIN_LINES}"
             )
+        if not isinstance(self.rework_ignore_same_author, bool):
+            raise ModelError("outcomes.rework_ignore_same_author must be a boolean")
 
     def to_dict(self) -> JsonObject:
-        return {"git_window_days": self.git_window_days}
+        value: JsonObject = {"git_window_days": self.git_window_days}
+        if self.rework_window_days is not None:
+            value["rework_window_days"] = self.rework_window_days
+            value["rework_min_lines"] = self.rework_min_lines
+            value["rework_ignore_same_author"] = self.rework_ignore_same_author
+        return value
 
     @classmethod
     def from_dict(cls, value: dict[str, object]) -> OutcomesConfig:
-        _reject_unknown(value, {"git_window_days"}, "outcomes")
+        _reject_unknown(
+            value,
+            {
+                "git_window_days",
+                "rework_window_days",
+                "rework_min_lines",
+                "rework_ignore_same_author",
+            },
+            "outcomes",
+        )
         raw = value.get("git_window_days")
         if raw is not None and (isinstance(raw, bool) or not isinstance(raw, int)):
             raise ModelError("outcomes.git_window_days must be an integer or null")
-        return cls(git_window_days=raw)
+        raw_rework = value.get("rework_window_days")
+        if raw_rework is not None and (
+            isinstance(raw_rework, bool) or not isinstance(raw_rework, int)
+        ):
+            raise ModelError("outcomes.rework_window_days must be an integer or null")
+        if raw_rework is None and (
+            "rework_min_lines" in value or "rework_ignore_same_author" in value
+        ):
+            raise ModelError(
+                "outcomes.rework_min_lines and rework_ignore_same_author require rework_window_days"
+            )
+        return cls(
+            git_window_days=raw,
+            rework_window_days=raw_rework,
+            rework_min_lines=_integer(
+                value.get("rework_min_lines", 3), "outcomes.rework_min_lines", minimum=1
+            ),
+            rework_ignore_same_author=_boolean(
+                value.get("rework_ignore_same_author", True),
+                "outcomes.rework_ignore_same_author",
+            ),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1093,9 +1174,10 @@ class RuleLoomConfig:
             raise ModelError("outcomes settings require config schema_version 5")
         if self.schema_version < 5 and not self.learner.search_controls_are_legacy:
             raise ModelError(
-                "learner search controls (search_strategy, beam_width, predicate_ranking, "
-                "precision_estimate, require_temporal_consistency, prune_fraction, "
-                "permutation_runs, tree_seeds) require config schema_version 5"
+                "learner search controls (search_strategy, beam_width, beam_ranking, "
+                "utility_cost_basis, predicate_ranking, precision_estimate, "
+                "require_temporal_consistency, prune_fraction, permutation_runs, tree_seeds) "
+                "require config schema_version 5"
             )
         if (
             self.schema_version >= 4
@@ -1482,6 +1564,9 @@ def default_config(
     schema_version: int = 2,
     test_start_at: str | None = None,
     git_window_days: int | None = None,
+    rework_window_days: int | None = None,
+    rework_min_lines: int = 3,
+    rework_ignore_same_author: bool = True,
 ) -> RuleLoomConfig:
     selected_pack = (
         pack
@@ -1517,6 +1602,8 @@ def default_config(
                 gate_mode="relative_lift",
                 search_strategy="beam",
                 beam_width=20,
+                beam_ranking="wracc",
+                utility_cost_basis="prior_odds",
                 max_predicates=64,
                 predicate_ranking="logistic_weight",
                 precision_estimate="wilson_lower",
@@ -1532,5 +1619,10 @@ def default_config(
         ),
         evaluation=EvaluationConfig(test_start_at=test_start_at),
         signal_probe=SignalProbeConfig(enabled=schema_version >= 4),
-        outcomes=OutcomesConfig(git_window_days=git_window_days),
+        outcomes=OutcomesConfig(
+            git_window_days=git_window_days,
+            rework_window_days=rework_window_days,
+            rework_min_lines=rework_min_lines,
+            rework_ignore_same_author=rework_ignore_same_author,
+        ),
     )

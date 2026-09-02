@@ -161,7 +161,8 @@ RuleLoom does:
   label-permutation null;
 - derive weak, opt-in exploratory labels from Git alone: exact `git revert`
   trailers and a registered revert window whose observability is proven by a
-  recorded history horizon;
+  recorded history horizon, plus line-content rework, a change-level outcome
+  dense enough to learn from on any repository with blobs;
 - propose an outcome-blind instantiated vocabulary (hotspots, owner areas,
   missing co-change partners) plus assertion drafts for human review before a
   new experiment is frozen;
@@ -406,7 +407,8 @@ collection. Force-pushed, rewritten, or divergent history is rejected instead
 of silently combined. Incremental collection from a shallow clone is also
 rejected: fetch the complete history before advancing a cursor. A shallow
 bootstrap without `--after` remains available only as explicitly incomplete,
-exploratory evidence.
+exploratory evidence, and its grafted boundary commits are excluded (reported as
+`shallow_boundary_commits`) because Git presents their whole tree as the diff.
 
 An incremental interval must be complete. If `--max-commits`, the hard commit
 cap, or canonical storage budgets would truncate the range, the command fails
@@ -714,13 +716,14 @@ ruleloom history materialize \
   --outcome-target validation_rework_required
 ```
 
-The five historical targets are deliberately separate:
+The six historical targets are deliberately separate:
 
 - `validation_rework_required`;
 - `independent_review_changes_requested`;
 - `change_attributable_ci_failure`;
 - `post_merge_revert_or_hotfix`;
-- `post_merge_defect`.
+- `post_merge_defect`;
+- `post_merge_rework`.
 
 Weak heuristics are excluded by default. `--include-weak` is an explicit
 exploratory opt-in and makes dependent cases non-confirmatory.
@@ -732,6 +735,34 @@ horizon votes negative when no revert vote exists. The materialization report
 shows `git_window` and `git_window_negatives`, and every observation records the
 window it was judged against. These labels are exploratory by construction;
 provider evidence remains the confirmatory path.
+
+Reverts are rare, often below one change in five hundred, so a Git-only cohort
+usually cannot reach the positive-count floors with them. `post_merge_rework`
+is the dense alternative. Register it at initialization and scan the ledger:
+
+```bash
+ruleloom init . \
+  --project rework-experiment \
+  --target post_merge_rework \
+  --rework-window-days 30 \
+  --rework-min-lines 3
+ruleloom history bootstrap-git --all
+ruleloom history scan-rework
+ruleloom history materialize --include-weak
+```
+
+`scan-rework` walks the Git-landed commits chronologically, reads zero-context
+patches in bounded batches, and links a later non-merge commit to every earlier
+commit whose added lines it deleted in the same file, matched by normalized line
+content. Lines the later commit re-adds anywhere are treated as moves; generated
+artifacts, dependency manifests, commits above 5,000 changed lines, and trivial
+lines are ignored; same-author follow-ups are ignored unless
+`--rework-keep-same-author` was registered. Each scan persists a coverage
+record with its horizon and skipped commits, so a window negative is only
+derived where the scan was complete. This is the structural core of SZZ
+without its prose step. It is a proxy for “the change did not stick”, not a
+defect label: it stays weak, opt-in, and non-confirmatory, and its value is
+that it supplies hundreds of positives where reverts supply a handful.
 
 ### 6. Learn a candidate—or seed one explicit existing rule
 
@@ -782,11 +813,19 @@ confusion counts, rejection reasons, and total hypotheses examined. These
 near-misses guide a separately registered redesign; they are never
 confirmatory evidence or permission to relax the current gates.
 
-Horn 0.6 also freezes five train-only search controls in schema v5. A beam
+Horn 0.6 also freezes train-only search controls in schema v5. A beam
 search refines bodies over every eligible predicate instead of enumerating
 conjunctions over a small marginal-ranked prefix, and predicates are ordered by
 the magnitude of their train-only logistic weight so a fact that matters only
-in conjunction is not discarded first. The absolute precision gate and the
+in conjunction is not discarded first. The beam itself is ordered by weighted
+relative accuracy (newly covered positives in excess of the base rate) rather
+than Laplace precision, because at a 5% base rate a Laplace beam fills with
+three-example clauses and evicts the broad literals whose conjunctions could
+meet the lift and alert-rate gates. For the same reason the utility gate
+charges a false alert `false_positive_cost` times the train prior odds
+(`utility_cost_basis: prior_odds`); the legacy absolute charge demanded
+precision above 0.6 whatever the base rate, which silently overrode a
+relative-lift gate registered as threefold. The absolute precision gate and the
 selection order use the Wilson lower bound, so two clean examples no longer
 look like a perfect rule. A clause must beat the base rate in both
 chronological halves of the training window. Clauses are grown on the first
@@ -1170,13 +1209,14 @@ derived artifacts and should be reviewed like source code.
 | Command | Purpose |
 | --- | --- |
 | `ruleloom audit` | Produce a read-only, outcome-blind structural report before initialization |
-| `ruleloom init` | Initialize one frozen experiment and local data layout; `--pack-config` freezes a reviewed vocabulary and `--git-window-days` registers a revert window |
+| `ruleloom init` | Initialize one frozen experiment and local data layout; `--pack-config` freezes a reviewed vocabulary, `--git-window-days` registers a revert window, and `--rework-window-days` registers a rework window |
 | `ruleloom packs list` | Inspect registered evidence packs and predicates |
 | `ruleloom predicates audit` | Audit frozen predicate coverage, missing partners, window warm-up, and drift without outcomes |
 | `ruleloom predicates propose` | Draft instantiated hotspot, owner-area, and missing-partner predicates plus assertion drafts from Git structure only |
 | `ruleloom assertions declare/audit` | Bind explicit conventions and audit structural adherence |
 | `ruleloom diagnose` | Explain the evidence bottleneck, positive/class readiness gaps, and next safe actions without mutation |
 | `ruleloom history bootstrap-git` | Ingest bounded Git topology as exploratory history |
+| `ruleloom history scan-rework` | Persist weak line-content rework events and a scan coverage record for `post_merge_rework` |
 | `ruleloom history ingest-github-captures` | Verify and atomically ingest point-in-time bundles |
 | `ruleloom history import-github` | Collect a bounded, exploratory GitHub archive through `gh` |
 | `ruleloom history import` | Import normalized events and/or change units |

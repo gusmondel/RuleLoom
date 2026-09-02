@@ -179,13 +179,8 @@ def _is_test_path(path: str) -> bool:
     )
 
 
-def record_common_path_facts(
-    paths: list[str],
-    record: Callable[[str, str], None],
-) -> None:
-    """Record language-neutral facts shared by built-in packs."""
-
-    dependency_names = {
+DEPENDENCY_MANIFEST_NAMES = frozenset(
+    {
         "build.gradle",
         "build.gradle.kts",
         "cargo.lock",
@@ -206,6 +201,16 @@ def record_common_path_facts(
         "uv.lock",
         "yarn.lock",
     }
+)
+
+
+def record_common_path_facts(
+    paths: list[str],
+    record: Callable[[str, str], None],
+) -> None:
+    """Record language-neutral facts shared by built-in packs."""
+
+    dependency_names = DEPENDENCY_MANIFEST_NAMES
     for path in paths:
         lowered = path.lower()
         pure = PurePosixPath(lowered)

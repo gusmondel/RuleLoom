@@ -88,7 +88,8 @@ guardrail may be useful at low coverage even when its absolute precision is
 below 0.70. A clause must satisfy:
 
 - minimum newly covered positive support;
-- positive utility after the registered false-positive and complexity costs;
+- positive utility after the registered false-positive and complexity costs
+  (charged in prior-odds units under `utility_cost_basis: prior_odds`);
 - minimum alert rate; and
 - the registered conservative lift diagnostic for the clause and the combined
   rule set.
@@ -105,12 +106,14 @@ gates.
 
 ### Horn 0.6 search controls (schema v5)
 
-Schema v5 freezes five additional train-only controls. Each addresses a
-specific way the Horn 0.5 search could miss or overstate a rule:
+Schema v5 freezes additional train-only controls. Each addresses a specific
+way the Horn 0.5 search could miss or overstate a rule:
 
 | Control | Default | Problem it addresses |
 | --- | --- | --- |
-| `search_strategy: beam` with `beam_width: 20` and `max_predicates: 64` | on | Exhaustive enumeration over a marginal-ranked top-12 prefix discards predicates that matter only in conjunction; the beam refines bodies over every eligible predicate using a Laplace precision heuristic on newly covered positives. |
+| `search_strategy: beam` with `beam_width: 20` and `max_predicates: 64` | on | Exhaustive enumeration over a marginal-ranked top-12 prefix discards predicates that matter only in conjunction; the beam refines bodies over every eligible predicate, ordered by `beam_ranking`. |
+| `beam_ranking: wracc` | on | A Laplace-ordered beam fills with tiny pure clauses at low prevalence (a 3-of-3 clause outranks a 24-of-60 one), so the broad literals whose refinements could satisfy both the lift and the alert-rate gate are evicted before depth two. Weighted relative accuracy, coverage times precision minus base rate (Lavrač, Flach and Zupan 1999; CN2-SD), trades coverage against precision linearly. `laplace` reproduces Horn 0.5. |
+| `utility_cost_basis: prior_odds` | on | The absolute cost `false_positive_cost: 1.5` makes utility positive only above precision 0.6 whatever the base rate, which at 5% prevalence silently demands a twelvefold lift under a gate registered as threefold. Charging each false alert `false_positive_cost` times the train prior odds makes utility positive exactly when the clause's odds of being right exceed that multiple of the prior odds (Elkan 2001), so the utility gate never overrides the relative-lift gate. `absolute` reproduces Horn 0.5. |
 | `predicate_ranking: logistic_weight` | on | The prefix that enters the search is ordered by the magnitude of the train-only class-balanced logistic weight rather than the marginal rate gap. |
 | `precision_estimate: wilson_lower` | on | Point precision lets a two-example clause pass an absolute 0.70 gate; the Wilson lower bound at the registered confidence gates and orders clauses instead. |
 | `require_temporal_consistency` | on | A clause must cover at least one positive and beat the base rate in both chronological halves of the training window, otherwise it is rejected as `unstable_across_train_halves`. |
@@ -164,6 +167,16 @@ a schema-v5 `outcomes.git_window_days` window that closed before that horizon
 with no revert vote is a weak negative. Both need `--include-weak`, are never
 confirmatory, and miss fix-forward hotfixes, so use them to run the probe and
 the learner while provider evidence is being connected, not as ground truth.
+
+Reverts are typically far too rare to reach the positive floors. The
+`post_merge_rework` target supplies density: `history scan-rework` links later
+commits to the earlier commits whose added lines they deleted in the same file,
+matched by normalized line content, ignoring moves, generated artifacts,
+dependency manifests, trivial lines, and oversized commits. It is the
+structural core of SZZ without prose, so it inherits SZZ's caveats about
+refactoring noise; the registered `rework_min_lines`, same-author policy, and
+window are frozen before labels are inspected and the scan coverage record
+makes negatives abstain where the scan was incomplete.
 
 Prefer defect-oriented atomic targets such as `post_merge_defect` or
 `post_merge_revert_or_hotfix` when the provider evidence can attribute them to a

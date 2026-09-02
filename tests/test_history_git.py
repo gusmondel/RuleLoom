@@ -467,26 +467,45 @@ def test_rejects_invalid_repository_identity_even_for_an_empty_time_window(
         )
 
 
-def test_detects_shallow_history(tmp_path: Path) -> None:
+def test_detects_shallow_history_and_excludes_grafted_boundary_commits(tmp_path: Path) -> None:
     source = tmp_path / "source"
     source.mkdir()
     _git(source, "init", "-b", "main")
     _git(source, "config", "user.name", "History Person")
     _git(source, "config", "user.email", "private@example.test")
     _commit(source, "First", "2026-01-01T10:00:00Z", "first")
-    _commit(source, "Second", "2026-01-02T10:00:00Z", "second")
+    second = _commit(source, "Second", "2026-01-02T10:00:00Z", "second")
+    third = _commit(source, "Third", "2026-01-03T10:00:00Z", "third")
 
     shallow = tmp_path / "shallow"
     subprocess.run(
-        ["git", "clone", "--depth", "1", f"file://{source}", str(shallow)],
+        ["git", "clone", "--depth", "2", f"file://{source}", str(shallow)],
         check=True,
         capture_output=True,
     )
     report = collect_git_history(shallow, max_commits=None, repository_id=REPOSITORY_ID)
 
     assert report.shallow
+    # Git grafts ``Second`` as a parentless boundary; its "diff" would be the whole
+    # tree, so it is excluded and only ``Third`` (whose base is still local) remains.
+    assert report.shallow_boundary_commits == 1
     assert report.examined == 1
+    assert [unit.prediction_sha for unit in report.units] == [third]
+    assert report.units[0].base_sha == second
+    assert second not in {event.source_ref for event in report.events}
     assert any("shallow" in warning for warning in report.warnings)
+    assert any("boundary commit(s) were excluded" in warning for warning in report.warnings)
+    assert report.to_dict()["shallow_boundary_commits"] == 1
+
+    single = tmp_path / "single"
+    subprocess.run(
+        ["git", "clone", "--depth", "1", f"file://{source}", str(single)],
+        check=True,
+        capture_output=True,
+    )
+    lone = collect_git_history(single, max_commits=None, repository_id=REPOSITORY_ID)
+    assert lone.shallow_boundary_commits == 1
+    assert lone.examined == 0
 
 
 def test_incremental_cursor_rejects_locally_valid_shallow_ancestry(tmp_path: Path) -> None:

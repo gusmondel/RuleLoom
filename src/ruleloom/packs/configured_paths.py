@@ -35,6 +35,14 @@ MAX_EVIDENCE_PATH_COMPONENTS = 256
 MAX_PREDICATE_LENGTH = 64
 
 
+class MatcherBudgetError(ValueError):
+    """One path manifest exceeds the bounded matcher budget.
+
+    Callers that iterate over many changes catch this per change and record a skip;
+    it never signals a malformed configuration.
+    """
+
+
 def _validate_glob(value: object, field_name: str) -> str:
     if not isinstance(value, str) or not value:
         raise ModelError(f"{field_name} must be a non-empty string")
@@ -517,13 +525,13 @@ def configured_matches(
     for path in paths:
         component_count = path.count("/") + 1
         if len(path) > MAX_EVIDENCE_PATH_LENGTH or component_count > MAX_EVIDENCE_PATH_COMPONENTS:
-            raise ValueError(
+            raise MatcherBudgetError(
                 "configured path extraction encountered a path beyond the safe matcher limits"
             )
         path_components.append(tuple(path.split("/")))
     comparisons = len(paths) * config.total_globs
     if comparisons > MAX_MATCH_COMPARISONS:
-        raise ValueError(
+        raise MatcherBudgetError(
             f"configured path extraction requires {comparisons} potential glob comparisons; "
             f"the safe limit is {MAX_MATCH_COMPARISONS}"
         )
@@ -538,7 +546,7 @@ def configured_matches(
         for glob in globs:
             work_units += glob.estimated_work(components)
             if work_units > MAX_MATCH_WORK_UNITS:
-                raise ValueError(
+                raise MatcherBudgetError(
                     "configured path extraction exceeds the safe limit of "
                     f"{MAX_MATCH_WORK_UNITS} estimated matcher work units"
                 )

@@ -44,6 +44,8 @@ from ruleloom.signal_probe import conservative_lift_diagnostic, wilson_interval
 HORN_ENGINE_VERSION = "ruleloom-horn/0.6"
 SEARCH_STRATEGIES = ("exhaustive", "beam")
 PRECISION_ESTIMATES = ("point", "wilson_lower")
+BEAM_RANKINGS = ("laplace", "wracc")
+UTILITY_COST_BASES = ("absolute", "prior_odds")
 MAX_PRUNE_FRACTION = 0.5
 MAX_PERMUTATION_RUNS = 1000
 PERMUTATION_BLOCKS = 4
@@ -67,6 +69,8 @@ class HornSettings:
     near_miss_limit: int = 10
     search_strategy: str = "exhaustive"
     beam_width: int = 20
+    beam_ranking: str = "laplace"
+    utility_cost_basis: str = "absolute"
     precision_estimate: str = "point"
     require_temporal_consistency: bool = False
     prune_fraction: float = 0.0
@@ -78,6 +82,10 @@ class HornSettings:
             raise ModelError("search_strategy must be one of: " + ", ".join(SEARCH_STRATEGIES))
         if self.precision_estimate not in PRECISION_ESTIMATES:
             raise ModelError("precision_estimate must be one of: " + ", ".join(PRECISION_ESTIMATES))
+        if self.beam_ranking not in BEAM_RANKINGS:
+            raise ModelError("beam_ranking must be one of: " + ", ".join(BEAM_RANKINGS))
+        if self.utility_cost_basis not in UTILITY_COST_BASES:
+            raise ModelError("utility_cost_basis must be one of: " + ", ".join(UTILITY_COST_BASES))
         if isinstance(self.beam_width, bool) or not isinstance(self.beam_width, int):
             raise ModelError("beam_width must be an integer")
         if not 1 <= self.beam_width <= 256:
@@ -395,6 +403,21 @@ def _laplace(true_positive: int, false_positive: int) -> Fraction:
     return Fraction(true_positive + 1, true_positive + false_positive + 2)
 
 
+def _false_positive_cost(options: HornSettings, *, positives: int, negatives: int) -> float:
+    """Cost of one false alert in true-positive units.
+
+    ``absolute`` charges ``false_positive_cost`` per false alert, so utility is
+    positive only above the precision floor cost / (1 + cost) whatever the base
+    rate (Elkan 2001). ``prior_odds`` scales that charge by the train prior odds
+    positives / negatives, so utility is positive exactly when the clause's odds
+    of being right exceed ``false_positive_cost`` times the prior odds; this keeps
+    the utility gate consistent with a relative-lift gate at low prevalence.
+    """
+    if options.utility_cost_basis == "prior_odds" and negatives > 0 and positives > 0:
+        return options.false_positive_cost * positives / negatives
+    return options.false_positive_cost
+
+
 def _temporal_reasons(
     coverage: int,
     cohort: _Cohort,
@@ -445,13 +468,18 @@ def _evaluate(
         estimate = precision
     else:
         estimate = wilson_interval(true_positive, alerted, options.confidence_level)[0]
-    utility = (
-        new_true_positive
-        - options.false_positive_cost * false_positive
-        - _COMPLEXITY_COST * len(body)
-    )
     true_negative = scoped_negative.bit_count() - false_positive
     false_negative = scoped_positive.bit_count() - true_positive
+    utility = (
+        new_true_positive
+        - _false_positive_cost(
+            options,
+            positives=scoped_positive.bit_count(),
+            negatives=scoped_negative.bit_count(),
+        )
+        * false_positive
+        - _COMPLEXITY_COST * len(body)
+    )
     metrics = Metrics.from_counts(true_positive, false_positive, true_negative, false_negative)
     reasons = _gate_reasons(metrics, estimate, options)
     if new_true_positive < options.min_support:
@@ -518,8 +546,24 @@ def _selection_key(item: _Evaluated) -> tuple[float, float, int, int, int, str]:
     )
 
 
-def _beam_key(item: _Evaluated) -> tuple[Fraction, int, int, int, str]:
+def _weighted_relative_accuracy(item: _Evaluated, base_rate: Fraction) -> Fraction:
+    """Excess new true positives over chance: coverage times (precision minus base rate).
+
+    Weighted relative accuracy (Lavrac, Flach and Zupan 1999; CN2-SD) trades coverage
+    against precision linearly, so a beam ordered by it keeps broad literals whose
+    refinements can satisfy both a lift and an alert-rate gate, where a Laplace
+    ordering fills the beam with tiny, pure clauses at low prevalence.
+    """
+    covered = item.new_true_positive + item.false_positive
+    return Fraction(item.new_true_positive) - Fraction(covered) * base_rate
+
+
+def _beam_key(
+    item: _Evaluated, *, ranking: str, base_rate: Fraction
+) -> tuple[Fraction, Fraction, int, int, int, str]:
+    primary = -_weighted_relative_accuracy(item, base_rate) if ranking == "wracc" else Fraction(0)
     return (
+        primary,
         -_laplace(item.new_true_positive, item.false_positive),
         -item.new_true_positive,
         item.false_positive,
@@ -528,9 +572,15 @@ def _beam_key(item: _Evaluated) -> tuple[Fraction, int, int, int, str]:
     )
 
 
-def _select_beam(level: Sequence[_Evaluated], options: HornSettings) -> list[_Evaluated]:
+def _select_beam(
+    level: Sequence[_Evaluated], options: HornSettings, *, base_rate: Fraction
+) -> list[_Evaluated]:
     eligible = [item for item in level if item.new_true_positive >= options.min_support]
-    return sorted(eligible, key=_beam_key)[: options.beam_width]
+    ordered = sorted(
+        eligible,
+        key=lambda item: _beam_key(item, ranking=options.beam_ranking, base_rate=base_rate),
+    )
+    return ordered[: options.beam_width]
 
 
 def _search_iteration(
@@ -598,6 +648,12 @@ def _search_iteration(
             consider(body)
         return candidates, best_statistic
 
+    scoped_examples = scope.bit_count()
+    base_rate = (
+        Fraction((uncovered & scope).bit_count(), scoped_examples)
+        if scoped_examples
+        else Fraction(0)
+    )
     level: list[_Evaluated] = []
     for predicate in predicates:
         for negated in signs:
@@ -608,7 +664,7 @@ def _search_iteration(
         evaluated = consider(body)
         if evaluated is not None:
             level.append(evaluated)
-    beam = _select_beam(level, options)
+    beam = _select_beam(level, options, base_rate=base_rate)
     for depth in range(2, options.max_body + 1):
         next_level: list[_Evaluated] = []
         for item in beam:
@@ -630,7 +686,7 @@ def _search_iteration(
                         next_level.append(evaluated)
         if not next_level:
             break
-        beam = _select_beam(next_level, options)
+        beam = _select_beam(next_level, options, base_rate=base_rate)
     return candidates, best_statistic
 
 
@@ -1024,6 +1080,8 @@ def learn_horn_diagnostics(
     search: JsonObject = {
         "strategy": options.search_strategy,
         "beam_width": options.beam_width if options.search_strategy == "beam" else None,
+        "beam_ranking": options.beam_ranking if options.search_strategy == "beam" else None,
+        "utility_cost_basis": options.utility_cost_basis,
         "predicate_cap": options.max_predicates,
         "eligible_predicates": len(ranked),
         "searched_predicates": cast(JsonValue, list(predicates)),

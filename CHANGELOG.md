@@ -12,16 +12,22 @@ always require a new explicit schema, adapter, pack, or experiment version.
 ### Added
 
 - Configuration schema v5 with frozen Horn search controls (`search_strategy`,
-  `beam_width`, `predicate_ranking`, `precision_estimate`,
-  `require_temporal_consistency`, `prune_fraction`, `permutation_runs`,
-  `tree_seeds`) and a registered `outcomes.git_window_days` revert window bound
-  into the evidence protocol.
-- Horn engine 0.6: beam search over every eligible predicate with a train-only
-  Laplace heuristic, logistic-weight predicate ordering, Wilson lower-bound
-  precision for the absolute gate and selection order, a cross-half
-  temporal-consistency gate, RIPPER-style chronological grow/prune windows with
-  complete-window re-gating, tree seed bodies, and a within-block
-  label-permutation null with an empirical p-value.
+  `beam_width`, `beam_ranking`, `utility_cost_basis`, `predicate_ranking`,
+  `precision_estimate`, `require_temporal_consistency`, `prune_fraction`,
+  `permutation_runs`, `tree_seeds`) and a registered `outcomes.git_window_days`
+  revert window bound into the evidence protocol.
+- Horn engine 0.6: beam search over every eligible predicate, ordered by
+  weighted relative accuracy (`beam_ranking: wracc`) or the legacy Laplace
+  heuristic, logistic-weight predicate ordering, Wilson lower-bound precision for
+  the absolute gate and selection order, a prior-odds false-positive cost
+  (`utility_cost_basis: prior_odds`) that keeps the utility gate consistent with
+  the relative-lift gate at low prevalence, a cross-half temporal-consistency
+  gate, RIPPER-style chronological grow/prune windows with complete-window
+  re-gating, tree seed bodies, and a within-block label-permutation null with an
+  empirical p-value. Under the Laplace beam and the absolute cost, a 5%-prevalence
+  cohort could hide every rule that met the lift and alert-rate gates: the beam
+  filled with tiny pure clauses and the absolute cost demanded precision above
+  0.6 regardless of the base rate.
 - `history bootstrap-git` now emits weak `revert` events from exact
   `This reverts commit <sha>` trailers (`link_kind: git_trailer`) and one
   `git_history_horizon` event per run, so a Git-only cohort can mature both
@@ -37,6 +43,22 @@ always require a new explicit schema, adapter, pack, or experiment version.
   to the frozen holdout when a project exists. `ruleloom init --pack-config` freezes the reviewed draft.
 - `predicates audit` reports missing partners, path examples for every
   predicate, and time-window span/warm-up warnings.
+- `post_merge_rework`, a sixth atomic target: `history scan-rework` links a
+  later non-merge commit to every earlier commit whose added lines it deleted
+  in the same file, matched by normalized line content, ignoring moves,
+  generated artifacts, dependency manifests, trivial lines, and oversized
+  commits. `outcomes.rework_window_days`, `rework_min_lines`, and
+  `rework_ignore_same_author` are bound into the evidence protocol; positives
+  and window negatives are weak, opt-in, and non-confirmatory, and the scan
+  coverage record makes negatives abstain where the scan was incomplete.
+- Shallow clones: grafted boundary commits are excluded from Git ingestion and
+  reported as `shallow_boundary_commits`, because Git shows their whole tree as
+  the diff. Previously a boundary commit became a unit and could abort the
+  proposer on large repositories.
+- Path matcher budget overruns raise a typed `MatcherBudgetError`; the proposer
+  skips such commits for owner-area counting with a warning and
+  `history materialize` skips the unit with reason `matcher_budget_exceeded`
+  instead of aborting.
 - `predicates propose --evidence-path` writes a reviewable co-change evidence
   document that drafted assertions cite; `--max-pairs-per-source` and
   `--min-pair-violations` keep one file family from filling the draft and

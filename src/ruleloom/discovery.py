@@ -50,6 +50,7 @@ from ruleloom.packs.configured_paths import (
     MAX_PREDICATES,
     MISSING_PARTNER_PREFIX,
     ConfiguredPathsConfig,
+    MatcherBudgetError,
     PartnerPredicateConfig,
     PathPredicateConfig,
     _validate_glob,
@@ -554,6 +555,7 @@ def propose_vocabulary(
             globs_by_owner.setdefault(owner_key, []).append(normalized)
         del rules
         area_candidates: list[tuple[int, str, tuple[str, ...]]] = []
+        budget_skipped: set[int] = set()
         for owner_key, raw_globs in globs_by_owner.items():
             globs = tuple(sorted(dict.fromkeys(raw_globs)))[:_MAX_OWNER_GLOBS]
             digest = _digest("owner-area", repository_id, *owner_key)
@@ -561,10 +563,20 @@ def propose_vocabulary(
             compiled = PathPredicateConfig(predicate=predicate, include_paths=globs)
             area_config = ConfiguredPathsConfig(path_predicates=(compiled,))
             commit_count = 0
-            for paths in commit_paths:
-                if any(configured_matches(paths, area_config).matched):
+            for index, paths in enumerate(commit_paths):
+                try:
+                    matched = configured_matches(paths, area_config).matched
+                except MatcherBudgetError:
+                    budget_skipped.add(index)
+                    continue
+                if any(matched):
                     commit_count += 1
             area_candidates.append((commit_count, predicate, globs))
+        if budget_skipped:
+            warnings.append(
+                f"{len(budget_skipped)} commit(s) exceeded the path matcher budget and were "
+                "not counted for owner areas (very large manifests, e.g. vendored imports)"
+            )
         area_candidates.sort(key=lambda item: (-item[0], item[1]))
         selected_areas = 0
         for commit_count, predicate, globs in area_candidates:

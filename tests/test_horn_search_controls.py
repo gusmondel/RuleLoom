@@ -155,6 +155,90 @@ def test_beam_search_finds_the_conjunction_the_marginal_prefix_hides() -> None:
     assert not beam.rules.predicts(frozenset({"a", "b"}))
 
 
+def _low_prevalence_cohort(*, decoys: int = 25) -> list[Observation]:
+    """A 4.5% prevalence cohort where only the conjunction ``a, b`` clears the gates.
+
+    ``a`` and ``b`` alone are weak (precision 0.10 and 0.08); together they cover
+    3% of changes at precision 0.40. Twenty-five decoy literals each fire on exactly
+    two positive changes, so a Laplace-ordered beam of width 20 holds nothing but
+    decoys whose refinements can never reach the 1% alert-rate floor.
+    """
+    examples: list[Observation] = []
+
+    def add(facts: set[str], label: LabelValue) -> None:
+        examples.append(_observation(len(examples), facts, label))
+
+    for index in range(60):
+        add({"a", "b"}, LabelValue.POSITIVE if index % 5 < 2 else LabelValue.NEGATIVE)
+    for index in range(240):
+        add({"a"}, LabelValue.POSITIVE if index % 40 == 0 else LabelValue.NEGATIVE)
+    for index in range(340):
+        add({"b"}, LabelValue.POSITIVE if index % 42 == 0 else LabelValue.NEGATIVE)
+    for decoy in range(decoys):
+        add({f"d{decoy:02d}"}, LabelValue.POSITIVE)
+        add({f"d{decoy:02d}"}, LabelValue.POSITIVE)
+    while len(examples) < 2000:
+        add({"z"}, LabelValue.NEGATIVE)
+    return examples
+
+
+def _relative_settings(
+    beam_ranking: str, *, utility_cost_basis: str = "prior_odds"
+) -> HornSettings:
+    return HornSettings(
+        max_body=2,
+        max_rules=1,
+        max_predicates=64,
+        gate_mode="relative_lift",
+        min_lift_lower_bound=3.0,
+        min_alert_rate=0.01,
+        precision_estimate="wilson_lower",
+        search_strategy="beam",
+        beam_width=20,
+        beam_ranking=beam_ranking,
+        utility_cost_basis=utility_cost_basis,
+    )
+
+
+def test_wracc_beam_keeps_broad_literals_a_laplace_beam_evicts() -> None:
+    examples = _low_prevalence_cohort()
+    assert sum(item.labels[TARGET] is LabelValue.POSITIVE for item in examples) == 89
+
+    laplace = learn_horn_diagnostics(examples, TARGET, _relative_settings("laplace"))
+    wracc = learn_horn_diagnostics(examples, TARGET, _relative_settings("wracc"))
+
+    assert laplace.rules.clauses == ()
+    assert laplace.search["beam_ranking"] == "laplace"
+    assert all(diagnostic.rejection_reasons for diagnostic in laplace.near_misses)
+    assert [clause.signature for clause in wracc.rules.clauses] == [f"{TARGET}:-a,b"]
+    assert wracc.search["beam_ranking"] == "wracc"
+    # Both searches examine the same first level; only the beam ordering differs.
+    assert wracc.search["strategy"] == laplace.search["strategy"] == "beam"
+
+
+def test_prior_odds_utility_keeps_the_relative_gate_consistent_at_low_prevalence() -> None:
+    # Without decoys both beams hold ``a`` and ``b``; only the utility basis differs.
+    examples = _low_prevalence_cohort(decoys=0)
+
+    absolute = learn_horn_diagnostics(
+        examples, TARGET, _relative_settings("wracc", utility_cost_basis="absolute")
+    )
+    relative = learn_horn_diagnostics(examples, TARGET, _relative_settings("wracc"))
+
+    # ``a, b`` clears the lift and alert-rate gates at precision 0.40, but an
+    # absolute false-positive cost of 1.5 demands precision above 0.6 regardless
+    # of the 4.5% base rate, so the clause is rejected on utility alone.
+    def predicates(clause: HornClause) -> set[str]:
+        return {literal.predicate for literal in clause.body}
+
+    assert absolute.rules.clauses == ()
+    rejected = next(item for item in absolute.near_misses if predicates(item.clause) == {"a", "b"})
+    assert rejected.rejection_reasons == ("utility_not_positive",)
+    assert absolute.search["utility_cost_basis"] == "absolute"
+    assert [predicates(clause) for clause in relative.rules.clauses] == [{"a", "b"}]
+    assert relative.search["utility_cost_basis"] == "prior_odds"
+
+
 def test_beam_search_agrees_with_exhaustive_search_while_examining_fewer_bodies() -> None:
     examples = _conjunction_cohort()
     settings = HornSettings(max_body=2, max_rules=1, min_precision=0.7, max_predicates=64)
@@ -436,6 +520,8 @@ def test_predicate_order_reorders_without_adding_predicates() -> None:
     [
         {"search_strategy": "random"},
         {"precision_estimate": "laplace"},
+        {"beam_ranking": "gain"},
+        {"utility_cost_basis": "relative"},
         {"beam_width": 0},
         {"prune_fraction": 0.6},
         {"permutation_runs": -1},
@@ -469,6 +555,8 @@ def test_schema_v5_defaults_enable_search_controls_and_preserve_v4_serialization
 
     assert v5.learner.search_strategy == "beam"
     assert v5.learner.beam_width == 20
+    assert v5.learner.beam_ranking == "wracc"
+    assert v5.learner.utility_cost_basis == "prior_odds"
     assert v5.learner.max_predicates == 64
     assert v5.learner.predicate_ranking == "logistic_weight"
     assert v5.learner.precision_estimate == "wilson_lower"

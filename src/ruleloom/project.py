@@ -11,7 +11,11 @@ from pathlib import Path
 from ruleloom.agents import SyncResult, sync_agents
 from ruleloom.config import CONFIG_PATH, RuleLoomConfig, default_config
 from ruleloom.gitfacts import GitFactsError, repository_identity
-from ruleloom.history.materialize import resolve_git_window, validate_materialized_outcome
+from ruleloom.history.materialize import (
+    resolve_git_window,
+    resolve_rework_window,
+    validate_materialized_outcome,
+)
 from ruleloom.history.models import HistoricalEvent, validate_git_sha
 from ruleloom.history.storage import (
     change_units_path,
@@ -64,6 +68,9 @@ def initialize_project(
     schema_version: int = 5,
     agents: Sequence[str] = (),
     git_window_days: int | None = None,
+    rework_window_days: int | None = None,
+    rework_min_lines: int = 3,
+    rework_ignore_same_author: bool = True,
 ) -> InitResult:
     root = root.resolve()
     root.mkdir(parents=True, exist_ok=True)
@@ -85,6 +92,9 @@ def initialize_project(
             datetime.now(UTC).isoformat().replace("+00:00", "Z") if schema_version >= 4 else None
         ),
         git_window_days=git_window_days,
+        rework_window_days=rework_window_days,
+        rework_min_lines=rework_min_lines,
+        rework_ignore_same_author=rework_ignore_same_author,
     )
     managed_paths = [
         config_path,
@@ -244,6 +254,7 @@ def validate_project(root: Path, config: RuleLoomConfig) -> Readiness:
             events_by_change[(event.repository_id, event.change_id)].append(event)
     units_by_id = {unit.id: unit for unit in units}
     git_window = resolve_git_window(config, events)
+    rework_window = resolve_rework_window(config, events)
     validate_unique_event_ownership(units)
     for unit in units:
         if unit.repository_id != config.protocol.repository_id:
@@ -315,6 +326,7 @@ def validate_project(root: Path, config: RuleLoomConfig) -> Readiness:
             unit,
             list(linked.values()),
             git_window=git_window,
+            rework_window=rework_window,
         )
     load_candidates(root, config)
     load_shadow(root, config)

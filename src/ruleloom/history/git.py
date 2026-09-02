@@ -153,6 +153,7 @@ class GitHistoryReport:
     change_unit_log_bytes: int
     revert_events: int = 0
     horizon_at: str | None = None
+    shallow_boundary_commits: int = 0
 
     @property
     def event_count(self) -> int:
@@ -185,6 +186,7 @@ class GitHistoryReport:
             "change_unit_log_bytes": self.change_unit_log_bytes,
             "revert_events": self.revert_events,
             "horizon_at": self.horizon_at,
+            "shallow_boundary_commits": self.shallow_boundary_commits,
             "adapter": GIT_HISTORY_ADAPTER_VERSION,
         }
 
@@ -734,6 +736,9 @@ def collect_git_history(
             "incremental collection is not supported in a shallow repository; "
             "fetch complete history before advancing a cursor"
         )
+    shallow_boundary = (
+        _shallow_boundary(top_level, budgets=selected_budgets) if shallow else frozenset()
+    )
 
     empty_tree = _git_text(
         top_level,
@@ -776,6 +781,18 @@ def collect_git_history(
             continue
         seen.add(header.sha)
         unique_newest_first.append(header)
+
+    shallow_boundary_count = 0
+    if shallow_boundary:
+        # A grafted boundary commit has no parent locally, so Git would report its
+        # whole tree as the diff. That is not a change; it must not become a unit.
+        kept_headers: list[_CommitHeader] = []
+        for header in unique_newest_first:
+            if header.sha in shallow_boundary:
+                shallow_boundary_count += 1
+                continue
+            kept_headers.append(header)
+        unique_newest_first = kept_headers
 
     commit_limit_truncated = len(unique_newest_first) > effective_limit
     retained_headers = unique_newest_first[:effective_limit]
@@ -861,6 +878,11 @@ def collect_git_history(
     warnings: list[str] = []
     if shallow:
         warnings.append("repository is shallow; history before the shallow boundary is unavailable")
+    if shallow_boundary_count:
+        warnings.append(
+            f"{shallow_boundary_count} shallow boundary commit(s) were excluded: a grafted "
+            "boundary has no parent locally, so its diff would be the whole tree, not a change"
+        )
     if commit_limit_truncated:
         requested = "the hard safety cap" if max_commits is None else "max_commits"
         warnings.append(
@@ -947,6 +969,35 @@ def collect_git_history(
         change_unit_log_bytes=change_unit_log_bytes,
         revert_events=revert_event_count,
         horizon_at=horizon_at,
+        shallow_boundary_commits=shallow_boundary_count,
+    )
+
+
+def _shallow_boundary(top_level: Path, *, budgets: GitHistoryBudgets) -> frozenset[str]:
+    """Return the grafted boundary commits recorded by Git for a shallow repository."""
+    shallow_path_text = _git_text(
+        top_level,
+        "rev-parse",
+        "--git-path",
+        "shallow",
+        stdout_limit=16 * 1024,
+        budgets=budgets,
+    ).strip()
+    if not shallow_path_text:
+        raise GitHistoryError("Git returned an empty shallow file path")
+    shallow_file = Path(shallow_path_text)
+    if not shallow_file.is_absolute():
+        shallow_file = top_level / shallow_file
+    try:
+        raw = shallow_file.read_text(encoding="ascii")
+    except FileNotFoundError:
+        return frozenset()
+    except (OSError, UnicodeDecodeError) as exc:
+        raise GitHistoryError(f"shallow boundary file is unreadable: {exc}") from exc
+    return frozenset(
+        _validate_oid(line.strip(), field_name="shallow boundary commit")
+        for line in raw.splitlines()
+        if line.strip()
     )
 
 

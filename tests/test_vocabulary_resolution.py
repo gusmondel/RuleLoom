@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from jsonschema import Draft202012Validator, FormatChecker, ValidationError
 
+import ruleloom.packs.configured_paths as configured_paths_module
 from ruleloom import cli
 from ruleloom.config import RuleLoomConfig, default_config
 from ruleloom.discovery import DiscoveryLimits, propose_vocabulary
@@ -411,6 +412,54 @@ def test_proposer_instantiates_hotspots_owner_areas_pairs_and_assertions(
     assert unbounded.commit_count == 14
     assert any("no holdout boundary" in warning for warning in unbounded.warnings)
     assert "Missing-partner predicates" in unbounded.render_text()
+
+
+def test_proposer_skips_commits_beyond_the_matcher_budget_for_owner_areas(
+    structured_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    limits = DiscoveryLimits(min_pair_support=5, min_pair_confidence=0.7, min_hotspot_changes=3)
+    monkeypatch.setattr(configured_paths_module, "MAX_MATCH_WORK_UNITS", 1)
+
+    proposal = propose_vocabulary(structured_repo, until="2025-02-15T00:00:00Z", limits=limits)
+
+    # Owner-area counting is the only matcher use in the proposer: an oversized
+    # manifest is skipped for that family instead of aborting the whole proposal.
+    assert not proposal.owner_areas
+    assert proposal.hotspots
+    assert any("path matcher budget" in warning for warning in proposal.warnings)
+
+
+def test_materialize_skips_units_beyond_the_matcher_budget(
+    structured_repo: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    pack_config_file = tmp_path / "pack-config.json"
+    pack_config_file.write_text(json.dumps(_pack_config().to_dict()))
+    assert (
+        cli.main(
+            [
+                "init",
+                str(structured_repo),
+                "--pack",
+                "generic_changes",
+                "--pack-config",
+                str(pack_config_file),
+            ]
+        )
+        == 0
+    )
+    assert cli.main(["history", "--root", str(structured_repo), "bootstrap-git", "--all"]) == 0
+    capsys.readouterr()
+    monkeypatch.setattr(configured_paths_module, "MAX_MATCH_WORK_UNITS", 1)
+
+    assert cli.main(["history", "--root", str(structured_repo), "materialize"]) == 0
+    report = json.loads(capsys.readouterr().out)
+
+    assert report["skipped"] >= 1
+    assert report["skipped_by_reason"] == {"matcher_budget_exceeded": report["skipped"]}
+    assert all("matcher" in reason for _unit, reason in report["skipped_preview"])
 
 
 def test_proposer_cites_an_evidence_document_and_skips_catch_all_owner_areas(

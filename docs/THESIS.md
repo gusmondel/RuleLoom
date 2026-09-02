@@ -333,9 +333,10 @@ repository-learning loop from a polished demonstration.
 Version 0.10.0 keeps the propositional core and adds three bounded capabilities:
 a train-only Horn search with beam refinement, Wilson lower-bound precision,
 temporal-consistency and chronological pruning gates, and a permutation-null
-calibration; weak, opt-in Git-native labels from exact revert trailers and a
-preregistered revert window proven observable by a recorded history horizon;
-and an outcome-blind proposer that instantiates hotspots, owner areas, and
+calibration; weak, opt-in Git-native labels from exact revert trailers, a
+preregistered revert window proven observable by a recorded history horizon,
+and line-content rework within a preregistered window; and an outcome-blind
+proposer that instantiates hotspots, owner areas, and
 missing co-change partners as reviewed `generic_changes@3` predicates. None of
 these changes the falsification criteria above.
 

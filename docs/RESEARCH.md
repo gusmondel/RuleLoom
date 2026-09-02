@@ -70,6 +70,9 @@ evidence that RuleLoom predicts any engineering outcome.
 
 | Source | Status | Reported evidence | RuleLoom implication | Important limit |
 |---|---|---|---|---|
+| Lavrač, Flach and Zupan, *Rule evaluation measures: a unifying view* (1999); Lavrač et al., *Subgroup discovery with CN2-SD* (2004) | Peer-reviewed, ILP 1999 and JMLR 2004 | Weighted relative accuracy, coverage times (precision minus base rate), evaluates a rule by how many more positives it covers than chance; precision-only heuristics prefer tiny pure rules. | `beam_ranking: wracc` orders the Horn beam by excess newly covered positives over the base rate, so broad literals survive to depth two at low prevalence. | It does not validate the gates themselves, the chosen beam width, or any claim that the resulting rules generalise. |
+| Fürnkranz and Flach, *ROC 'n' rule learning: towards a better understanding of covering algorithms* (2005) | Peer-reviewed, Machine Learning 2005 | Laplace and m-estimates act as precision-like heuristics whose isometrics favour small consistent rules; linear cost heuristics such as WRAcc trade coverage against precision. | Justifies replacing the Laplace beam ordering with a linear coverage-aware ordering while keeping the gates unchanged. | It does not choose a cost ratio, prove a rule is causal, or validate any repository-specific vocabulary. |
+| Elkan, *The foundations of cost-sensitive learning* (2001) | Peer-reviewed, IJCAI 2001 | The optimal decision alerts when the posterior probability exceeds the cost ratio c_FP / (c_FP + c_FN); an absolute cost therefore implies an absolute precision floor independent of prevalence. | `utility_cost_basis: prior_odds` charges a false alert `false_positive_cost` times the train prior odds, so the utility gate expresses a relative decision consistent with the relative-lift gate instead of a hidden absolute floor. | It does not supply the true costs of a false alert in any repository, and RuleLoom's utility is a train-only ranking device, not a calibrated decision rule. |
 | Cropper et al., *Inductive Logic Programming at 30* | Peer-reviewed review, 2022 | ILP induces logic programs from examples and background knowledge; the review emphasizes that suitable background knowledge is crucial and traditionally difficult or costly to hand-craft. | Use ILP only where predicates and labels have explicit domain meaning; govern a repository-configured vocabulary as pre-registered background knowledge. | A general ILP review does not validate `configured_paths@1`, any particular glob library, or coding-agent utility. |
 | Srinivasan, King & Bain, *An Empirical Study of the Use of Relevance Information in Inductive Logic Programming* | Peer-reviewed, JMLR 2003 | In two biochemical tasks, incrementally adding expert-ranked groups of background predicates found models of comparable predictive accuracy substantially faster than starting with all background information; relevance ordering outperformed random ordering. | Treat vocabulary size and relevance as substantive design concerns. Use outcome-blind architecture expertise and structural audits to identify a defensible first-cut predicate library before labels are opened. | Two biochemical domains and an expert relevance ordering do not validate path prevalence as relevance, establish a universal ranking, or show that RuleLoom's audit improves predictive performance. |
 | Cropper & Morel, *Learning Programs by Learning from Failures* | Peer-reviewed, Machine Learning, 2021 | Popper's generate-test-constrain loop prunes failed hypothesis regions and learns textually minimal logic programs in its evaluated domains. | Offer Popper as an optional serious ILP engine; bound and record its hypothesis bias. | The original clean-example objective is not a license to treat repository labels as noise-free. |
@@ -451,6 +454,8 @@ No cited result establishes that:
   stable, or predictive merely because it was proposed;
 - a Git revert-window negative or trailer revert is ground truth; both are weak
   exploratory labels that miss fix-forward repairs and unreachable branches;
+- a line-content rework is a defect; it is the SZZ structural core without a
+  fix classification and inherits its refactoring and tangled-change noise;
 - the permutation null or a Wilson lower bound provides post-selection
   inference for a searched rule.
 
@@ -497,6 +502,7 @@ and deprecation.
 | Point precision rewards tiny pure clauses | Wilson lower-bound precision gate and selection order; near-miss statistics calibrated by a within-block label-permutation null |
 | A clause fits one period of the training window | Cross-half temporal-consistency gate plus chronological grow/prune windows with complete-window re-gating |
 | Git-only cohorts have no negatives at all | Preregistered `outcomes.git_window_days` window plus a persisted history horizon; the resulting negative is weak, opt-in, recorded per observation, and non-confirmatory |
+| Revert-based positives are too rare to learn from | `post_merge_rework`: line-content rework within a preregistered window from a bounded Git scan with a persisted coverage record; weak, opt-in, non-confirmatory, and explicitly a "did not stick" proxy rather than a defect label |
 
 ## Required experimental reporting
 

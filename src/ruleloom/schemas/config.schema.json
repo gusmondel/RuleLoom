@@ -147,6 +147,8 @@
         "beam_width": {"type": "integer", "minimum": 1, "maximum": 256},
         "predicate_ranking": {"enum": ["rate_gap", "logistic_weight"]},
         "precision_estimate": {"enum": ["point", "wilson_lower"]},
+        "beam_ranking": {"enum": ["laplace", "wracc"]},
+        "utility_cost_basis": {"enum": ["absolute", "prior_odds"]},
         "require_temporal_consistency": {"type": "boolean"},
         "prune_fraction": {"type": "number", "minimum": 0, "maximum": 0.5},
         "permutation_runs": {"type": "integer", "minimum": 0, "maximum": 1000},
@@ -296,7 +298,18 @@
           "type": ["integer", "null"],
           "minimum": 1,
           "maximum": 3650
-        }
+        },
+        "rework_window_days": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 3650
+        },
+        "rework_min_lines": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "rework_ignore_same_author": {"type": "boolean"}
+      },
+      "dependentRequired": {
+        "rework_min_lines": ["rework_window_days"],
+        "rework_ignore_same_author": ["rework_window_days"]
       }
     }
   },
@@ -324,6 +337,8 @@
                     {"required": ["beam_width"]},
                     {"required": ["predicate_ranking"]},
                     {"required": ["precision_estimate"]},
+                    {"required": ["beam_ranking"]},
+                    {"required": ["utility_cost_basis"]},
                     {"required": ["require_temporal_consistency"]},
                     {"required": ["prune_fraction"]},
                     {"required": ["permutation_runs"]},
@@ -358,6 +373,8 @@
                     {"required": ["beam_width"]},
                     {"required": ["predicate_ranking"]},
                     {"required": ["precision_estimate"]},
+                    {"required": ["beam_ranking"]},
+                    {"required": ["utility_cost_basis"]},
                     {"required": ["require_temporal_consistency"]},
                     {"required": ["prune_fraction"]},
                     {"required": ["permutation_runs"]},
@@ -391,6 +408,8 @@
                     {"required": ["beam_width"]},
                     {"required": ["predicate_ranking"]},
                     {"required": ["precision_estimate"]},
+                    {"required": ["beam_ranking"]},
+                    {"required": ["utility_cost_basis"]},
                     {"required": ["require_temporal_consistency"]},
                     {"required": ["prune_fraction"]},
                     {"required": ["permutation_runs"]},
@@ -423,6 +442,8 @@
                 {"required": ["beam_width"]},
                 {"required": ["predicate_ranking"]},
                 {"required": ["precision_estimate"]},
+                {"required": ["beam_ranking"]},
+                {"required": ["utility_cost_basis"]},
                 {"required": ["require_temporal_consistency"]},
                 {"required": ["prune_fraction"]},
                 {"required": ["permutation_runs"]},

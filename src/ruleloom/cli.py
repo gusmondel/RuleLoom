@@ -47,6 +47,7 @@ from ruleloom.history.importing import import_change_units, import_events
 from ruleloom.history.materialize import materialize_history
 from ruleloom.history.models import ChangeUnit, HistoricalEvent
 from ruleloom.history.outcomes import ATOMIC_OUTCOME_TARGETS
+from ruleloom.history.rework import scan_rework
 from ruleloom.history.storage import (
     change_units_path,
     events_path,
@@ -208,6 +209,9 @@ def _cmd_init(args: argparse.Namespace) -> int:
         schema_version=5,
         agents=selected,
         git_window_days=args.git_window_days,
+        rework_window_days=args.rework_window_days,
+        rework_min_lines=args.rework_min_lines,
+        rework_ignore_same_author=not args.rework_keep_same_author,
     )
     print(f"Initialized RuleLoom in {result.root}")
     print(f"Config: {result.root / CONFIG_PATH}")
@@ -474,6 +478,32 @@ def _cmd_history_bootstrap_git(args: argparse.Namespace) -> int:
                 "opt-in label evidence. Import normalized provider events for confirmatory "
                 "change units."
             ),
+        }
+    )
+    return 0
+
+
+def _cmd_history_scan_rework(args: argparse.Namespace) -> int:
+    """Scan Git-landed commits for later line-content rework and persist weak events."""
+
+    root, config = _project(args)
+    _ensure_repository_boundary(root, config)
+    events, units = load_history_snapshot(events_path(root), change_units_path(root))
+    if not units:
+        raise ModelError("no historical change units are available; run bootstrap-git first")
+    report = scan_rework(root, config, units, events)
+    event_counts, _unit_counts = upsert_history_batch(
+        events_path(root),
+        report.events,
+        change_units_path(root),
+        (),
+    )
+    events_inserted, events_unchanged = event_counts
+    _json(
+        {
+            **report.to_dict(),
+            "events_inserted": events_inserted,
+            "events_unchanged": events_unchanged,
         }
     )
     return 0
@@ -1797,6 +1827,27 @@ def build_parser() -> argparse.ArgumentParser:
             "reachable history becomes an opt-in weak negative (never confirmatory)"
         ),
     )
+    init.add_argument(
+        "--rework-window-days",
+        type=int,
+        help=(
+            "register a line-content rework window in days for post_merge_rework; a landed "
+            "commit whose added lines a later commit deleted within the window becomes an "
+            "opt-in weak positive, and one with no such rework before the scanned horizon an "
+            "opt-in weak negative (never confirmatory)"
+        ),
+    )
+    init.add_argument(
+        "--rework-min-lines",
+        type=int,
+        default=3,
+        help="minimum reworked lines for a rework vote (default 3)",
+    )
+    init.add_argument(
+        "--rework-keep-same-author",
+        action="store_true",
+        help="count rework by the same author (ignored by default as ordinary follow-up)",
+    )
     init.set_defaults(handler=_cmd_init)
 
     packs = subparsers.add_parser("packs", help="inspect built-in evidence packs")
@@ -1981,6 +2032,15 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     bootstrap_git.set_defaults(handler=_cmd_history_bootstrap_git)
+
+    scan_rework_parser = history_commands.add_parser(
+        "scan-rework",
+        help=(
+            "scan Git-landed commits for later line-content rework within the registered "
+            "window and persist weak rework events plus a scan coverage record"
+        ),
+    )
+    scan_rework_parser.set_defaults(handler=_cmd_history_scan_rework)
 
     history_import = history_commands.add_parser(
         "import", help="import normalized provider events and/or change units"

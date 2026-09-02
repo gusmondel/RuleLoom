@@ -271,6 +271,8 @@ def _horn_settings(config: RuleLoomConfig) -> HornSettings:
         near_miss_limit=learner.near_miss_limit,
         search_strategy=learner.search_strategy,
         beam_width=learner.beam_width,
+        beam_ranking=learner.beam_ranking,
+        utility_cost_basis=learner.utility_cost_basis,
         precision_estimate=learner.precision_estimate,
         require_temporal_consistency=learner.require_temporal_consistency,
         prune_fraction=learner.prune_fraction,

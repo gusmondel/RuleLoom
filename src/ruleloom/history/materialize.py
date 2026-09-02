@@ -23,9 +23,11 @@ from ruleloom.history.outcomes import (
     VALIDATION_REWORK_REQUIRED,
     GitWindow,
     OutcomeDerivation,
+    ReworkWindow,
     aggregate_votes,
     derive_outcome,
     git_window_from_events,
+    rework_window_from_events,
 )
 from ruleloom.history.units import (
     validate_change_unit_event_links,
@@ -41,6 +43,7 @@ from ruleloom.models import (
     content_hash,
     parse_timestamp,
 )
+from ruleloom.packs.configured_paths import MatcherBudgetError
 
 _MAX_SKIP_PREVIEW = 50
 _TARGET_ALIASES = {"needs_extra_validation": VALIDATION_REWORK_REQUIRED}
@@ -68,6 +71,8 @@ class MaterializationReport:
     eligible_unknown: int
     git_window: GitWindow | None = None
     git_window_negatives: int = 0
+    rework_window: ReworkWindow | None = None
+    rework_window_negatives: int = 0
 
     @staticmethod
     def _retention(eligible: int, retained: int) -> JsonObject:
@@ -95,6 +100,8 @@ class MaterializationReport:
             "manifest_hash": self.manifest_hash,
             "git_window": None if self.git_window is None else self.git_window.to_dict(),
             "git_window_negatives": self.git_window_negatives,
+            "rework_window": None if self.rework_window is None else self.rework_window.to_dict(),
+            "rework_window_negatives": self.rework_window_negatives,
             "retention_by_outcome": {
                 "positive": self._retention(self.eligible_positive, self.positive),
                 "negative": self._retention(self.eligible_negative, self.negative),
@@ -134,6 +141,7 @@ def _historical_observation(
     aggregate_statistics: AggregateDiffStatistics | None,
     repository_context: SnapshotRepositoryContext,
     git_window: GitWindow | None,
+    rework_window: ReworkWindow | None = None,
 ) -> Observation:
     if aggregate_statistics is None:
         snapshot = collect_snapshot(
@@ -208,6 +216,7 @@ def _historical_observation(
         "historical_votes": [vote.to_dict() for vote in derivation.votes],
         "weak_evidence_enabled": weak_evidence_enabled,
         "historical_git_window": None if git_window is None else git_window.to_dict(),
+        "historical_rework_window": (None if rework_window is None else rework_window.to_dict()),
         "history_warnings": cast(JsonValue, warnings),
     }
     return replace(
@@ -264,6 +273,8 @@ def _skip_reason_code(reason: str) -> str:
         return "aggregate_scope_exclusions"
     if "configured evidence scope" in reason:
         return "ineligible_evidence_scope"
+    if reason.startswith("configured path extraction"):
+        return "matcher_budget_exceeded"
     return "git_evidence_error"
 
 
@@ -279,6 +290,20 @@ def resolve_git_window(
     )
 
 
+def resolve_rework_window(
+    config: RuleLoomConfig,
+    events: tuple[HistoricalEvent, ...] | list[HistoricalEvent],
+) -> ReworkWindow | None:
+    """Resolve the registered rework window against the persisted rework scan."""
+    return rework_window_from_events(
+        events,
+        window_days=config.outcomes.rework_window_days,
+        min_lines=config.outcomes.rework_min_lines,
+        ignore_same_author=config.outcomes.rework_ignore_same_author,
+        repository_id=config.protocol.repository_id,
+    )
+
+
 def validate_materialized_outcome(
     config: RuleLoomConfig,
     observation: Observation,
@@ -286,6 +311,7 @@ def validate_materialized_outcome(
     events: tuple[HistoricalEvent, ...] | list[HistoricalEvent],
     *,
     git_window: GitWindow | None = None,
+    rework_window: ReworkWindow | None = None,
 ) -> None:
     """Recompute a persisted historical label and its confirmatory status."""
     validate_change_unit_evidence(unit, events)
@@ -306,6 +332,7 @@ def validate_materialized_outcome(
         selected_target,
         include_weak=weak_evidence_enabled,
         git_window=git_window,
+        rework_window=rework_window,
     )
     strong_only = aggregate_votes(selected_target, derivation.votes, include_weak=False)
     weak_votes_contributed = (
@@ -315,6 +342,7 @@ def validate_materialized_outcome(
     )
     expected_confirmatory = unit.confirmatory and not weak_votes_contributed
     expected_window = None if git_window is None else git_window.to_dict()
+    expected_rework = None if rework_window is None else rework_window.to_dict()
     event_manifest_hash = content_hash(
         [event.to_dict() for event in sorted(events, key=lambda item: item.id)]
     )
@@ -331,6 +359,7 @@ def validate_materialized_outcome(
         or observation.metadata.get("historical_prediction_at") != unit.prediction_at
         or observation.metadata.get("historical_finalized_at") != unit.finalized_at
         or observation.metadata.get("historical_git_window") != expected_window
+        or observation.metadata.get("historical_rework_window") != expected_rework
     ):
         raise ModelError(
             f"historical observation {observation.id!r} does not match its recomputed "
@@ -409,6 +438,8 @@ def materialize_history(
     missing_objects = repository_context.missing_object_ids
     git_window = resolve_git_window(config, event_values)
     git_window_negatives = 0
+    rework_window = resolve_rework_window(config, event_values)
+    rework_window_negatives = 0
     for unit in ordered_units:
         linked = {
             event.id: event for event in events_by_change.get((unit.repository_id, unit.id), ())
@@ -428,6 +459,7 @@ def materialize_history(
             selected_target,
             include_weak=include_weak,
             git_window=git_window,
+            rework_window=rework_window,
         )
         eligible_counts[derivation.value] += 1
         unit_missing = tuple(
@@ -457,13 +489,14 @@ def materialize_history(
                 aggregate_statistics=_aggregate_diff_statistics(unit, unit_events),
                 repository_context=repository_context,
                 git_window=git_window,
+                rework_window=rework_window,
             )
         except MissingPromisorObjectsError:
             # This is a cohort-level environment problem, not unit-level missingness.
             # Failing the transaction prevents hundreds of one-object network fetches
             # and avoids retaining a path-dependent subset of the history.
             raise
-        except GitFactsError as exc:
+        except (GitFactsError, MatcherBudgetError) as exc:
             reason = str(exc)
             skipped_by_reason[_skip_reason_code(reason)] += 1
             skipped_manifest.update(unit.id.encode())
@@ -483,6 +516,13 @@ def materialize_history(
             and evidence.source == "historical-events:" + git_window.horizon_event_id
         ):
             git_window_negatives += 1
+        if (
+            rework_window is not None
+            and observation.labels[config.target] is LabelValue.NEGATIVE
+            and evidence is not None
+            and evidence.source == "historical-events:" + rework_window.scan_event_id
+        ):
+            rework_window_negatives += 1
 
     manifest: dict[str, JsonValue] = {
         "schema_version": 1,
@@ -491,6 +531,7 @@ def materialize_history(
         "outcome_target": selected_target,
         "weak_evidence_enabled": include_weak,
         "git_window": None if git_window is None else git_window.to_dict(),
+        "rework_window": None if rework_window is None else rework_window.to_dict(),
         "event_manifest_hash": complete_event_manifest_hash,
         "unit_ids": [item.id for item in ordered_units],
         "observation_ids": [item.id for item in observations],
@@ -518,4 +559,6 @@ def materialize_history(
         eligible_unknown=eligible_counts[LabelValue.UNKNOWN],
         git_window=git_window,
         git_window_negatives=git_window_negatives,
+        rework_window=rework_window,
+        rework_window_negatives=rework_window_negatives,
     )
