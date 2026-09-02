@@ -31,6 +31,7 @@ from ruleloom.first_hour import (
     RepositoryAuditLimits,
     collect_commit_diffs,
 )
+from ruleloom.gitfacts import GitFactsError, _run_git_capped
 from ruleloom.history_features import (
     _normalize_codeowners_pattern,
     _read_codeowners_batch,
@@ -58,7 +59,10 @@ from ruleloom.repository_assertions import (
     RepositoryAssertion,
     RepositoryAssertionManifest,
     RepositoryAssertionSourceRef,
+    _source_path,
 )
+
+_MAX_SOURCE_BYTES = 1024 * 1024
 
 DISCOVERY_ENGINE_VERSION = "ruleloom-discovery/0.1"
 HOTSPOT_PREFIX = "touches_hotspot_"
@@ -83,6 +87,9 @@ class DiscoveryLimits:
     min_pair_support: int = 5
     min_pair_confidence: float = 0.7
     max_cochange_paths_per_commit: int = 200
+    max_pairs_per_source: int = 2
+    min_pair_violations: int = 2
+    max_owner_area_coverage: float = 0.95
 
     def __post_init__(self) -> None:
         for name, value, maximum in (
@@ -93,6 +100,7 @@ class DiscoveryLimits:
             ("min_hotspot_changes", self.min_hotspot_changes, _MAX_COMMITS),
             ("min_pair_support", self.min_pair_support, _MAX_COMMITS),
             ("max_cochange_paths_per_commit", self.max_cochange_paths_per_commit, 500),
+            ("max_pairs_per_source", self.max_pairs_per_source, _MAX_PROPOSALS),
         ):
             if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
                 raise ModelError(f"{name} must be an integer between 1 and {maximum}")
@@ -102,6 +110,18 @@ class DiscoveryLimits:
             or not 0 < self.min_pair_confidence <= 1
         ):
             raise ModelError("min_pair_confidence must be between 0 (exclusive) and 1")
+        if (
+            isinstance(self.min_pair_violations, bool)
+            or not isinstance(self.min_pair_violations, int)
+            or not 0 <= self.min_pair_violations <= _MAX_COMMITS
+        ):
+            raise ModelError(f"min_pair_violations must be between 0 and {_MAX_COMMITS}")
+        if (
+            isinstance(self.max_owner_area_coverage, bool)
+            or not isinstance(self.max_owner_area_coverage, int | float)
+            or not 0 < self.max_owner_area_coverage <= 1
+        ):
+            raise ModelError("max_owner_area_coverage must be between 0 (exclusive) and 1")
         if self.max_hotspots + self.max_owner_areas > MAX_PREDICATES:
             raise ModelError(
                 f"max_hotspots plus max_owner_areas cannot exceed {MAX_PREDICATES} path predicates"
@@ -117,6 +137,9 @@ class DiscoveryLimits:
             "min_pair_support": self.min_pair_support,
             "min_pair_confidence": self.min_pair_confidence,
             "max_cochange_paths_per_commit": self.max_cochange_paths_per_commit,
+            "max_pairs_per_source": self.max_pairs_per_source,
+            "min_pair_violations": self.min_pair_violations,
+            "max_owner_area_coverage": self.max_owner_area_coverage,
         }
 
 
@@ -137,6 +160,8 @@ class DiscoveryProposal:
     owner_areas: tuple[JsonValue, ...]
     pairs: tuple[JsonValue, ...]
     warnings: tuple[str, ...]
+    evidence_path: str | None = None
+    evidence_document: str | None = None
     engine_version: str = DISCOVERY_ENGINE_VERSION
 
     @property
@@ -168,6 +193,12 @@ class DiscoveryProposal:
             "hotspots": list(self.hotspots),
             "owner_areas": list(self.owner_areas),
             "pairs": list(self.pairs),
+            "evidence_path": self.evidence_path,
+            "evidence_document_sha256": (
+                None
+                if self.evidence_document is None
+                else hashlib.sha256(self.evidence_document.encode("utf-8")).hexdigest()
+            ),
             "warnings": list(self.warnings),
             "limitations": list(self.limitations),
         }
@@ -213,9 +244,11 @@ class DiscoveryProposal:
         lines.extend(("", f"Missing-partner predicates ({len(self.pairs)})"))
         for row_value in self.pairs:
             row = cast(JsonObject, row_value)
+            predicate = row.get("predicate") or "no predicate (never violated)"
             lines.append(
-                f"- {row['predicate']}: {row['path']} changed without {row['partner']} "
-                f"(support {row['support']}, confidence {row['confidence']:.2f})"
+                f"- {predicate}: {row['path']} changed without {row['partner']} "
+                f"(support {row['support']}, confidence {row['confidence']:.2f}, "
+                f"violations {row['violations']})"
             )
         if not self.pairs:
             lines.append("- No pair met the support and confidence floors.")
@@ -268,16 +301,86 @@ def _literal_glob(path: str) -> str | None:
         return None
 
 
+def _blob_sizes(root: Path, revision: str, paths: tuple[str, ...]) -> dict[str, int]:
+    """Return blob sizes at ``revision`` for the requested paths, or nothing on failure."""
+    if not paths:
+        return {}
+    try:
+        stdout, _stderr, returncode = _run_git_capped(
+            root,
+            ("ls-tree", "-l", "-z", revision, "--", *paths),
+            allow_lazy_fetch=False,
+        )
+    except GitFactsError:
+        return {}
+    if returncode != 0:
+        return {}
+    sizes: dict[str, int] = {}
+    for record in stdout.split(b"\x00"):
+        if not record:
+            continue
+        header, _tab, path = record.partition(b"\t")
+        fields = header.split()
+        if len(fields) != 4 or fields[1] != b"blob":
+            continue
+        try:
+            sizes[path.decode("utf-8")] = int(fields[3])
+        except (UnicodeDecodeError, ValueError):
+            continue
+    return sizes
+
+
+def _evidence_document(
+    *,
+    repository_id: str,
+    resolved_ref: str,
+    until: str | None,
+    rows: list[tuple[str, str, str, int, int, float]],
+) -> tuple[str, dict[str, int]]:
+    """Render the reviewable co-change evidence document and the line of each pair."""
+    lines = [
+        "# Co-change evidence proposed by RuleLoom",
+        "",
+        f"Generated by `ruleloom predicates propose` from Git structure only at {resolved_ref}",
+        (f"for commits before {until}." if until is not None else "without a holdout boundary."),
+        f"Repository identity: {repository_id}.",
+        "",
+        "Each line records one historical co-change rate. It is not a dependency, a rule,",
+        "or a causal claim. A human must confirm that the convention is real before the",
+        "matching assertion is declared; delete any line that is not.",
+        "",
+    ]
+    positions: dict[str, int] = {}
+    for assertion_id, source, target, support, total, confidence in rows:
+        positions[assertion_id] = len(lines) + 1
+        lines.append(
+            f"- {assertion_id}: {source} changed together with {target} in {support} of "
+            f"{total} changes ({confidence:.0%})."
+        )
+    lines.append("")
+    return "\n".join(lines), positions
+
+
 def propose_vocabulary(
     root: Path,
     *,
     ref: str = "HEAD",
     until: str | None = None,
     limits: DiscoveryLimits | None = None,
+    evidence_path: str | None = None,
 ) -> DiscoveryProposal:
-    """Propose instantiated predicates and assertion drafts from Git structure only."""
+    """Propose instantiated predicates and assertion drafts from Git structure only.
+
+    ``evidence_path`` names a repository-relative Markdown document that the
+    caller will add to the repository; drafted assertions then cite the line of
+    that document describing their pair. Without it, each draft cites its
+    antecedent path and pairs whose antecedent blob exceeds the assertion source
+    limit are left without a draft.
+    """
 
     selected = limits or DiscoveryLimits()
+    if evidence_path is not None:
+        _source_path(evidence_path)
     boundary = parse_timestamp(until) if until is not None else None
     try:
         diffs, topology, repository_id, history_warnings = collect_commit_diffs(
@@ -381,14 +484,30 @@ def propose_vocabulary(
                     commit_count += 1
             area_candidates.append((commit_count, predicate, globs))
         area_candidates.sort(key=lambda item: (-item[0], item[1]))
-        for commit_count, predicate, globs in area_candidates[: selected.max_owner_areas]:
+        selected_areas = 0
+        for commit_count, predicate, globs in area_candidates:
+            if selected_areas >= selected.max_owner_areas:
+                break
             if commit_count == 0:
                 continue
+            coverage = commit_count / len(commit_paths) if commit_paths else 0.0
+            if coverage >= selected.max_owner_area_coverage:
+                warnings.append(
+                    f"{predicate}: owner area covers {coverage:.0%} of scanned commits and was "
+                    "skipped as uninformative (likely a catch-all CODEOWNERS rule)"
+                )
+                continue
+            selected_areas += 1
             path_predicates[predicate] = PathPredicateConfig(
                 predicate=predicate, include_paths=globs
             )
             owner_rows.append(
-                {"predicate": predicate, "glob_count": len(globs), "commit_count": commit_count}
+                {
+                    "predicate": predicate,
+                    "glob_count": len(globs),
+                    "commit_count": commit_count,
+                    "coverage": coverage,
+                }
             )
 
     pair_rows: list[JsonValue] = []
@@ -403,25 +522,36 @@ def propose_vocabulary(
                 directional.append((confidence, count, source, target))
     directional.sort(key=lambda item: (-item[0], -item[1], item[2], item[3]))
     assertions: list[RepositoryAssertion] = []
+    evidence_rows: list[tuple[str, str, str, int, int, float]] = []
+    pending_sources: list[tuple[int, str]] = []
+    per_source: Counter[str] = Counter()
     for confidence, count, source, target in directional:
         if len(pair_rows) >= selected.max_pairs:
             break
+        if per_source[source] >= selected.max_pairs_per_source:
+            continue
         source_glob = _literal_glob(source)
         target_glob = _literal_glob(target)
         if source_glob is None or target_glob is None:
             continue
         digest = _digest("pair", source, target)
-        predicate = _predicate_name(MISSING_PARTNER_PREFIX, _slug(source), digest)
-        if predicate in partner_predicates:
-            continue
-        partner_predicates[predicate] = PartnerPredicateConfig(
-            predicate=predicate, path=source_glob, partner=target_glob
-        )
+        violations = touches[source] - count
+        partner_predicate: str | None = None
+        if violations >= selected.min_pair_violations:
+            partner_predicate = _predicate_name(MISSING_PARTNER_PREFIX, _slug(source), digest)
+            if partner_predicate in partner_predicates:
+                continue
+            partner_predicates[partner_predicate] = PartnerPredicateConfig(
+                predicate=partner_predicate, path=source_glob, partner=target_glob
+            )
+        per_source[source] += 1
         row: JsonObject = {
-            "predicate": predicate,
+            "predicate": partner_predicate,
             "path": source,
             "partner": target,
             "support": count,
+            "total": touches[source],
+            "violations": violations,
             "confidence": confidence,
             "assertion_id": None,
         }
@@ -453,13 +583,64 @@ def propose_vocabulary(
                     sources=(RepositoryAssertionSourceRef(path=source, start_line=1, end_line=1),),
                 )
             )
+            evidence_rows.append((assertion_id, source, target, count, touches[source], confidence))
+            pending_sources.append((len(assertions) - 1, source))
             row["assertion_id"] = assertion_id
         else:
             warnings.append(
-                f"{predicate}: endpoint path predicates did not fit the {MAX_PREDICATES}-"
-                "predicate cap, so no assertion draft was emitted"
+                f"{source} -> {target}: endpoint path predicates did not fit the "
+                f"{MAX_PREDICATES}-predicate cap, so no assertion draft was emitted"
             )
         pair_rows.append(row)
+
+    evidence_document: str | None = None
+    if assertions and evidence_path is not None:
+        evidence_document, positions = _evidence_document(
+            repository_id=repository_id,
+            resolved_ref=resolved_ref,
+            until=None if boundary is None else until,
+            rows=evidence_rows,
+        )
+        assertions = [
+            RepositoryAssertion(
+                assertion_id=item.assertion_id,
+                revision=item.revision,
+                summary=item.summary,
+                antecedent=item.antecedent,
+                expectation=item.expectation,
+                sources=(
+                    RepositoryAssertionSourceRef(
+                        path=evidence_path,
+                        start_line=positions[item.assertion_id],
+                        end_line=positions[item.assertion_id],
+                    ),
+                ),
+            )
+            for item in assertions
+        ]
+    elif assertions:
+        sizes = _blob_sizes(
+            root, resolved_ref, tuple(dict.fromkeys(source for _index, source in pending_sources))
+        )
+        oversized = {
+            index for index, source in pending_sources if sizes.get(source, 0) > _MAX_SOURCE_BYTES
+        }
+        if oversized:
+            for index in sorted(oversized):
+                dropped = assertions[index]
+                warnings.append(
+                    f"{dropped.assertion_id}: antecedent blob exceeds the {_MAX_SOURCE_BYTES}-"
+                    "byte assertion source limit; pass --evidence-path to cite a reviewable "
+                    "evidence document instead"
+                )
+            kept_ids = {
+                item.assertion_id for index, item in enumerate(assertions) if index not in oversized
+            }
+            assertions = [item for item in assertions if item.assertion_id in kept_ids]
+            for row_value in pair_rows:
+                row = cast(JsonObject, row_value)
+                if row.get("assertion_id") not in kept_ids:
+                    row["assertion_id"] = None
 
     pack_config = ConfiguredPathsConfig(
         path_predicates=tuple(path_predicates.values()),
@@ -480,6 +661,8 @@ def propose_vocabulary(
         owner_areas=tuple(owner_rows),
         pairs=tuple(pair_rows),
         warnings=tuple(dict.fromkeys(warnings)),
+        evidence_path=evidence_path if evidence_document is not None else None,
+        evidence_document=evidence_document,
     )
 
 

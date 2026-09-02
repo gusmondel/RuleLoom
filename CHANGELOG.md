@@ -37,6 +37,11 @@ always require a new explicit schema, adapter, pack, or experiment version.
   project exists. `ruleloom init --pack-config` freezes the reviewed draft.
 - `predicates audit` reports missing partners, path examples for every
   predicate, and time-window span/warm-up warnings.
+- `predicates propose --evidence-path` writes a reviewable co-change evidence
+  document that drafted assertions cite; `--max-pairs-per-source` and
+  `--min-pair-violations` keep one file family from filling the draft and
+  reserve `missing_partner_*` predicates for pairs that were actually violated.
+  Catch-all `CODEOWNERS` areas are skipped as uninformative.
 
 ### Changed
 
@@ -48,6 +53,9 @@ always require a new explicit schema, adapter, pack, or experiment version.
   adapter version.
 - Sealed-snapshot errors now recommend starting a new experiment instead of
   re-materializing under the same protocol hash.
+- The fail-closed Horn work estimate covers learning and bootstrap searches;
+  permutation-null runs use leftover budget and stop early instead of blocking
+  `learn` on large cohorts.
 
 ### Scientific integrity
 

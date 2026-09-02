@@ -342,6 +342,14 @@ def structured_repo(tmp_path: Path) -> Path:
             f"2025-01-{day:02d}T00:00:00Z",
         )
         day += 1
+    # Two violations: the registry changed without its JSON partner.
+    for index in range(2):
+        _commit(
+            repo,
+            {"pkg/registry.go": f"package pkg // solo {index}\n"},
+            f"2025-01-{day:02d}T00:00:00Z",
+        )
+        day += 1
     _commit(repo, {"web/app.ts": "export {};\n"}, "2025-02-01T00:00:00Z")
     _commit(repo, {"pkg/other.go": "package pkg\n"}, "2025-03-01T00:00:00Z")
     return repo
@@ -356,18 +364,26 @@ def test_proposer_instantiates_hotspots_owner_areas_pairs_and_assertions(
     again = propose_vocabulary(structured_repo, until="2025-02-15T00:00:00Z", limits=limits)
 
     assert proposal.manifest_hash == again.manifest_hash
-    assert proposal.commit_count == 11
+    assert proposal.commit_count == 13
     assert proposal.excluded_after_until == 1
     hotspots = {row["path"]: row["change_count"] for row in proposal.hotspots}  # type: ignore[index]
     assert hotspots["web/locales/en.json"] == 10
-    assert hotspots["pkg/registry.go"] == 7
+    assert hotspots["pkg/registry.go"] == 9
     assert len(proposal.owner_areas) == 2
     pairs = {(row["path"], row["partner"]): row for row in proposal.pairs}  # type: ignore[index]
     registry = pairs[("pkg/registry.go", "pkg/registry.json")]
     assert registry["support"] == 7
-    assert registry["confidence"] == 1.0
+    assert registry["total"] == 9
+    assert registry["violations"] == 2
+    assert registry["confidence"] == 7 / 9
     assert str(registry["predicate"]).startswith("missing_partner_registry_go_")
     assert registry["assertion_id"] is not None
+    # The JSON partner always changed together with the registry: an assertion draft
+    # is still useful, but a never-violated predicate would be structurally constant.
+    reverse = pairs[("pkg/registry.json", "pkg/registry.go")]
+    assert reverse["violations"] == 0
+    assert reverse["predicate"] is None
+    assert reverse["assertion_id"] is not None
     assert proposal.assertion_manifest is not None
     manifest = RepositoryAssertionManifest.from_dict(proposal.assertion_manifest.to_dict())
     drafted = next(
@@ -384,9 +400,75 @@ def test_proposer_instantiates_hotspots_owner_areas_pairs_and_assertions(
     assert proposal.to_dict()["draft"] is True
 
     unbounded = propose_vocabulary(structured_repo, limits=limits)
-    assert unbounded.commit_count == 12
+    assert unbounded.commit_count == 14
     assert any("no holdout boundary" in warning for warning in unbounded.warnings)
     assert "Missing-partner predicates" in unbounded.render_text()
+
+
+def test_proposer_cites_an_evidence_document_and_skips_catch_all_owner_areas(
+    structured_repo: Path,
+) -> None:
+    _commit(
+        structured_repo,
+        {".github/CODEOWNERS": "* @team-all\npkg/ @team-core\nweb/ @team-web\n"},
+        "2025-03-02T00:00:00Z",
+    )
+    limits = DiscoveryLimits(min_pair_support=5, min_pair_confidence=0.7, min_hotspot_changes=3)
+
+    proposal = propose_vocabulary(
+        structured_repo,
+        limits=limits,
+        evidence_path="docs/ruleloom/cochange-evidence.md",
+    )
+
+    assert proposal.evidence_path == "docs/ruleloom/cochange-evidence.md"
+    assert proposal.evidence_document is not None
+    assert proposal.assertion_manifest is not None
+    lines = proposal.evidence_document.splitlines()
+    for assertion in proposal.assertion_manifest.assertions:
+        source = assertion.sources[0]
+        assert source.path == "docs/ruleloom/cochange-evidence.md"
+        assert source.start_line == source.end_line
+        assert lines[source.start_line - 1].startswith(f"- {assertion.assertion_id}:")
+    assert len(proposal.owner_areas) == 2
+    assert any("catch-all" in warning for warning in proposal.warnings)
+    assert proposal.to_dict()["evidence_document_sha256"] is not None
+    with pytest.raises(ModelError):
+        propose_vocabulary(structured_repo, limits=limits, evidence_path=".ruleloom/evidence.md")
+
+
+def test_proposer_drops_drafts_whose_antecedent_exceeds_the_source_limit(tmp_path: Path) -> None:
+    repo = tmp_path / "oversized"
+    repo.mkdir()
+    _git(repo, "init", "-b", "main")
+    _git(repo, "config", "user.name", "Oversized")
+    _git(repo, "config", "user.email", "oversized@example.invalid")
+    big = "x" * (1024 * 1024 + 10) + "\n"
+    _commit(repo, {"gen/install.yaml": big, "gen/install-ha.yaml": "a\n"}, "2025-01-01T00:00:00Z")
+    for index in range(6):
+        _commit(
+            repo,
+            {"gen/install.yaml": big + f"# {index}\n", "gen/install-ha.yaml": f"a{index}\n"},
+            f"2025-01-{index + 2:02d}T00:00:00Z",
+        )
+    limits = DiscoveryLimits(min_pair_support=5, min_pair_confidence=0.7, min_pair_violations=0)
+
+    plain = propose_vocabulary(repo, limits=limits)
+    documented = propose_vocabulary(repo, limits=limits, evidence_path="docs/evidence.md")
+
+    dropped = [
+        row
+        for row in plain.pairs
+        if row["path"] == "gen/install.yaml"  # type: ignore[index]
+    ]
+    assert dropped and dropped[0]["assertion_id"] is None  # type: ignore[index]
+    assert any("assertion source limit" in warning for warning in plain.warnings)
+    kept = [
+        row
+        for row in documented.pairs
+        if row["path"] == "gen/install.yaml"  # type: ignore[index]
+    ]
+    assert kept and kept[0]["assertion_id"] is not None  # type: ignore[index]
 
 
 def test_cli_proposes_initializes_collects_and_declares_the_reviewed_vocabulary(
@@ -410,6 +492,8 @@ def test_cli_proposes_initializes_collects_and_declares_the_reviewed_vocabulary(
                 str(pack_config_file),
                 "--assertions-output",
                 str(assertions_file),
+                "--evidence-path",
+                "docs/ruleloom/cochange-evidence.md",
             ]
         )
         == 0
@@ -418,6 +502,8 @@ def test_cli_proposes_initializes_collects_and_declares_the_reviewed_vocabulary(
     assert proposal["pack"] == {"name": "generic_changes", "version": 3}
     assert pack_config_file.is_file()
     assert assertions_file.is_file()
+    assert (structured_repo / "docs/ruleloom/cochange-evidence.md").is_file()
+    assert proposal["outputs"]["--evidence-path"].endswith("cochange-evidence.md")
     assert (
         cli.main(
             [

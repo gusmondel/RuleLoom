@@ -119,6 +119,7 @@ from ruleloom.storage import (
     save_signal_probe,
     signal_probe_path,
     write_json,
+    write_text,
 )
 
 _REPOSITORY_ASSERTIONS_PATH = Path(".ruleloom/repository-assertions.json")
@@ -1592,9 +1593,24 @@ def _cmd_predicates_propose(args: argparse.Namespace) -> int:
             min_hotspot_changes=args.min_hotspot_changes,
             min_pair_support=args.min_pair_support,
             min_pair_confidence=args.min_pair_confidence,
+            max_pairs_per_source=args.max_pairs_per_source,
+            min_pair_violations=args.min_pair_violations,
         ),
+        evidence_path=args.evidence_path,
     )
     outputs: dict[str, str] = {}
+    if args.evidence_path is not None:
+        if proposal.evidence_document is None:
+            warnings.append("--evidence-path skipped: no assertion draft was produced")
+        else:
+            evidence_target = root / args.evidence_path
+            if evidence_target.exists() or evidence_target.is_symlink():
+                raise ModelError(
+                    f"refusing to overwrite existing evidence document: {evidence_target}"
+                )
+            evidence_target.parent.mkdir(parents=True, exist_ok=True)
+            write_text(evidence_target, proposal.evidence_document)
+            outputs["--evidence-path"] = str(evidence_target)
     for option, destination, payload in (
         ("--pack-config-output", args.pack_config_output, proposal.pack_config.to_dict()),
         (
@@ -1823,6 +1839,29 @@ def build_parser() -> argparse.ArgumentParser:
     predicate_propose.add_argument("--min-hotspot-changes", type=int, default=3)
     predicate_propose.add_argument("--min-pair-support", type=int, default=5)
     predicate_propose.add_argument("--min-pair-confidence", type=float, default=0.7)
+    predicate_propose.add_argument(
+        "--max-pairs-per-source",
+        type=int,
+        default=2,
+        help="cap pairs sharing one antecedent path so one file family cannot fill the draft",
+    )
+    predicate_propose.add_argument(
+        "--min-pair-violations",
+        type=int,
+        default=2,
+        help=(
+            "observed violations required before a missing_partner_* predicate is proposed; "
+            "pairs below it still receive an assertion draft"
+        ),
+    )
+    predicate_propose.add_argument(
+        "--evidence-path",
+        help=(
+            "repository-relative Markdown path (for example docs/ruleloom/cochange-evidence.md) "
+            "written into the checkout and cited by every assertion draft; without it a draft "
+            "cites its antecedent file and oversized antecedents are skipped"
+        ),
+    )
     predicate_propose.add_argument(
         "--pack-config-output",
         help="write the proposed generic_changes@3 pack_config JSON here (must not exist)",

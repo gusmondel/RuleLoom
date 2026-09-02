@@ -469,19 +469,26 @@ holdout when a project exists:
 ```bash
 ruleloom predicates propose . \
   --pack-config-output proposed-pack-config.json \
-  --assertions-output proposed-assertions.json
+  --assertions-output proposed-assertions.json \
+  --evidence-path docs/ruleloom/cochange-evidence.md
 ```
 
 It emits exact-path hotspot predicates, `CODEOWNERS` owner-area predicates
-(globs only; owner identities are hashed and never stored),
-`missing_partner_*` predicates for strong directional co-change pairs, and an
-assertion manifest that translates each pair into `antecedent → expectation`
-form. Review the draft, delete anything that is not a real repository concept,
-then freeze it with `ruleloom init --pack-config` in a fresh experiment and
-declare the assertions with `ruleloom assertions declare`. Proposal is
-deterministic and outcome-blind; activation is always a human decision. An LLM
-may still suggest concepts, but they enter through the same reviewed
-`pack_config`, never through the learner.
+(globs only; owner identities are hashed and never stored; a catch-all rule
+covering nearly every commit is skipped as uninformative), `missing_partner_*`
+predicates for strong directional co-change pairs that were actually violated
+at least twice, and an assertion manifest that translates each pair into
+`antecedent → expectation` form, including pairs that were never violated. At
+most two pairs share one antecedent path, so a family of generated files cannot
+fill the draft. `--evidence-path` writes a reviewable Markdown document into
+the checkout that lists every drafted pair with its counts; each assertion cites
+the line describing it, so `assertions declare` can hash a small human-reviewed
+span instead of a multi-megabyte generated antecedent. Review the draft, delete
+anything that is not a real repository concept, then freeze it with `ruleloom
+init --pack-config` in a fresh experiment and declare the assertions with
+`ruleloom assertions declare`. Proposal is deterministic and outcome-blind;
+activation is always a human decision. An LLM may still suggest concepts, but
+they enter through the same reviewed `pack_config`, never through the learner.
 
 If an existing convention can already be expressed using the frozen predicate
 vocabulary, encode it explicitly rather than asking RuleLoom to parse prose.

@@ -545,19 +545,19 @@ def learn_candidate(
             config.learner.max_predicates,
             len(predicate_selection.ranked_predicates),
         )
+        # Permutation-null runs consume leftover budget and stop early on their own,
+        # so the fail-closed estimate covers only the learning and bootstrap searches.
         estimated_checks = (
             config.learner.hypothesis_count(predicate_count)
             * max(1, (len(train) + 63) // 64)
             * config.learner.max_body
-            * (
-                (config.learner.bootstrap_runs + 1) * config.learner.max_rules
-                + config.learner.permutation_runs
-            )
+            * (config.learner.bootstrap_runs + 1)
+            * config.learner.max_rules
         )
         if estimated_checks > _MAX_HORN_BITSET_WORK_UNITS:
             raise ModelError(
                 "estimated Horn search work exceeds the safe budget; reduce observations, "
-                "max_body, max_predicates, beam_width, bootstrap_runs, or permutation_runs"
+                "max_body, max_predicates, beam_width, or bootstrap_runs"
             )
 
     if config.learner.engine == "horn":
