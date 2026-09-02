@@ -663,11 +663,8 @@ def test_initialize_creates_portable_agent_skills_and_refuses_reinitialization(
     result = initialize_project(root, "ExampleProject", agents=("codex", "claude"))
 
     assert result.config.project == "ExampleProject"
-    assert (result.config.schema_version, result.config.pack, result.config.pack_version) == (
-        5,
-        "generic_changes",
-        3,
-    )
+    identity = (result.config.schema_version, result.config.pack, result.config.pack_version)
+    assert identity == (5, "generic_changes", 4)
     assert result.config.learner.search_strategy == "beam"
     assert result.config.pack_config is not None
     assert result.config.pack_config.is_empty

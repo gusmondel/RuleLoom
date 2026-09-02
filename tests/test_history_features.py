@@ -7,7 +7,13 @@ from typing import Any
 
 import ruleloom.history_features as history_features
 from ruleloom import gitfacts
-from ruleloom.history_features import enrich_history_features
+from ruleloom.history.models import HistoricalEvent
+from ruleloom.history_features import (
+    EXPERIENCE_PREDICATES,
+    OFF_HOURS_PREDICATE,
+    REWORK_HISTORY_PREDICATE,
+    enrich_history_features,
+)
 from ruleloom.models import FactEvidence, LabelValue, Observation
 
 EXTRACTOR = "ruleloom.generic_changes.git.v2"
@@ -20,11 +26,17 @@ def _observation(
     paths: tuple[str, ...],
     *,
     base: str | None = None,
+    author: str | None = None,
+    observed_at: str | None = None,
 ) -> Observation:
     fact = "churn_band_tiny"
     return Observation(
         id=f"commit.{index}",
-        observed_at=(datetime(2024, 1, 1, tzinfo=UTC) + timedelta(days=day)).isoformat(),
+        observed_at=(
+            observed_at
+            if observed_at is not None
+            else (datetime(2024, 1, 1, tzinfo=UTC) + timedelta(days=day)).isoformat()
+        ),
         protocol_hash="a" * 64,
         facts=frozenset({fact}),
         labels={TARGET: LabelValue.UNKNOWN},
@@ -48,8 +60,148 @@ def _observation(
             "files_changed": len(paths),
             "changed_files": list(paths),
             "metadata_files_truncated": 0,
+            **({"historical_author_hash": author} if author is not None else {}),
         },
     )
+
+
+def _rework_event(landed_day: int, files: list[str]) -> HistoricalEvent:
+    landed = (datetime(2024, 1, 1, tzinfo=UTC) + timedelta(days=landed_day)).isoformat()
+    return HistoricalEvent(
+        schema_version=1,
+        id=f"event.git_rework.later{landed_day}.earlier",
+        repository_id="repository.example",
+        kind="rework",
+        occurred_at=landed,
+        available_at=landed,
+        provider="git",
+        source_ref="later",
+        independent_group="change.git_commit.later",
+        change_id="change.git_commit.earlier",
+        data={"files": files, "reworked_lines": 4, "link_kind": "git_line_content"},
+    )
+
+
+A, B, C, D = "a" * 64, "b" * 64, "c" * 64, "d" * 64
+
+
+def _v4_priors() -> list[Observation]:
+    """Author A touches pkg/x every 5 days; B and C touch the same file once each."""
+    # Topological order must agree with time order, otherwise the time-window
+    # features abstain on purpose (see the non-monotonic timestamp test).
+    priors = [_observation(index, index * 5, ("pkg/x/a.go",), author=A) for index in range(1, 21)]
+    priors.append(_observation(21, 101, ("pkg/x/a.go",), author=B))
+    priors.append(_observation(22, 102, ("pkg/x/a.go", "pkg/x/b.go"), author=C))
+    return priors
+
+
+def test_v4_experience_and_ownership_facts_use_only_earlier_changes() -> None:
+    priors = _v4_priors()
+    newcomer = _observation(40, 120, ("pkg/x/a.go", "web/y.ts"), author=D)
+    veteran = _observation(41, 121, ("pkg/x/a.go",), author=A)
+
+    enriched = enrich_history_features(
+        priors, [newcomer, veteran], extractor=EXTRACTOR, pack_version=4, rework_events=[]
+    )
+
+    first, second = enriched
+    assert {
+        "author_low_experience",
+        "author_new_to_area",
+        "touched_files_many_authors",
+    } <= first.facts
+    assert "author:prior_365d_changes:0<3" in first.fact_evidence["author_low_experience"].evidence
+    assert first.metadata["historical_context"]["experience_status"] == "available"
+    assert first.metadata["historical_context"]["version"] == "ruleloom-history-features/3"
+    assert "author_low_experience" not in second.facts
+    assert "author_new_to_area" not in second.facts
+    assert "touched_files_many_authors" in second.facts
+    assert second.metadata["historical_context"]["rework_history_status"] == "available"
+    assert "touches_recently_reworked_file" not in second.facts
+
+
+def test_v4_experience_facts_abstain_during_warmup_and_without_an_author_hash() -> None:
+    priors = _v4_priors()[:5]
+    early = _observation(40, 30, ("pkg/x/a.go",), author=D)
+    anonymous = _observation(41, 120, ("pkg/x/a.go",))
+
+    early_result, anonymous_result = enrich_history_features(
+        priors, [early, anonymous], extractor=EXTRACTOR, pack_version=4
+    )
+
+    assert not {"author_low_experience", "author_new_to_area"} & early_result.facts
+    assert early_result.metadata["historical_context"]["experience_status"] == "abstained_warmup"
+    assert not {"author_low_experience", "author_new_to_area"} & anonymous_result.facts
+    assert (
+        anonymous_result.metadata["historical_context"]["experience_status"]
+        == "abstained_no_author_hash"
+    )
+    assert (
+        anonymous_result.metadata["historical_context"]["rework_history_status"]
+        == "abstained_no_rework_events"
+    )
+
+
+def test_v4_rework_history_fact_uses_reworks_landed_strictly_before_the_change() -> None:
+    priors = _v4_priors()
+    events = [_rework_event(110, ["pkg/x/a.go", "pkg/x/b.go"])]
+    before = _observation(40, 105, ("pkg/x/a.go",), author=A)
+    inside = _observation(41, 120, ("pkg/x/b.go",), author=A)
+    expired = _observation(42, 250, ("pkg/x/a.go",), author=A)
+
+    results = enrich_history_features(
+        priors, [before, inside, expired], extractor=EXTRACTOR, pack_version=4, rework_events=events
+    )
+
+    assert "touches_recently_reworked_file" not in results[0].facts
+    assert "touches_recently_reworked_file" in results[1].facts
+    assert any(
+        reason.startswith("path:pkg/x/b.go;rework_landed_at:")
+        for reason in results[1].fact_evidence["touches_recently_reworked_file"].evidence
+    )
+    assert "touches_recently_reworked_file" not in results[2].facts
+
+
+def test_v4_off_hours_is_judged_in_the_timestamp_local_offset() -> None:
+    priors = _v4_priors()
+    saturday_night = _observation(
+        40, 0, ("pkg/x/a.go",), author=A, observed_at="2024-05-04T23:30:00+02:00"
+    )
+    tuesday_morning = _observation(
+        41, 0, ("pkg/x/a.go",), author=A, observed_at="2024-05-07T10:00:00+02:00"
+    )
+    # 21:30 UTC on a Tuesday is 23:30 in the committer's own +02:00 offset.
+    late_by_offset = _observation(
+        42, 0, ("pkg/x/a.go",), author=A, observed_at="2024-05-07T23:30:00+02:00"
+    )
+
+    results = enrich_history_features(
+        priors,
+        [saturday_night, tuesday_morning, late_by_offset],
+        extractor=EXTRACTOR,
+        pack_version=4,
+        rework_events=[],
+    )
+
+    assert "authored_off_hours" in results[0].facts
+    assert "authored_off_hours" not in results[1].facts
+    assert "authored_off_hours" in results[2].facts
+    assert results[2].fact_evidence["authored_off_hours"].evidence == (
+        "local_weekday:1;local_hour:23",
+    )
+
+
+def test_v3_enrichment_ignores_author_hashes_and_never_emits_v4_facts() -> None:
+    priors = _v4_priors()
+    current = _observation(40, 120, ("pkg/x/a.go", "web/y.ts"), author=D)
+
+    (result,) = enrich_history_features(priors, [current], extractor=EXTRACTOR, pack_version=3)
+
+    assert not set(EXPERIENCE_PREDICATES) & result.facts
+    assert REWORK_HISTORY_PREDICATE not in result.facts
+    assert OFF_HOURS_PREDICATE not in result.facts
+    assert "experience_status" not in result.metadata["historical_context"]
+    assert result.metadata["historical_context"]["version"] == "ruleloom-history-features/2"
 
 
 def test_history_features_find_hotspots_and_missing_usual_partner_without_future_data() -> None:

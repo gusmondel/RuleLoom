@@ -349,7 +349,7 @@ Two optional registrations belong to the same frozen moment. `--git-window-days
 N` registers a revert window for `post_merge_revert_or_hotfix`: a landed change
 with no revert trailer before the window closes, inside history the recorded
 horizon proves complete, becomes an opt-in *weak* negative. `--pack-config
-FILE` freezes a reviewed `generic_changes@3` vocabulary, typically the output of
+FILE` freezes a reviewed `generic_changes@4` vocabulary, typically the output of
 `ruleloom predicates propose` described in step 3:
 
 ```bash
@@ -1098,7 +1098,17 @@ cumulative `churn_at_least_*` and `files_at_least_*` thresholds, strictly prior
 path hotspots and dormancy, bounded missing co-change partners, prior-snapshot
 ownership-boundary and owner-area counts, generated-artifact hints from
 documented path conventions and `linguist-generated` attributes, and any
-reviewed instantiated predicates from `pack_config`. Exact-path predicates
+reviewed instantiated predicates from `pack_config`. `generic_changes@4` keeps
+every one of those facts and adds the just-in-time families of Kamei et al.
+(2013) that Git alone can supply at prediction time: author experience
+(`author_low_experience`, `author_new_to_area`, from privacy-preserving author
+hashes and the strictly earlier observation stream), file ownership
+(`touched_files_many_authors`), recent rework history
+(`touches_recently_reworked_file`, from persisted `rework` events that landed
+before the change), high-entropy diffusion (`change_entropy_high`), and
+off-hours timing (`authored_off_hours`, judged in the timestamp's own offset).
+The enrichment-side facts abstain for the first 90 days of a cohort, without an
+author hash, or without a rework scan, so absence means "not observed". Exact-path predicates
 abstain when the file manifest is truncated; time-window predicates abstain
 after timestamp disorder; ownership identities are counted transiently but
 never stored. The outcome-blind audit now also reports which usual partner was
@@ -1155,12 +1165,15 @@ ruleloom packs list
 ruleloom packs list --json
 ```
 
-The schema-v5 default `generic_changes@3` reads change shape, well-known path
+The schema-v5 default `generic_changes@4` reads change shape, well-known path
 roles, ordinal size/diffusion and cumulative thresholds, bounded point-in-time
-history, owner-area counts, generated-artifact hints, and an optional reviewed
-`pack_config` of instantiated path and missing-partner predicates; it does not
-parse programming-language syntax. `generic_changes@2` (schema v4) and
-`generic_changes@1` remain available for old experiment reproducibility.
+history, owner-area counts, generated-artifact hints, author experience and
+file ownership, recent rework history, off-hours timing, and an optional
+reviewed `pack_config` of instantiated path and missing-partner predicates; it
+does not parse programming-language syntax. `generic_changes@3` (the same
+vocabulary without the experience, ownership, rework-history, entropy and
+timing facts), `generic_changes@2` (schema v4) and `generic_changes@1` remain
+available for old experiment reproducibility.
 `configured_paths@1` adds a frozen, repository-specific component vocabulary
 while remaining language-neutral:
 
@@ -1174,7 +1187,7 @@ ruleloom init . \
   --path-exclude 'touches_shared_contract=contracts/generated/**'
 ```
 
-For `generic_changes@3`, pass the reviewed proposal instead of individual flags:
+For `generic_changes@4` (or `@3`), pass the reviewed proposal instead of individual flags:
 
 ```bash
 ruleloom init . \

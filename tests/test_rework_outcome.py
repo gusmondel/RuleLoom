@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 from importlib.resources import files
 from pathlib import Path
@@ -446,6 +447,18 @@ def test_cli_registers_scans_materializes_and_validates_rework_labels(
 
     observations = load_observations(dataset_path(repo, config))
     by_head = {item.source["head"]: item for item in observations}
+    # generic_changes@4 is the schema-v5 default: materialization records the
+    # privacy-preserving author hash and enrichment reads the persisted rework ledger.
+    assert config.pack_version == 4
+    assert all(
+        re.fullmatch(r"[0-9a-f]{64}", str(item.metadata["historical_author_hash"]))
+        for item in observations
+    )
+    assert all(
+        item.metadata["historical_context"]["version"] == "ruleloom-history-features/3"
+        and item.metadata["historical_context"]["rework_history_status"] == "available"
+        for item in observations
+    )
     assert by_head[shas["added"]].labels[config.target] is LabelValue.POSITIVE
     assert by_head[shas["base"]].labels[config.target] is LabelValue.NEGATIVE
     assert by_head[shas["untouched"]].labels[config.target] is LabelValue.NEGATIVE

@@ -21,6 +21,7 @@ from ruleloom.packs import (
     PartnerPredicateConfig,
     PathPredicateConfig,
     get_pack,
+    latest_pack_version,
 )
 from ruleloom.packs.base import DiffEvidence, FileChange, PackOptions
 from ruleloom.packs.generic_v3 import (
@@ -150,6 +151,61 @@ def test_generated_path_markers_are_bounded_documented_conventions() -> None:
     assert generated_path_marker("src/client.generated.ts") == "infix:.generated."
     assert generated_path_marker("src/generator.py") is None
     assert generated_path_marker("pkg/gen/thing.go") is None
+
+
+def test_generic_v4_adds_the_entropy_ordinal_and_keeps_v3_identity_intact() -> None:
+    v3 = get_pack("generic_changes", 3)
+    v4 = get_pack("generic_changes", 4)
+    even = DiffEvidence(
+        changes=(
+            FileChange("pkg/a.go", 40, 10),
+            FileChange("pkg/b.go", 30, 20),
+            FileChange("web/c.ts", 25, 25),
+        )
+    )
+    skewed = DiffEvidence(
+        changes=(
+            FileChange("pkg/a.go", 400, 100),
+            FileChange("pkg/b.go", 3, 0),
+            FileChange("web/c.ts", 1, 1),
+        )
+    )
+
+    even_v4 = v4.run(even, OPTIONS)
+    even_v3 = v3.run(even, OPTIONS)
+    skewed_v4 = v4.run(skewed, OPTIONS)
+
+    assert "change_entropy_high" in even_v4.facts
+    assert even_v4.provenance["change_entropy_high"].extractor == "ruleloom.generic_changes.git.v4"
+    assert "change_entropy_high" not in skewed_v4.facts
+    assert "change_entropy_high" not in even_v3.facts
+    assert even_v3.facts <= even_v4.facts
+    assert {item.extractor for item in even_v3.provenance.values()} == {
+        "ruleloom.generic_changes.git.v3"
+    }
+    assert set(v3.predicates) < set(v4.predicates)
+    assert {
+        "author_low_experience",
+        "author_new_to_area",
+        "touched_files_many_authors",
+        "touches_recently_reworked_file",
+        "authored_off_hours",
+        "change_entropy_high",
+    } <= set(v4.predicates)
+    aggregate = DiffEvidence(
+        changes=(
+            FileChange("pkg/a.go", 0, 0),
+            FileChange("pkg/b.go", 0, 0),
+            FileChange("web/c.ts", 0, 0),
+        ),
+        aggregate_additions=300,
+        aggregate_deletions=100,
+        aggregate_files_changed=3,
+        statistics_source="event-archive",
+    )
+    # Aggregate statistics carry no per-file churn, so the entropy ordinal abstains.
+    assert "change_entropy_high" not in v4.run(aggregate, OPTIONS).facts
+    assert latest_pack_version("generic_changes") == 4
 
 
 def test_generic_v3_runs_with_an_empty_configuration_and_stable_identity() -> None:
@@ -600,7 +656,7 @@ def test_cli_proposes_initializes_collects_and_declares_the_reviewed_vocabulary(
         == 0
     )
     proposal = json.loads(capsys.readouterr().out)
-    assert proposal["pack"] == {"name": "generic_changes", "version": 3}
+    assert proposal["pack"] == {"name": "generic_changes", "version": 4}
     assert pack_config_file.is_file()
     assert assertions_file.is_file()
     assert (structured_repo / "docs/ruleloom/cochange-evidence.md").is_file()
@@ -634,7 +690,7 @@ def test_cli_proposes_initializes_collects_and_declares_the_reviewed_vocabulary(
     )
     capsys.readouterr()
     config = RuleLoomConfig.load(structured_repo)
-    assert (config.pack, config.pack_version) == ("generic_changes", 3)
+    assert (config.pack, config.pack_version) == ("generic_changes", 4)
     assert config.pack_config is not None
     assert config.pack_config.partner_predicates
     partner = config.pack_config.partner_predicates[0].predicate
@@ -669,6 +725,7 @@ def test_snapshot_collection_records_v3_configuration_provenance(structured_repo
         "Structure",
         repository_id=repository_id,
         schema_version=5,
+        pack_version=3,
         test_start_at="2026-01-01T00:00:00Z",
         pack_config=_pack_config(),
     )
@@ -693,6 +750,32 @@ def test_snapshot_collection_records_v3_configuration_provenance(structured_repo
     assert observation.source["extractor"] == V3_EXTRACTOR
     assert "touches_owner_area_abc" in observation.facts
 
+    latest = default_config(
+        "Structure",
+        repository_id=repository_id,
+        schema_version=5,
+        test_start_at="2026-01-01T00:00:00Z",
+        pack_config=_pack_config(),
+    )
+    assert latest.pack_version == 4
+    assert latest.evidence_protocol_hash != config.evidence_protocol_hash
+    v4_observation = collect_snapshot(
+        structured_repo,
+        base,
+        head,
+        protocol_hash=latest.evidence_protocol_hash,
+        target=latest.target,
+        pack=latest.pack,
+        pack_version=latest.pack_version,
+        pack_config=latest.pack_config,
+        evidence_config=latest.evidence,
+        repository_id=repository_id,
+    )
+    assert v4_observation.source["pack_version"] == 4
+    assert v4_observation.source["extractor"] == "ruleloom.generic_changes.git.v4"
+    assert "touches_owner_area_abc" in v4_observation.facts
+    assert observation.facts <= v4_observation.facts
+
 
 def _validate_config(payload: dict[str, object]) -> None:
     resource = files("ruleloom").joinpath("schemas", "config.schema.json")
@@ -709,7 +792,7 @@ def test_config_schema_v5_binds_generic_v3_pack_configuration() -> None:
     )
     empty = default_config("Structure", schema_version=5, test_start_at="2026-01-01T00:00:00Z")
 
-    assert (configured.pack, configured.pack_version) == ("generic_changes", 3)
+    assert (configured.pack, configured.pack_version) == ("generic_changes", 4)
     assert configured.to_dict()["pack_config"] == _pack_config().to_dict()
     assert empty.to_dict()["pack_config"] == {}
     assert empty.pack_config is not None and empty.pack_config.is_empty

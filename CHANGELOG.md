@@ -59,6 +59,14 @@ always require a new explicit schema, adapter, pack, or experiment version.
   skips such commits for owner-area counting with a warning and
   `history materialize` skips the unit with reason `matcher_budget_exceeded`
   instead of aborting.
+- `generic_changes@4`, the new schema-v5 default: every `generic_changes@3`
+  fact plus `author_low_experience`, `author_new_to_area`,
+  `touched_files_many_authors`, `touches_recently_reworked_file`,
+  `change_entropy_high`, and `authored_off_hours`, all Git-only and computed
+  from strictly earlier evidence with warm-up, missing-author and missing-scan
+  abstentions. `history materialize` records the privacy-preserving
+  `historical_author_hash` for `@4` projects. `generic_changes@3` is unchanged
+  and keeps its hashes.
 - Observation and prediction logs may grow to 256 MiB; the 250,000-record and
   1 MiB-per-line caps are unchanged. An 8,000-commit Grafana cohort produced a
   70 MiB observation log and hit the previous 64 MiB cap only after a full

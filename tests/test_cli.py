@@ -302,7 +302,7 @@ def test_cli_defaults_to_generic_pack_and_lists_versioned_packs(
     config = RuleLoomConfig.load(repo)
     assert config.schema_version == 5
     assert config.signal_probe.enabled is True
-    assert (config.pack, config.pack_version) == ("generic_changes", 3)
+    assert (config.pack, config.pack_version) == ("generic_changes", 4)
     assert config.pack_config is not None and config.pack_config.is_empty
 
     exit_code, stdout, stderr = _run_cli(["packs", "list", "--json"], capsys)
@@ -314,6 +314,7 @@ def test_cli_defaults_to_generic_pack_and_lists_versioned_packs(
         ("generic_changes", 1),
         ("generic_changes", 2),
         ("generic_changes", 3),
+        ("generic_changes", 4),
         ("flutter_testing", 1),
         ("flutter_testing", 2),
     }

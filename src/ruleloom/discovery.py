@@ -45,6 +45,7 @@ from ruleloom.models import (
     content_hash,
     parse_timestamp,
 )
+from ruleloom.packs import latest_pack_version
 from ruleloom.packs.configured_paths import (
     MAX_PREDICATE_LENGTH,
     MAX_PREDICATES,
@@ -203,7 +204,7 @@ class DiscoveryProposal:
             "excluded_after_until": self.excluded_after_until,
             "limits": self.limits.to_dict(),
             "paths_only": self.paths_only,
-            "pack": {"name": "generic_changes", "version": 3},
+            "pack": {"name": "generic_changes", "version": latest_pack_version("generic_changes")},
             "pack_config": self.pack_config.to_dict(),
             "assertion_manifest": (
                 None if self.assertion_manifest is None else self.assertion_manifest.to_dict()

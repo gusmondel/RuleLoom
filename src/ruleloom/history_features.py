@@ -3,19 +3,24 @@
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
 from collections import Counter, deque
-from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timedelta
 from itertools import combinations
 from pathlib import Path
-from typing import cast
+from typing import TYPE_CHECKING, cast
 
 from ruleloom.models import FactEvidence, JsonObject, Observation, parse_timestamp
 from ruleloom.packs.configured_paths import _compile_glob, _CompiledGlob
 
+if TYPE_CHECKING:
+    from ruleloom.history.models import HistoricalEvent
+
 HISTORY_FEATURE_VERSION = "ruleloom-history-features/1"
 HISTORY_FEATURE_VERSION_V3 = "ruleloom-history-features/2"
+HISTORY_FEATURE_VERSION_V4 = "ruleloom-history-features/3"
 HISTORY_FEATURE_PREDICATES = (
     "crosses_codeowners_boundary",
     "missing_usual_cochange_partner",
@@ -29,12 +34,39 @@ HISTORY_FEATURE_PREDICATES_V3 = (
     *OWNER_AREA_PREDICATES,
     GENERATED_ARTIFACT_PREDICATE,
 )
+EXPERIENCE_PREDICATES = (
+    "author_low_experience",
+    "author_new_to_area",
+    "touched_files_many_authors",
+)
+REWORK_HISTORY_PREDICATE = "touches_recently_reworked_file"
+OFF_HOURS_PREDICATE = "authored_off_hours"
+HISTORY_FEATURE_PREDICATES_V4 = (
+    *HISTORY_FEATURE_PREDICATES_V3,
+    *EXPERIENCE_PREDICATES,
+    REWORK_HISTORY_PREDICATE,
+    OFF_HOURS_PREDICATE,
+)
 
 _HOTSPOT_WINDOW = timedelta(days=90)
 _HOTSPOT_MIN_TOUCHES = 3
 _DORMANT_WINDOW = timedelta(days=365)
 _COCHANGE_MIN_SUPPORT = 5
 _COCHANGE_MIN_CONFIDENCE = 0.7
+# generic_changes@4 experience, ownership, rework-history and timing facts.
+# Thresholds follow the cited literature (Mockus and Weiss 2000; Bird et al. 2011;
+# Kim et al. 2007; Eyolfson, Tan and Lam 2011) and were fixed before any outcome
+# was inspected.
+_EXPERIENCE_WINDOW = timedelta(days=365)
+_EXPERIENCE_MIN_CHANGES = 3
+_MANY_AUTHORS_MIN = 3
+_REWORK_HISTORY_WINDOW = timedelta(days=90)
+_V4_WARMUP = timedelta(days=90)
+_MAX_AUTHORS_PER_PATH = 64
+_AREA_DEPTH = 2
+_OFF_HOURS_START = 22
+_OFF_HOURS_END = 6
+_AUTHOR_HASH_RE = re.compile(r"^[0-9a-f]{16,128}$")
 _MAX_PATHS_PER_OBSERVATION = 50
 _MAX_PAIR_UPDATES = 5_000_000
 _MAX_EVIDENCE_REASONS = 12
@@ -61,6 +93,10 @@ class _HistoryState:
     pair_budget_exhausted: bool = False
     latest_instant: datetime | None = None
     time_windows_valid: bool = True
+    first_instant: datetime | None = None
+    author_changes: dict[str, deque[datetime]] = field(default_factory=dict)
+    author_areas: dict[str, dict[str, datetime]] = field(default_factory=dict)
+    path_authors: dict[str, dict[str, datetime]] = field(default_factory=dict)
 
 
 def _new_state() -> _HistoryState:
@@ -87,6 +123,55 @@ def _paths(item: Observation) -> tuple[str, ...] | None:
     ):
         return None
     return tuple(sorted(set(cast(list[str], raw))))
+
+
+def _author(item: Observation) -> str | None:
+    """Return the privacy-preserving author hash recorded for the observation, if any."""
+    for value in (item.metadata.get("historical_author_hash"), item.source.get("author_hash")):
+        if isinstance(value, str) and _AUTHOR_HASH_RE.fullmatch(value):
+            return value
+    return None
+
+
+def _areas(paths: tuple[str, ...]) -> frozenset[str]:
+    """Directory areas of a change: the first ``_AREA_DEPTH`` path components."""
+    areas: set[str] = set()
+    for path in paths:
+        parts = path.split("/")
+        areas.add("/".join(parts[:-1][:_AREA_DEPTH]) if len(parts) > 1 else "")
+    return frozenset(areas)
+
+
+def _local_off_hours(observed_at: str) -> tuple[bool, str] | None:
+    """Judge weekend or late-night authoring from the timestamp's own UTC offset."""
+    try:
+        local = datetime.fromisoformat(observed_at.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    weekend = local.weekday() >= 5
+    late = local.hour >= _OFF_HOURS_START or local.hour < _OFF_HOURS_END
+    detail = f"local_weekday:{local.weekday()};local_hour:{local.hour:02d}"
+    return weekend or late, detail
+
+
+def rework_history_index(
+    events: Sequence[HistoricalEvent],
+) -> dict[str, list[datetime]]:
+    """Map each reworked path to the sorted instants at which a rework landed."""
+    index: dict[str, list[datetime]] = {}
+    for event in events:
+        if event.kind != "rework":
+            continue
+        files = event.data.get("files")
+        if not isinstance(files, list):
+            continue
+        landed = parse_timestamp(event.available_at)
+        for path in files:
+            if isinstance(path, str) and path:
+                index.setdefault(path, []).append(landed)
+    for instants in index.values():
+        instants.sort()
+    return index
 
 
 def _cohort(item: Observation) -> str:
@@ -441,6 +526,10 @@ def _derive(
     item: Observation,
     paths: tuple[str, ...],
     state: _HistoryState,
+    *,
+    pack_version: int = 2,
+    author: str | None = None,
+    rework_index: Mapping[str, Sequence[datetime]] | None = None,
 ) -> tuple[set[str], dict[str, set[str]], JsonObject]:
     instant = parse_timestamp(item.observed_at)
     if state.latest_instant is not None and instant < state.latest_instant:
@@ -483,6 +572,12 @@ def _derive(
                         f"path:{path};missing:{partner};support:{support};confidence:{confidence:.3f}",
                     )
 
+    v4_context: JsonObject = {}
+    if pack_version >= 4:
+        v4_context = _derive_v4(
+            item, paths, state, instant, author=author, rework_index=rework_index, record=record
+        )
+
     context: JsonObject = {
         "version": HISTORY_FEATURE_VERSION,
         "cohort": _cohort(item),
@@ -508,18 +603,122 @@ def _derive(
         ),
         "left_censored": True,
         "outcome_blind": True,
+        **v4_context,
     }
     return set(reasons), reasons, context
+
+
+def _derive_v4(
+    item: Observation,
+    paths: tuple[str, ...],
+    state: _HistoryState,
+    instant: datetime,
+    *,
+    author: str | None,
+    rework_index: Mapping[str, Sequence[datetime]] | None,
+    record: Callable[[str, str], None],
+) -> JsonObject:
+    """Experience, ownership, rework-history and timing facts from earlier evidence only."""
+    warm = (
+        state.time_windows_valid
+        and state.first_instant is not None
+        and instant - state.first_instant >= _V4_WARMUP
+    )
+    if not state.time_windows_valid:
+        experience_status = "abstained_non_monotonic_timestamps"
+    elif not warm:
+        experience_status = "abstained_warmup"
+    elif author is None:
+        experience_status = "abstained_no_author_hash"
+    else:
+        experience_status = "available"
+        window_start = instant - _EXPERIENCE_WINDOW
+        changes = state.author_changes.get(author, deque())
+        while changes and changes[0] < window_start:
+            changes.popleft()
+        prior = sum(1 for moment in changes if moment < instant)
+        if prior < _EXPERIENCE_MIN_CHANGES:
+            record(
+                "author_low_experience",
+                f"author:prior_{_EXPERIENCE_WINDOW.days}d_changes:{prior}<{_EXPERIENCE_MIN_CHANGES}",
+            )
+        areas = _areas(paths)
+        known = state.author_areas.get(author, {})
+        recent_areas = {area for area, moment in known.items() if window_start <= moment < instant}
+        if areas and not (areas & recent_areas):
+            listed = ",".join(sorted(area or "." for area in areas)[:3])
+            record(
+                "author_new_to_area",
+                f"author:no_prior_{_EXPERIENCE_WINDOW.days}d_change_in:{listed}",
+            )
+        for path in paths:
+            authors = state.path_authors.get(path)
+            if not authors:
+                continue
+            distinct = sum(1 for moment in authors.values() if window_start <= moment < instant)
+            if distinct >= _MANY_AUTHORS_MIN:
+                record(
+                    "touched_files_many_authors",
+                    f"path:{path};prior_{_EXPERIENCE_WINDOW.days}d_authors:{distinct}>={_MANY_AUTHORS_MIN}",
+                )
+    if rework_index is None:
+        rework_status = "abstained_no_rework_events"
+    else:
+        rework_status = "available"
+        window_start = instant - _REWORK_HISTORY_WINDOW
+        for path in paths:
+            landed = rework_index.get(path)
+            if not landed:
+                continue
+            position = bisect_left(landed, window_start)
+            if position < len(landed) and landed[position] < instant:
+                record(
+                    REWORK_HISTORY_PREDICATE,
+                    f"path:{path};rework_landed_at:{landed[position].isoformat()}",
+                )
+    judged = _local_off_hours(item.observed_at)
+    if judged is None:
+        timing_status = "abstained_unparseable_timestamp"
+    else:
+        timing_status = "available"
+        off_hours, detail = judged
+        if off_hours:
+            record(OFF_HOURS_PREDICATE, detail)
+    return {
+        "version": HISTORY_FEATURE_VERSION_V4,
+        "experience_window_days": _EXPERIENCE_WINDOW.days,
+        "experience_min_changes": _EXPERIENCE_MIN_CHANGES,
+        "many_authors_min": _MANY_AUTHORS_MIN,
+        "rework_history_window_days": _REWORK_HISTORY_WINDOW.days,
+        "v4_warmup_days": _V4_WARMUP.days,
+        "experience_status": experience_status,
+        "rework_history_status": rework_status,
+        "timing_status": timing_status,
+    }
 
 
 def _update(
     state: _HistoryState,
     instant: datetime,
     paths: tuple[str, ...],
+    author: str | None = None,
 ) -> None:
     state.observations += 1
     if state.latest_instant is not None and instant < state.latest_instant:
         state.time_windows_valid = False
+    if state.first_instant is None:
+        state.first_instant = instant
+    if state.time_windows_valid and author is not None:
+        state.author_changes.setdefault(author, deque()).append(instant)
+        areas = state.author_areas.setdefault(author, {})
+        for area in _areas(paths):
+            areas[area] = instant
+        for path in paths:
+            owners = state.path_authors.setdefault(path, {})
+            owners[author] = instant
+            if len(owners) > _MAX_AUTHORS_PER_PATH:
+                oldest = min(owners, key=lambda key: owners[key])
+                del owners[oldest]
     if state.time_windows_valid:
         state.recent.append((instant, paths))
         state.recent_touches.update(paths)
@@ -557,12 +756,29 @@ def enrich_history_features(
     extractor: str,
     root: Path | None = None,
     pack_version: int = 2,
+    rework_events: Sequence[HistoricalEvent] | None = None,
 ) -> list[Observation]:
-    """Enrich collected generic-v2/v3 observations using strictly earlier snapshots.
+    """Enrich collected generic-v2/v3/v4 observations using strictly earlier snapshots.
 
     ``pack_version`` 3 additionally derives owner-area counts and
-    ``linguist-generated`` artifact facts from the base snapshot.
+    ``linguist-generated`` artifact facts from the base snapshot. ``pack_version``
+    4 adds author experience, ownership, rework-history and timing facts; the
+    rework history comes from ``rework_events`` or, when omitted, from the
+    persisted history ledger under ``root``.
     """
+
+    rework_index: dict[str, list[datetime]] | None = None
+    if pack_version >= 4:
+        if rework_events is None and root is not None:
+            # Imported lazily: the history storage layer depends on the pack registry,
+            # which in turn imports this module for the predicate vocabulary.
+            from ruleloom.history.storage import events_path, load_events
+
+            ledger = events_path(root)
+            if ledger.is_file():
+                rework_events = load_events(ledger)
+        if rework_events is not None:
+            rework_index = rework_history_index(rework_events)
 
     collected_ids = {item.id for item in collected}
     bases = {base for item in collected if isinstance((base := item.source.get("base")), str)}
@@ -590,7 +806,14 @@ def enrich_history_features(
                 }
                 enriched[item.id] = replace(item, metadata=metadata)
             else:
-                facts, reasons, context = _derive(item, paths, state)
+                facts, reasons, context = _derive(
+                    item,
+                    paths,
+                    state,
+                    pack_version=pack_version,
+                    author=_author(item),
+                    rework_index=rework_index,
+                )
                 owner_boundaries, codeowners = _codeowners_boundary(
                     item, paths, codeowners_snapshots
                 )
@@ -601,7 +824,11 @@ def enrich_history_features(
                         "codeowners:multiple_owner_boundaries"
                     }
                 if pack_version >= 3:
-                    context["version"] = HISTORY_FEATURE_VERSION_V3
+                    context["version"] = (
+                        HISTORY_FEATURE_VERSION_V4
+                        if pack_version >= 4
+                        else HISTORY_FEATURE_VERSION_V3
+                    )
                     if owner_boundaries >= 2:
                         facts.add("owner_areas_at_least_2")
                         reasons["owner_areas_at_least_2"] = {
@@ -637,5 +864,5 @@ def enrich_history_features(
                     metadata=metadata,
                 )
         if paths is not None:
-            _update(state, parse_timestamp(item.observed_at), paths)
+            _update(state, parse_timestamp(item.observed_at), paths, _author(item))
     return [enriched[item.id] for item in collected]

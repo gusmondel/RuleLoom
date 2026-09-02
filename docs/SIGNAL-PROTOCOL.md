@@ -128,7 +128,11 @@ stability reruns reuse the same controls without the permutation null.
 ## Language-neutral historical facts
 
 `generic_changes@2` adds deterministic ordinal and point-in-time predicates,
-and `generic_changes@3` (schema v5) extends them with the last five rows:
+and `generic_changes@3` (schema v5) extends them with the last five rows;
+`generic_changes@4` adds six more facts (author experience, file ownership,
+recent rework history, high-entropy diffusion, off-hours timing) computed from
+strictly earlier evidence, each abstaining during warm-up or without its
+source (author hash, rework scan):
 
 | Predicate family | Meaning | Guardrail |
 | --- | --- | --- |

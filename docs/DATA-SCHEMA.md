@@ -367,7 +367,7 @@ per-clause integrity gates cannot be bypassed with `--override`.
 ### Schema-v5 search controls, outcomes, and instantiated vocabulary
 
 Configuration schema v5 keeps every v4 field, adds the Horn search controls to
-`learner`, adds the `outcomes` section, and makes `generic_changes@3` the
+`learner`, adds the `outcomes` section, and makes `generic_changes@4` the
 default configurable pack. This excerpt shows the v5-only fields with the
 defaults written by `ruleloom init`:
 
@@ -789,7 +789,10 @@ bootstrapped ref remain invisible to it.
 policy passes, and a weak negative when `prediction_at + rework_window_days`
 lies at or before the newest persisted `git_rework_scan` horizon, no rework
 vote exists, and the commit is not among the scan's skipped commits. The
-observation records `historical_rework_window`. Rework is a structural
+observation records `historical_rework_window`, and `generic_changes@4`
+projects additionally record `historical_author_hash`, the existing
+`ruleloom.git.author.v1` hash of the commit author (never a name or email),
+which the enrichment uses for the experience and ownership facts. Rework is a structural
 "did not stick" proxy matched by line content, never a defect label.
 
 The materialization report additionally derives the outcome before Git-object
@@ -1286,7 +1289,7 @@ The supported configuration compatibility contract is:
 | v2 | One static pack/version plus complete `evidence` profile | Historical `generic_changes@1` and current `flutter_testing@2` experiments |
 | v3 | v2 fields plus required canonical `pack_config` | Historical configurable-path experiments; static packs accept only `{}` |
 | v4 | v3 fields plus frozen signal-probe and relative learner gates | Historical `generic_changes@2` experiments; also supports `configured_paths@1` |
-| v5 | v4 fields plus Horn 0.6 search controls, `outcomes.git_window_days`, and instantiated `pack_config` families | Default new `generic_changes@3` experiments; also supports `configured_paths@1` |
+| v5 | v4 fields plus Horn 0.6 search controls, `outcomes.git_window_days`, and instantiated `pack_config` families | Default new `generic_changes@4` experiments (`@3` remains selectable); also supports `configured_paths@1` |
 
 Artifact records remain schema v1; configuration schema and artifact schema are
 independent version axes. Configuration schema v1 remains structurally readable

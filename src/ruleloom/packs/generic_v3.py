@@ -22,14 +22,17 @@ from __future__ import annotations
 from pathlib import PurePosixPath
 
 from ruleloom.history_features import HISTORY_FEATURE_PREDICATES_V3
+from ruleloom.models import JsonObject
 from ruleloom.packs.base import (
     DiffEvidence,
+    FileChange,
     PackExtraction,
     PackOptions,
     finalize_extraction,
     is_internal_path,
 )
 from ruleloom.packs.configured_paths import (
+    ConfiguredMatchResult,
     ConfiguredPathsConfig,
     configured_matches,
 )
@@ -108,12 +111,17 @@ def ignores_content(_path: str) -> bool:
     return False
 
 
-def extract_generic_change_facts_v3(
+def generic_v3_reasons(
     evidence: DiffEvidence,
     options: PackOptions,
     config: ConfiguredPathsConfig | None = None,
-) -> PackExtraction:
-    """Extract v2 shape facts, cumulative ordinals, generated hints, and configured concepts."""
+) -> tuple[
+    dict[str, set[str]],
+    ConfiguredMatchResult,
+    ConfiguredPathsConfig,
+    tuple[FileChange, ...],
+]:
+    """Return the exact v3 reasons plus the configured matches and visible changes."""
 
     effective_config = config if config is not None else ConfiguredPathsConfig()
     reasons, shape = generic_change_shape_reasons(evidence, options)
@@ -151,17 +159,32 @@ def extract_generic_change_facts_v3(
             record(predicate, f"path:{path.path}")
     for predicate, reason in matches.partner_evidence.items():
         record(predicate, reason)
+    return reasons, matches, effective_config, visible
 
+
+def configured_metadata(
+    matches: ConfiguredMatchResult, effective_config: ConfiguredPathsConfig
+) -> JsonObject:
+    """Metadata every configurable generic pack version records identically."""
+    return {
+        "configured_paths_config_hash": effective_config.hash,
+        "configured_path_match_counts": dict(matches.counts),
+        "configured_unmatched_files": matches.unmatched,
+        "configured_overlapping_files": matches.overlapping,
+        "configured_match_manifest_hash": matches.manifest_hash,
+        "configured_partner_status": dict(matches.partner_status),
+    }
+
+
+def extract_generic_change_facts_v3(
+    evidence: DiffEvidence,
+    options: PackOptions,
+    config: ConfiguredPathsConfig | None = None,
+) -> PackExtraction:
+    """Extract v2 shape facts, cumulative ordinals, generated hints, and configured concepts."""
+
+    reasons, matches, effective_config, _visible = generic_v3_reasons(evidence, options, config)
     result = finalize_extraction(evidence, reasons, extractor=EXTRACTOR, options=options)
     metadata = dict(result.metadata)
-    metadata.update(
-        {
-            "configured_paths_config_hash": effective_config.hash,
-            "configured_path_match_counts": dict(matches.counts),
-            "configured_unmatched_files": matches.unmatched,
-            "configured_overlapping_files": matches.overlapping,
-            "configured_match_manifest_hash": matches.manifest_hash,
-            "configured_partner_status": dict(matches.partner_status),
-        }
-    )
+    metadata.update(configured_metadata(matches, effective_config))
     return PackExtraction(result.facts, result.provenance, metadata)

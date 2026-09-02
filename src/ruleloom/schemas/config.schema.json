@@ -532,7 +532,7 @@
         "if": {
           "properties": {
             "pack": {"const": "generic_changes"},
-            "pack_version": {"const": 3}
+            "pack_version": {"enum": [3, 4]}
           },
           "required": ["pack", "pack_version"]
         },

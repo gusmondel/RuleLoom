@@ -77,6 +77,16 @@ from ruleloom.packs.generic_v3 import (
     VERSION as GENERIC_V3_VERSION,
 )
 from ruleloom.packs.generic_v3 import extract_generic_change_facts_v3
+from ruleloom.packs.generic_v4 import (
+    EXTRACTOR as GENERIC_V4_EXTRACTOR,
+)
+from ruleloom.packs.generic_v4 import (
+    PREDICATES as GENERIC_V4_PREDICATES,
+)
+from ruleloom.packs.generic_v4 import (
+    VERSION as GENERIC_V4_VERSION,
+)
+from ruleloom.packs.generic_v4 import extract_generic_change_facts_v4
 
 _COMMON_PREDICATES = (
     "large_change",
@@ -132,6 +142,19 @@ _PACKS = {
         predicates=tuple(sorted({*_COMMON_PREDICATES, *GENERIC_V3_PREDICATES})),
         content_path=ignores_content,
         extract=extract_generic_change_facts_v3,
+        configurable=True,
+    ),
+    (GENERIC_NAME, GENERIC_V4_VERSION): EvidencePack(
+        name=GENERIC_NAME,
+        version=GENERIC_V4_VERSION,
+        extractor=GENERIC_V4_EXTRACTOR,
+        description=(
+            "Every generic_changes@3 fact plus author experience, file ownership, "
+            "recent rework history, high-entropy diffusion, and off-hours timing."
+        ),
+        predicates=tuple(sorted({*_COMMON_PREDICATES, *GENERIC_V4_PREDICATES})),
+        content_path=ignores_content,
+        extract=extract_generic_change_facts_v4,
         configurable=True,
     ),
     (FLUTTER_NAME, 1): EvidencePack(
@@ -229,7 +252,11 @@ def get_pack(
         if name == CONFIGURED_PATHS_NAME:
             extract = partial(extract_configured_path_facts, config=pack_config)
         else:
-            extract = partial(extract_generic_change_facts_v3, config=pack_config)
+            configurable_generic = {
+                GENERIC_V3_VERSION: extract_generic_change_facts_v3,
+                GENERIC_V4_VERSION: extract_generic_change_facts_v4,
+            }
+            extract = partial(configurable_generic[selected_version], config=pack_config)
         return replace(
             descriptor,
             predicates=tuple(sorted({*descriptor.predicates, *pack_config.predicates})),

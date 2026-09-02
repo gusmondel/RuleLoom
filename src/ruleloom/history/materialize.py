@@ -142,6 +142,7 @@ def _historical_observation(
     repository_context: SnapshotRepositoryContext,
     git_window: GitWindow | None,
     rework_window: ReworkWindow | None = None,
+    author_hash: str | None = None,
 ) -> Observation:
     if aggregate_statistics is None:
         snapshot = collect_snapshot(
@@ -219,6 +220,10 @@ def _historical_observation(
         "historical_rework_window": (None if rework_window is None else rework_window.to_dict()),
         "history_warnings": cast(JsonValue, warnings),
     }
+    if author_hash is not None:
+        # Privacy-preserving hash only (ruleloom.git.author.v1); generic_changes@4
+        # counts author experience from it without re-reading Git.
+        metadata["historical_author_hash"] = author_hash
     return replace(
         snapshot,
         id=f"history.{unit.id}",
@@ -262,6 +267,17 @@ def _aggregate_diff_statistics(
         raise ModelError("event-archive v2 diff statistics has an unexpected source")
     additions, deletions, files_changed = cast(tuple[int, int, int], values)
     return additions, deletions, files_changed, source
+
+
+def _author_hash(events: tuple[HistoricalEvent, ...]) -> str | None:
+    """Return the author hash of the unit's own Git commit event, if recorded."""
+    for event in events:
+        if event.kind != "git_commit":
+            continue
+        value = event.data.get("author_hash")
+        if isinstance(value, str) and value:
+            return value
+    return None
 
 
 def _skip_reason_code(reason: str) -> str:
@@ -490,6 +506,11 @@ def materialize_history(
                 repository_context=repository_context,
                 git_window=git_window,
                 rework_window=rework_window,
+                author_hash=(
+                    _author_hash(unit_events)
+                    if config.pack == "generic_changes" and config.pack_version >= 4
+                    else None
+                ),
             )
         except MissingPromisorObjectsError:
             # This is a cohort-level environment problem, not unit-level missingness.
